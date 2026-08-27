@@ -54,7 +54,11 @@ fi
 # 1) label-guard: label, начинающийся с '--', -> rc=15 ДО flags/ROLE-LEAK/lock
 #    (защита от evidence/--background при забытом label). argparse скушает '--background'
 #    как флаг сам (rc=2), поэтому проверяем достижимый путь: явный '--'.
-# 2) fail-fast: мёртвый сервер -> rc=20 по пути ROLE-LEAK->ticket->lock->pre-flight.
+# 2) fail-fast: мёртвый сервер -> rc=20 по пути ticket->dirty-tree->lock->pre-flight.
+#    На грязном дереве срабатывает dirty-tree (rc=22) ДО pre-flight — это валидный
+#    отказ (skip), а не регресс теста.
+# 2b) dirty-tree: незакоммиченный файл -> rc=22 (reset --hard + clean -fdq затёр бы
+#    операторскую работу; станок отказывается стартовать, TUI коммитит сначала).
 # 3) ROLE-LEAK: родительский CLAUDE.md выше репо -> rc=24 ДО lock/mkdir (fail-closed,
 #    эквивалент старого rc=25: Runner сам Python, «пропавший python3» больше невозможен).
 LAUNCH="$REPO_ROOT/launch.sh"
@@ -82,10 +86,28 @@ else
   case "$RC" in
     20) OK=$((OK+1)); echo "ok   runner fail-fast (мёртвый сервер -> rc=20)";;
     21) echo "skip runner fail-fast (идёт прогон станка — lock занят)";;
+    22) echo "skip runner fail-fast (грязное дерево — dirty-tree rc=22 до pre-flight)";;
     *)  FAIL=$((FAIL+1)); echo "FAIL runner fail-fast: ожидали rc=20, получили rc=$RC";;
   esac
 fi
 rm -rf "$REPO_ROOT/evidence/$DR" "/tmp/stanok-logs/$DR" "$TMPT"
+
+# 2b) dirty-tree: незакоммиченный файл в репо -> rc=22 (fail-closed до pre-flight)
+DIRTY="$REPO_ROOT/.doctor-dirty-marker"
+printf 'marker\n' > "$DIRTY"
+TMPT3="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT3"
+if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 \
+     "$LAUNCH" run "$TMPT3" doctor-dirty-$$ >/dev/null 2>&1; then
+  FAIL=$((FAIL+1)); echo "FAIL runner dirty-tree: грязное дерево должно дать rc=22, а прогон прошёл"
+else
+  RC=$?
+  if [ "$RC" -eq 22 ]; then
+    OK=$((OK+1)); echo "ok   runner dirty-tree (незакоммиченный файл -> rc=22)"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL runner dirty-tree: ожидали rc=22, получили rc=$RC"
+  fi
+fi
+rm -rf "$DIRTY" "$REPO_ROOT/evidence/doctor-dirty-$$" "/tmp/stanok-logs/doctor-dirty-$$" "$TMPT3"
 
 # 3) ROLE-LEAK: CLAUDE.md выше репо -> rc=24 (fail-closed, без побочных эффектов)
 TMPROOT="$(mktemp -d /tmp/doctor-roleleak-XXXXXX)"

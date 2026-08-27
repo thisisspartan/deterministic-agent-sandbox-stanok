@@ -39,6 +39,27 @@ rc=15 (label-guard без `run`) и rc=13 (список путей); юнит `_
 Верификация волны 5: `py_compile`, `bash -n`, `doctor` 13 ok / 0 fail, smoke из /tmp
 (rc=13 + CWD-проверка). Коммит: sub (см. git log), darkcast синхронизирован.
 
+### 2.2 Волна 6: dirty-tree гейт (станок отказывается затирать незакоммиченное)
+
+Оператор запустил станок в `~/darkcast/stanok` без коммита — `git reset --hard` +
+`git clean -fdq` в `reset_repo()` стёрли незакоммиченные `docs/utils.md` и
+`tests/utils.test.js`. Факт подтверждён по `smoke-010.launch.log` (`--- reset репо до
+чистого состояния ---` в `cwd=/home/hermes/darkcast/stanok`) и git status.
+
+Фикс — fail-closed гейт `dirty_tree_gate()` в `cmd_dispatch_run`:
+
+1. Проверяется ДО `reset_repo()` и ДО ветки `--background` → покрывает и родителя,
+   и детaч-ребёнка; несуществующего тикета (`rc=13`) не рожает мёртвый детaч.
+2. `git status --porcelain` непустой → отказ с полным списком незакоммиченного
+   (до 20 строк) и rc=22. Не-git репо не блокируем (это ловит rc=12).
+3. Exit-код 22 свободен (заняты 12, 13, 14, 15, 20, 21, 24).
+4. Смысл для TUI: перед запуском закоммитить (`git -C stanok add -A &&
+   git -C stanok commit --no-verify -m "..."`) — только потом запускать станок.
+
+Верификация волны 6: `py_compile` OK; smoke с грязным деревом → `bg rc=22 (expect 22)`
+и `non-bg rc=22 (expect 22)`; на чистом дереве гейт возвращает False. См. rc-таблицу
+в `launch.sh` (22=dirty-tree) и `CLAUDE.supervisor.md` §2.
+
 ## 3. Эмпирическая модель авто-фоновки Bash-вызова (Claude Code 2.1.88)
 
 **Правило (подтверждено тестами):** Bash-вызов фонуется, когда команда НЕ умещается

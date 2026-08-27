@@ -71,9 +71,10 @@ src/ tests/ docs/             — рабочие каталоги станка (
 ## Как это устроено (коротко)
 
 1. `launch.sh run` (shim → Runner) проходит гейты fail-closed: ROLE-LEAK
-   (rc=24), lock (rc=21), pre-flight `/props` сервера (rc=20). Затем сбрасывает
-   репо в чистое состояние (`git reset --hard` + `git clean -fdq`) и гоняет
-   doctor-инварианты.
+   (rc=24), lock (rc=21), dirty-tree (rc=22, незакоммиченные изменения — старт
+   запрещён), pre-flight `/props` сервера (rc=20). Только на чистом дереве
+   сбрасывает репо в чистое состояние (`git reset --hard` + `git clean -fdq`)
+   и гоняет doctor-инварианты.
 2. Runner открывает Claude-сессию (cwd = репо) на ДЕФОЛТНОМ транспорте SDK
    (без `_internal`): sandbox-настройки из `.claude/settings.stanok.json`,
    только Read/Write/Edit/Grep/Glob/Agent, Bash запрещён, хуки на каждом

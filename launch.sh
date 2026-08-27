@@ -15,7 +15,8 @@
 #
 # Локальные ретраи и --no-cloud — по умолчанию самого Runner
 # (STANOK_LOCAL_RETRIES=1, облако подавлено). Возвраты: 0=PASS, 1=FAIL, 15=label-guard,
-# 20=preflight, 21=lock, 24=ROLE-LEAK.
+# 20=preflight, 21=lock, 22=dirty-tree (незакоммиченные изменения — сначала закоммить),
+# 24=ROLE-LEAK.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 # Детерминированный cwd = корень проекта (родитель stanok/): путь тикета и

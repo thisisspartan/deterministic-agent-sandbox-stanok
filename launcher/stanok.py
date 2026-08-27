@@ -236,6 +236,34 @@ def reset_repo() -> int:
     return 0
 
 
+def dirty_tree_gate() -> bool:
+    """True = в репо есть незакоммиченные изменения -> старт запрещён (rc=22).
+
+    reset_repo() делает `git reset --hard` + `git clean -fdq`: при грязном дереве
+    это затёрло бы чужую/операторскую работу. Гейт fail-closed, проверяется ДО reset
+    и ДО ветки --background (покрывает и родителя, и детaч-ребёнка). Не-git репо не
+    блокируем — это ловит гейт rc=12, а сам reset упадёт rc=14.
+    """
+    try:
+        out = subprocess.run(["git", "status", "--porcelain"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+    except OSError:
+        return False
+    if out.returncode != 0:
+        return False
+    dirty = [ln for ln in out.stdout.splitlines() if ln.strip()]
+    if not dirty:
+        return False
+    log("ERROR: репо НЕ в чистом состоянии — станок отказывается стартовать (rc=22)")
+    log(f"  git reset --hard + git clean -fdq затёр бы незакоммиченные изменения в {REPO_ROOT}")
+    log("  Закоммить (или stash) изменения, затем повтори запуск. Незакоммиченное:")
+    for ln in dirty[:20]:
+        log(f"    {ln}")
+    if len(dirty) > 20:
+        log(f"    ... и ещё {len(dirty) - 20} изменений")
+    return True
+
+
 def doctor_gate(expect_no_cloud: bool) -> None:
     env = dict(os.environ)
     if expect_no_cloud:
@@ -1296,6 +1324,11 @@ def cmd_dispatch_run(args) -> int:
         print(f"ERROR: ticket not found: {ticket_path}", file=sys.stderr, flush=True)
         print("  пробовал: " + "  ->  ".join(ticket_tried), file=sys.stderr, flush=True)
         return 13
+
+    # dirty-tree гейт (fail-closed): reset --hard + clean -fdq затёр бы
+    # незакоммиченные изменения — не стартуем, пусть TUI закоммитит сначала.
+    if dirty_tree_gate():
+        return 22
 
     # --background: ре-исполниться демоном (внешний детач), мгновенный возврат
     if args.background and not args.detached:
