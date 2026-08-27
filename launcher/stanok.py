@@ -1250,6 +1250,32 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _resolve_ticket(arg: str) -> "tuple[str, list[str]]":
+    """Нормализация пути тикета.
+
+    Пробуем по порядку (возвращаем первый существующий файл + весь список попыток):
+      1. REPO_ROOT/arg            — канонический вызов станка изнутри (--direct).
+      2. project_root/arg         — родитель stanok/ (канонический вызов супервайзера
+                                    `launch.sh tickets/x.md` из корня проекта; заодно
+                                    чинит удвоение stanok/stanok/tickets/... из TUI,
+                                    где cwd часто = корень проекта).
+      3. arg как есть             — абсолютный или cwd-relative.
+
+    Если ни один не существует — возвращаем (arg, tried): вызывающий сам печатает
+    диагностику со списком попыток.
+    """
+    project_root = os.path.dirname(REPO_ROOT)
+    tried = [
+        os.path.join(REPO_ROOT, arg),
+        os.path.join(project_root, arg),
+        arg,
+    ]
+    for p in tried:
+        if os.path.isfile(p):
+            return p, tried
+    return tried[-1], tried
+
+
 def cmd_dispatch_run(args) -> int:
     # label-guard: label не может начинаться с '--' (забыт позиционный аргумент)
     if args.label.startswith("--"):
@@ -1259,11 +1285,10 @@ def cmd_dispatch_run(args) -> int:
               file=sys.stderr, flush=True)
         return 15
 
-    # нормализация пути тикета: сначала относительно репо, затем как передан
-    if os.path.isfile(os.path.join(REPO_ROOT, args.ticket)):
-        ticket_path = os.path.join(REPO_ROOT, args.ticket)
-    else:
-        ticket_path = args.ticket
+    # нормализация пути тикета: REPO_ROOT (--direct), затем корень ПРОЕКТА
+    # (родитель stanok/ — канонический вызов `launch.sh tickets/x.md` из корня),
+    # затем как передан (абсолютный или cwd-relative).
+    ticket_path, ticket_tried = _resolve_ticket(args.ticket)
 
     # --background: ре-исполниться демоном (внешний детач), мгновенный возврат
     if args.background and not args.detached:
@@ -1297,6 +1322,7 @@ def cmd_dispatch_run(args) -> int:
         return 12
     if not os.path.isfile(ticket_path):
         print(f"ERROR: ticket not found: {ticket_path}", file=sys.stderr, flush=True)
+        print("  пробовал: " + "  ->  ".join(ticket_tried), file=sys.stderr, flush=True)
         return 13
 
     # lock: ОДИН прогон на репо
@@ -1333,8 +1359,13 @@ def cmd_dispatch_run(args) -> int:
 
 
 def main() -> int:
+    # implicit `run`: `stanok <ticket> <label>` == `stanok run <ticket> <label>`
+    # (восстанавливает старый протокол launch.sh; run/status/stop/watch явные)
+    argv = sys.argv[1:]
+    if argv and argv[0] not in ("run", "status", "stop", "watch"):
+        argv = ["run"] + argv
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     return args.func(args)
 
 
