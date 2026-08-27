@@ -1290,12 +1290,19 @@ def cmd_dispatch_run(args) -> int:
     # затем как передан (абсолютный или cwd-relative).
     ticket_path, ticket_tried = _resolve_ticket(args.ticket)
 
+    # fail-fast: тикет обязан существовать ДО ветки --background (иначе фоновый
+    # детaч родится с мёртвым путём и тихо умрёт в rc=13 в launch.log).
+    if not os.path.isfile(ticket_path):
+        print(f"ERROR: ticket not found: {ticket_path}", file=sys.stderr, flush=True)
+        print("  пробовал: " + "  ->  ".join(ticket_tried), file=sys.stderr, flush=True)
+        return 13
+
     # --background: ре-исполниться демоном (внешний детач), мгновенный возврат
     if args.background and not args.detached:
         log_dir = os.path.join(LOG_DIR, args.label)
         os.makedirs(log_dir, exist_ok=True)
         launch_log = os.path.join(LOG_DIR, f"{args.label}.launch.log")
-        cmd = [sys.executable, __file__, "run", ticket_path, args.label]
+        cmd = [sys.executable, os.path.abspath(__file__), "run", ticket_path, args.label]
         if args.direct:
             cmd.append("--direct")
         if args.no_cloud:

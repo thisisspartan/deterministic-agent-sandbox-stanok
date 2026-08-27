@@ -18,6 +18,10 @@
 # 20=preflight, 21=lock, 24=ROLE-LEAK.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
+# Детерминированный cwd = корень проекта (родитель stanok/): путь тикета и
+# фоновый детaч ресолвятся одинаково из любого места вызова (исправляет класс
+# багов «запустили не из корня» — exit 127/13 из TUI).
+cd "$DIR/.."
 PY="${STANOK_PY:-$DIR/.venv/bin/python}"
 if [ ! -x "$PY" ]; then
     echo "ERROR: python не найден: $PY" >&2

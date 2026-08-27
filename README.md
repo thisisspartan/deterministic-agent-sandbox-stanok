@@ -30,6 +30,8 @@ DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # ожидается: 12 ok, 0 fa
 # `run` необязателен: `./launch.sh <ticket.md> <label> [--background|--direct]` эквивалентно.
 # Тикет резолвится по трём базам (корень проекта -> корень станка -> как передан),
 # поэтому канонический вызов из корня проекта: `./stanok/launch.sh tickets/x.md <label>`.
+# Shim сам cd'ит в корень проекта: вызов работает из любого cwd; --background с
+# несуществующим тикетом падает сразу (rc=13), а не рожает мёртвый детaч.
 ./launch.sh status <label>      # JSON: running/done/interrupted/missing
 ./launch.sh stop <label>        # прервать прогон (TERM по pid из .running)
 ./launch.sh watch <label>       # живой просмотр events.jsonl + stdout
