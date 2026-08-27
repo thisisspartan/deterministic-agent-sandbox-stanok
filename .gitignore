@@ -1,0 +1,8 @@
+# артефакты прогонов станка (git clean -fdq их НЕ трогает — они вне git)
+evidence/
+.stanok-locks/
+.stanok-logs/
+*.log
+# окружение и python
+.venv/
+__pycache__/

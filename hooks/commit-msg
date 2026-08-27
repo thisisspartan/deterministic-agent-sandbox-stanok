@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# commit-msg: TASK-ID гейт (git-нативный, аналог grok commit-msg).
+# Отклоняет коммит без TASK-STANOK-CC-NNN в сообщении.
+# Модель НЕ коммитит (git-write запрещён); коммитит только root через stanok_commit.sh.
+#
+# KNOWN ISSUE (2026-08-24, решение оператора отложено):
+# symlink .git/hooks/commit-msg — self-loop:
+#   .git/hooks/commit-msg -> ../hooks/commit-msg
+# Относительно .git/hooks/ путь ../hooks/ = .git/hooks/, т.е. ссылка указывает
+# на саму себя; git не может её прочитать ("Too many levels of symbolic links"),
+# хук НИКОГДА не срабатывает. TASK-ID гейт фактически ОТКЛЮЧЁН: коммиты без
+# TASK-STANOK-CC-NNN проходят. Вероятно, целевой путь должен быть
+# ../../hooks/commit-msg (корень репо). Не чинить до решения оператора;
+# до него не полагаться на этот гейт.
+MSG_FILE="$1"
+if ! grep -Eq 'TASK-STANOK-CC-[0-9]+' "$MSG_FILE"; then
+  echo "COMMIT REJECTED: commit message must contain TASK-STANOK-CC-NNN" >&2
+  exit 1
+fi
+exit 0
