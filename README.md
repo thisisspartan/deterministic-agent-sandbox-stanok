@@ -20,14 +20,16 @@
 
 ```bash
 ./setup.sh                                   # .venv + claude-agent-sdk
-DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # ожидается: 10 ok, 0 fail
+DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # ожидается: 12 ok, 0 fail
 ```
 
 ## Запуск
 
 ```bash
-./launch.sh <ticket.md> <label> [--background|--direct]
+./launch.sh run <ticket.md> <label> [--background|--direct]
 ./launch.sh status <label>      # JSON: running/done/interrupted/missing
+./launch.sh stop <label>        # прервать прогон (TERM по pid из .running)
+./launch.sh watch <label>       # живой просмотр events.jsonl + stdout
 ```
 
 - `--background` — детач в фон (наблюдение: `tail -f /tmp/stanok-logs/<label>.launch.log`)
@@ -36,9 +38,9 @@ DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # ожидается: 10 ok, 0 fa
 ## Структура
 
 ```
-launcher/stanok-sdk-probe.py  — оркестратор (Claude Agent SDK, C1-C5)
-launch.sh                     — обёртка: pre-flight /props, reset, live-рендер
-live.py                       — живой форматтер probe-событий
+launcher/stanok.py            — ЕДИНЫЙ Runner (CLI run/status/stop/watch,
+                                гейты, Job/Attempt, typed summary.json)
+launch.sh                     — тонкий shim: exec venv-python launcher/stanok.py
 hooks/                        — детерминированные гейты (path-guard,
                                 test-lock, malware-scan, verifier, …)
 .claude/agents/               — роли coder/reviewer/tester
@@ -56,20 +58,24 @@ src/ tests/ docs/             — рабочие каталоги станка (
 | `STANOK_MODEL`       | `Qwen3.8-27B-MTP`            | локальная модель          |
 | `STANOK_PROXY`       | `http://192.168.8.131:8118`  | прокси для веб-тулинга    |
 | `STANOK_CLAUDE_BIN`  | `claude` (из PATH)           | бинарь claude-code        |
-| `STANOK_PY`          | `<repo>/.venv/bin/python`    | python для лаунчера       |
-| `STANOK_LAUNCHER`    | `<repo>/launcher/…py`        | путь к оркестратору       |
-| `STANOK_EVIDENCE`    | `<repo>/evidence`            | live-артефакты            |
+| `STANOK_PY`          | `<repo>/.venv/bin/python`    | python для Runner         |
+| `STANOK_REPO`        | `<repo>/stanok`              | корень станка (перекрытие)|
+| `STANOK_EVIDENCE`    | live-дир (`/tmp/stanok-logs`) | флаги malware-scan        |
 | `STANOK_CLOUD_CREDS` | `~/.cloud-creds`             | секрет облачного reviewer |
 
 ## Как это устроено (коротко)
 
-1. `launch.sh` сбрасывает репо в чистое состояние (`git reset --hard` +
-   `git clean -fdq`), проверяет `/props` сервера и запускает оркестратор.
-2. Оркестратор открывает Claude-сессию (cwd = репо) с sandbox-настройками
-   из `.claude/settings.stanok.json`: только Read/Write/Edit/Grep/Glob/Agent,
-   Bash запрещён, хуки на каждом Write/Edit.
+1. `launch.sh run` (shim → Runner) проходит гейты fail-closed: ROLE-LEAK
+   (rc=24), lock (rc=21), pre-flight `/props` сервера (rc=20). Затем сбрасывает
+   репо в чистое состояние (`git reset --hard` + `git clean -fdq`) и гоняет
+   doctor-инварианты.
+2. Runner открывает Claude-сессию (cwd = репо) на ДЕФОЛТНОМ транспорте SDK
+   (без `_internal`): sandbox-настройки из `.claude/settings.stanok.json`,
+   только Read/Write/Edit/Grep/Glob/Agent, Bash запрещён, хуки на каждом
+   Write/Edit. can_use_tool: SAFE-авто-allow, CRITICAL → Telegram (DecisionProvider).
 3. Модель (coder) пишет тест → реализацию → документацию, спавнит
    sub-агентов `tester`/`reviewer`. После каждого Write/Edit хуки сканируют
-   код (malware-scan) и проверяют «код ↔ тест» (verifier).
-4. Финал: `VERIFIER: PASS/FAIL`, `REVIEW-VERDICT: CLEAN/DEFECT`, rc лаунчера —
-   всё в `evidence/<label>/summary.json`.
+   код (malware-scan) и проверяют «код ↔ тест» (verifier). Job/Attempt:
+   попытка → verify → локальные ретраи (STANOK_LOCAL_RETRIES=1) → cloud FAIL-only.
+4. Финал: `VERIFIER: PASS/FAIL`, `PROBE-RESULT: …`, rc Runner — typed
+   `evidence/<label>/summary.json` (без regex-парсинга stdout).

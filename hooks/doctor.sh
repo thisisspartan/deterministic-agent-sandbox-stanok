@@ -48,26 +48,26 @@ else
   echo "skip cloud-silence (DOCTOR_EXPECT_NO_CLOUD unset — облако легитимно разрешено)"
 fi
 
-# --- Инварианты launch.sh (регресс-защита; фидбек «старших братьев» 2026-08-27) ---
-# 1) label-guard: launch.sh <ticket> --background (забыт label) -> rc=15. Guard стоит
-#    ДО flags/ROLE-LEAK/lock, так что проверка побочных эффектов не даёт.
-# 2) fail-fast: мёртвый сервер -> rc=20 по пути нормализация->ROLE-LEAK->lock->pre-flight.
-#    STANOK_PY=системный python3, чтобы проверка работала и без развёрнутого .venv
-#    (до pre-flight $PY используется только на проверку -x).
-# 3) fail-closed python3: ROLE-LEAK без set -e молча отключается при пропавшем python3
-#    ($(python3 ...) даёт пустую LEAK). PATH=/nonexistent имитирует отсутствие python3;
-#    ожидаем rc=25. Выход ДО lock/mkdir — побочных эффектов нет.
+# --- Инварианты Runner (launcher/stanok.py; регресс-защита, фидбек «старших братьев») ---
+# Все проверки идут через STANOK_PY=системный python3: SDK/telegram импортируются
+# лениво, гейты — чистый stdlib, поэтому инварианты работают и без развёрнутого .venv.
+# 1) label-guard: label, начинающийся с '--', -> rc=15 ДО flags/ROLE-LEAK/lock
+#    (защита от evidence/--background при забытом label). argparse скушает '--background'
+#    как флаг сам (rc=2), поэтому проверяем достижимый путь: явный '--'.
+# 2) fail-fast: мёртвый сервер -> rc=20 по пути ROLE-LEAK->ticket->lock->pre-flight.
+# 3) ROLE-LEAK: родительский CLAUDE.md выше репо -> rc=24 ДО lock/mkdir (fail-closed,
+#    эквивалент старого rc=25: Runner сам Python, «пропавший python3» больше невозможен).
 LAUNCH="$REPO_ROOT/launch.sh"
 
-# 1) label-guard
-if "$LAUNCH" x.md --background >/dev/null 2>&1; then
-  FAIL=$((FAIL+1)); echo "FAIL launch.sh label-guard: 'launch.sh x.md --background' не упал, ожидали rc=15"
+# 1) label-guard (rc=15)
+if STANOK_PY="$(command -v python3)" "$LAUNCH" run x.md -- --background >/dev/null 2>&1; then
+  FAIL=$((FAIL+1)); echo "FAIL runner label-guard: label '--background' не отклонён, ожидали rc=15"
 else
   RC=$?
   if [ "$RC" -eq 15 ]; then
-    OK=$((OK+1)); echo "ok   launch.sh label-guard (--background как label -> rc=15)"
+    OK=$((OK+1)); echo "ok   runner label-guard ('--label' как evidence-label -> rc=15)"
   else
-    FAIL=$((FAIL+1)); echo "FAIL launch.sh label-guard: ожидали rc=15, получили rc=$RC"
+    FAIL=$((FAIL+1)); echo "FAIL runner label-guard: ожидали rc=15, получили rc=$RC"
   fi
 fi
 
@@ -75,30 +75,35 @@ fi
 TMPT="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT"
 DR="doctor-dead-$$-${RANDOM}"
 if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 \
-     "$LAUNCH" "$TMPT" "$DR" >/dev/null 2>&1; then
-  FAIL=$((FAIL+1)); echo "FAIL launch.sh fail-fast: мёртвый сервер должен дать rc=20, а прогон прошёл"
+     "$LAUNCH" run "$TMPT" "$DR" >/dev/null 2>&1; then
+  FAIL=$((FAIL+1)); echo "FAIL runner fail-fast: мёртвый сервер должен дать rc=20, а прогон прошёл"
 else
   RC=$?
   case "$RC" in
-    20) OK=$((OK+1)); echo "ok   launch.sh fail-fast (мёртвый сервер -> rc=20)";;
-    21) echo "skip launch.sh fail-fast (идёт прогон станка — lock занят)";;
-    *)  FAIL=$((FAIL+1)); echo "FAIL launch.sh fail-fast: ожидали rc=20, получили rc=$RC";;
+    20) OK=$((OK+1)); echo "ok   runner fail-fast (мёртвый сервер -> rc=20)";;
+    21) echo "skip runner fail-fast (идёт прогон станка — lock занят)";;
+    *)  FAIL=$((FAIL+1)); echo "FAIL runner fail-fast: ожидали rc=20, получили rc=$RC";;
   esac
 fi
 rm -rf "$REPO_ROOT/evidence/$DR" "/tmp/stanok-logs/$DR" "$TMPT"
 
-# 3) fail-closed: отсутствие python3 -> rc=25 (имитация: PATH без python3).
-#    bash зовём по абсолютному пути: `VAR=x bash` уже ищет bash в новом PATH.
-if PATH=/nonexistent "$(command -v bash)" "$LAUNCH" x.md doctor-rolepath-$$ >/dev/null 2>&1; then
-  FAIL=$((FAIL+1)); echo "FAIL launch.sh fail-closed python3: ожидали rc=25, а прогон прошёл"
+# 3) ROLE-LEAK: CLAUDE.md выше репо -> rc=24 (fail-closed, без побочных эффектов)
+TMPROOT="$(mktemp -d /tmp/doctor-roleleak-XXXXXX)"
+mkdir -p "$TMPROOT/repo"
+touch "$TMPROOT/CLAUDE.md"                       # «родительский» CLAUDE.md = утечка роли
+TMPT2="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT2"
+if STANOK_PY="$(command -v python3)" STANOK_REPO="$TMPROOT/repo" \
+     "$LAUNCH" run "$TMPT2" doctor-roleleak-$$ >/dev/null 2>&1; then
+  FAIL=$((FAIL+1)); echo "FAIL runner role-leak: родительский CLAUDE.md должен дать rc=24, а прогон прошёл"
 else
   RC=$?
-  if [ "$RC" -eq 25 ]; then
-    OK=$((OK+1)); echo "ok   launch.sh fail-closed (python3 недоступен -> rc=25)"
+  if [ "$RC" -eq 24 ]; then
+    OK=$((OK+1)); echo "ok   runner role-leak (родительский CLAUDE.md -> rc=24, до побочных эффектов)"
   else
-    FAIL=$((FAIL+1)); echo "FAIL launch.sh fail-closed python3: ожидали rc=25, получили rc=$RC"
+    FAIL=$((FAIL+1)); echo "FAIL runner role-leak: ожидали rc=24, получили rc=$RC"
   fi
 fi
+rm -rf "$TMPROOT" "$TMPT2"
 
 echo "--- doctor: $OK ok, $FAIL fail ---"
 [ "$FAIL" -eq 0 ]
