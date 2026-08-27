@@ -1,0 +1,5 @@
+# Зависимости лаунчера станка (Stanok 2.0)
+# claude-agent-sdk — Claude Agent SDK (запуск claude-code через API).
+# python-telegram-bot — опциональный Telegram-гейт (C4); tolerant к отсутствию кредов.
+claude-agent-sdk==0.2.139
+python-telegram-bot==22.8

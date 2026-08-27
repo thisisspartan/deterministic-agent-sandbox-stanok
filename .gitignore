@@ -3,3 +3,6 @@ evidence/
 .stanok-locks/
 .stanok-logs/
 *.log
+# окружение и python
+.venv/
+__pycache__/

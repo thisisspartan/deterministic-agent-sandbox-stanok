@@ -28,6 +28,15 @@
 #                                                  (running/done/interrupted/missing + elapsed +
 #                                                  последние события stdout). Не берёт lock —
 #                                                  работает и во время идущего прогона.
+#   ./launch.sh stop <label>                     — прервать идущий прогон (TERM по pid из
+#                                                  .running): лаунчер убивается, summary НЕ
+#                                                  создаётся; status после -> interrupted либо
+#                                                  done rc!=0. Тот же принцип, что status: без
+#                                                  lock/ROLE-LEAK.
+#
+# Локальные ретраи: лаунчер запускается с --local-retries ${STANOK_LOCAL_RETRIES:-1} —
+# при FAIL модель получает в том же прогоне контекст упавшего теста и чинит точечно;
+# только если не помогло — эскалация на уровень супервайзера. Облако НЕ зовётся (--no-cloud).
 #
 # Путь тикета нормализуется автоматически: сначала ищем относительно REPO, затем
 # как передан (запуск из корня проекта: stanok/tickets/TASK-...md).
@@ -46,84 +55,23 @@ C_GRAY=$'\033[90m'
 C_BOLD=$'\033[1m'
 C_RESET=$'\033[0m'
 
-TICKET_ARG="${1:?usage: launch.sh <ticket.md> <evidence-label> [--background|--direct]}"
-LABEL="${2:?usage: launch.sh <ticket.md> <evidence-label> [--background|--direct]}"
-
 # --- репо = директория этого скрипта (скелет переносимый) ---
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$DIR"
 
-# --- флаги режима (допустимы в любой позиции argv) ---
-#   --background — детач в фон (через --core).
-#   --direct     — headless напрямую, без супервайзор-обёртки: путь тикета
-#                  относительно репо + жёсткая проверка ролевой изоляции.
-BACKGROUND=0
-CORE=0
-DIRECT=0
-for _a in "$@"; do
-    [[ "$_a" == "--background" ]] && BACKGROUND=1
-    [[ "$_a" == "--core" ]] && CORE=1
-    [[ "$_a" == "--direct" ]] && DIRECT=1
-done
-
-# --- нормализация пути тикета: сначала относительно репо (--direct/изнутри),
-#     затем как передан (запуск из корня проекта: stanok/tickets/...). ---
-if [[ -f "$REPO/$TICKET_ARG" ]]; then
-    TICKET="$REPO/$TICKET_ARG"
-else
-    TICKET="$TICKET_ARG"
-fi
-
-# --- Ролевая изоляция станка: выше репо не должно быть CLAUDE.md. ---
-# Claude Code автозагружает CLAUDE.md из cwd И родительских каталогов. Если выше
-# репо лежит CLAUDE.md с ролью «супервайзер L1», станок получает конфликт ролей
-# и ведёт себя как супервайзор (darkcast: сессии ed9a2c06, 9f469cb9). Роль
-# контроль-рума задаётся ЯВНО (--append-system-prompt-file), а не файлом
-# с волшебным именем CLAUDE.md. Проверка — инвариант в обоих режимах.
-LEAK="$(python3 - "$REPO" <<'PYEOF'
-import os, sys
-root = os.path.abspath(sys.argv[1])
-d = os.path.dirname(root)
-while d != os.path.dirname(d):
-    if os.path.isfile(os.path.join(d, 'CLAUDE.md')):
-        print(os.path.join(d, 'CLAUDE.md'))
-        break
-    d = os.path.dirname(d)
-PYEOF
-)"
-if [[ -n "$LEAK" ]]; then
-    echo "${C_RED}${C_BOLD}ROLE-LEAK: найден родительский CLAUDE.md: $LEAK${C_RESET}" >&2
-    echo "${C_RED}  Claude Code автозагрузит его в станок -> станок подумает, что он супервайзор.${C_RESET}" >&2
-    echo "${C_RED}  Переименуй/удали файл (роль контроль-рума задаётся через --append-system-prompt-file).${C_RESET}" >&2
-    exit 24
-fi
-
-# --- внешние инструменты (вне репо, переопределяются env) ---
-PY="${STANOK_PY:-/home/hermes/stanok-cc/.venv/bin/python}"
-LAUNCHER="${STANOK_LAUNCHER:-/home/hermes/stanok-evidence/new-arch/stanok-sdk-probe.py}"
-SERVER_URL="${STANOK_SERVER_URL:-http://192.168.8.131:8080}"
-# Две evidence-зоны (fix A + A+; расследование — в корне проекта, зона супервайзера):
-#  - EVIDENCE (в репо): только финальные артефакты, которые читает L1 —
-#    summary.json и launcher.stdout.log (thinking модели там нет).
-#  - LIVE_DIR (вне репо): всё, что пишется ЖИВО во время прогона —
-#    probe-*.jsonl (содержит живой thinking модели!), probe-*.control.log,
-#    симлинк evidence.jsonl, malware-scan/. Если они лежат в репо, модель
-#    находит их через Glob и читает свой же транскрипт (self-reference loop).
-EVIDENCE="$REPO/evidence/$LABEL"
-LOG_DIR="${STANOK_LOG_DIR:-/tmp/stanok-logs}"
-LIVE_DIR="$LOG_DIR/$LABEL"
-LOG_LINK="$LIVE_DIR/evidence.jsonl"
-STDOUT_LOG="$EVIDENCE/launcher.stdout.log"
-LAUNCH_LOG="$LOG_DIR/$LABEL.launch.log"
-LIVE="$DIR/live.py"
-
 # ------------------------------------------------------------------------------
-# Подкоманда status: компактный статус прогона для супервайзора (вариант A).
+# Подкоманда status: компактный статус прогона для супервайзера.
 #   ./launch.sh status <label>
+# Dispatch — в САМОМ начале (до TICKET_ARG/LABEL/flags/нормализации/ROLE-LEAK),
+# чтобы поллинг был дешёвым: никакого spawn python3 для ROLE-LEAK и обхода
+# родительских каталогов при каждом вызове.
 # Возвращает ОДНУ строку JSON: state = running|done|interrupted|missing,
 # last_events (хвост launcher.stdout.log) + summary при done. Работает и во время
 # прогона (НЕ берёт lock), чтобы поллинг не блокировался и не инжектил весь лог
-# в контекст TUI. Обход всех последующих проверок — только статус.
+# в контекст TUI.
+# Статус — read-only stdlib-parse (json/os/sys/time), поэтому используем системный
+# python3 (${STANOK_PY:-python3}), а НЕ venv: поллинг должен работать, даже если
+# .venv ещё не развёрнут (setup.sh). ROLE-LEAK и так зависит от системного python3.
 # ------------------------------------------------------------------------------
 if [[ "${1:-}" == "status" ]]; then
     STATUS_LABEL="${2:?usage: launch.sh status <label>}"
@@ -131,7 +79,7 @@ if [[ "${1:-}" == "status" ]]; then
     S_STDOUT="$S_EVIDENCE/launcher.stdout.log"
     S_MARKER="$S_EVIDENCE/.running"
     S_SUMMARY="$S_EVIDENCE/summary.json"
-    "$PY" - "$S_EVIDENCE" "$S_STDOUT" "$S_MARKER" "$S_SUMMARY" "$STATUS_LABEL" <<'PYEOF'
+    "${STANOK_PY:-python3}" - "$S_EVIDENCE" "$S_STDOUT" "$S_MARKER" "$S_SUMMARY" "$STATUS_LABEL" <<'PYEOF'
 import json, os, sys, time
 evidence, stdout_log, marker, summary_path, label = sys.argv[1:6]
 out = {"label": label}
@@ -168,6 +116,120 @@ print(json.dumps(out, ensure_ascii=False))
 PYEOF
     exit 0
 fi
+
+# ------------------------------------------------------------------------------
+# Подкоманда stop: прервать запущенный прогон (TERM по pid из .running).
+#   ./launch.sh stop <label>
+# Тот же принцип, что status: в самом начале, без lock/ROLE-LEAK. TERM на процесс
+# запуска (pid в .running) триггерит его trap cleanup EXIT INT TERM: лаунчер
+# убивается, .running и SNAPSHOT чистятся. После stop status покажет interrupted
+# (нет summary.json) либо done с rc!=0 — тикет НЕ помечается выполненным.
+# ------------------------------------------------------------------------------
+if [[ "${1:-}" == "stop" ]]; then
+    STOP_LABEL="${2:?usage: launch.sh stop <label>}"
+    S_MARKER="$REPO/evidence/$STOP_LABEL/.running"
+    if [[ ! -f "$S_MARKER" ]]; then
+        echo "STOP: прогон '$STOP_LABEL' не запущен (.running нет)" >&2
+        exit 1
+    fi
+    read -r _start_s stop_pid < "$S_MARKER" || stop_pid=""
+    if [[ -z "${stop_pid:-}" ]]; then
+        echo "STOP: .running повреждён (нет pid) у '$STOP_LABEL'" >&2
+        exit 1
+    fi
+    if kill -TERM "$stop_pid" 2>/dev/null; then
+        echo "STOP: TERM отправлен pid $stop_pid ($STOP_LABEL) — прогон прерывается"
+        echo "      после остановки: ./launch.sh status $STOP_LABEL -> interrupted или done rc!=0"
+    else
+        echo "STOP: процесс $stop_pid уже не запущен — убираю stale .running" >&2
+        rm -f "$S_MARKER"
+    fi
+    exit 0
+fi
+
+TICKET_ARG="${1:?usage: launch.sh <ticket.md> <evidence-label> [--background|--direct]}"
+LABEL="${2:?usage: launch.sh <ticket.md> <evidence-label> [--background|--direct]}"
+
+# --- защита от типичной ошибки: launch.sh <ticket> --background (забыт label). ---
+# LABEL подхватил бы флаг -> evidence/--background. Ловим явно.
+if [[ "$LABEL" == --* ]]; then
+    echo "${C_RED}${C_BOLD}ERROR: label не может начинаться с '--' — забыт позиционный аргумент <evidence-label>?${C_RESET}" >&2
+    echo "${C_RED}  usage: launch.sh <ticket.md> <evidence-label> [--background|--direct]${C_RESET}" >&2
+    exit 15
+fi
+
+# --- флаги режима (допустимы в любой позиции argv) ---
+#   --background — детач в фон (через --core).
+#   --direct     — headless напрямую, без супервайзор-обёртки: путь тикета
+#                  относительно репо + жёсткая проверка ролевой изоляции.
+BACKGROUND=0
+CORE=0
+DIRECT=0
+for _a in "$@"; do
+    [[ "$_a" == "--background" ]] && BACKGROUND=1
+    [[ "$_a" == "--core" ]] && CORE=1
+    [[ "$_a" == "--direct" ]] && DIRECT=1
+done
+
+# --- нормализация пути тикета: сначала относительно репо (--direct/изнутри),
+#     затем как передан (запуск из корня проекта: stanok/tickets/...). ---
+if [[ -f "$REPO/$TICKET_ARG" ]]; then
+    TICKET="$REPO/$TICKET_ARG"
+else
+    TICKET="$TICKET_ARG"
+fi
+
+# --- fail-closed: python3 обязателен для ROLE-LEAK (иначе проверка молча отключается). ---
+# Нет set -e: провал $(python3 ...) даёт ПУСТУЮ LEAK и [[ -n "$LEAK" ]] ложно — скрипт
+# продолжает с отключённым ROLE-LEAK (fail-open), что хуже падения. Явная проверка —
+# отказ (стандарт fail-closed, как test-lock / malware-scan).
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "${C_RED}${C_BOLD}ERROR: python3 не найден — ROLE-LEAK проверка невозможна, отказ (fail-closed)${C_RESET}" >&2
+    exit 25
+fi
+
+# --- Ролевая изоляция станка: выше репо не должно быть CLAUDE.md. ---
+# Claude Code автозагружает CLAUDE.md из cwd И родительских каталогов. Если выше
+# репо лежит CLAUDE.md с ролью «супервайзер L1», станок получает конфликт ролей
+# и ведёт себя как супервайзор (darkcast: сессии ed9a2c06, 9f469cb9). Роль
+# контроль-рума задаётся ЯВНО (--append-system-prompt-file), а не файлом
+# с волшебным именем CLAUDE.md. Проверка — инвариант в обоих режимах.
+LEAK="$(python3 - "$REPO" <<'PYEOF'
+import os, sys
+root = os.path.abspath(sys.argv[1])
+d = os.path.dirname(root)
+while d != os.path.dirname(d):
+    if os.path.isfile(os.path.join(d, 'CLAUDE.md')):
+        print(os.path.join(d, 'CLAUDE.md'))
+        break
+    d = os.path.dirname(d)
+PYEOF
+)"
+if [[ -n "$LEAK" ]]; then
+    echo "${C_RED}${C_BOLD}ROLE-LEAK: найден родительский CLAUDE.md: $LEAK${C_RESET}" >&2
+    echo "${C_RED}  Claude Code автозагрузит его в станок -> станок подумает, что он супервайзор.${C_RESET}" >&2
+    echo "${C_RED}  Переименуй/удали файл (роль контроль-рума задаётся через --append-system-prompt-file).${C_RESET}" >&2
+    exit 24
+fi
+
+# --- внешние инструменты (self-contained: дефолты внутри репо, переопределяются env) ---
+PY="${STANOK_PY:-$REPO/.venv/bin/python}"
+LAUNCHER="${STANOK_LAUNCHER:-$REPO/launcher/stanok-sdk-probe.py}"
+SERVER_URL="${STANOK_SERVER_URL:-http://192.168.8.131:8080}"
+# Две evidence-зоны (fix A + A+; расследование — в корне проекта, зона супервайзера):
+#  - EVIDENCE (в репо): только финальные артефакты, которые читает L1 —
+#    summary.json и launcher.stdout.log (thinking модели там нет).
+#  - LIVE_DIR (вне репо): всё, что пишется ЖИВО во время прогона —
+#    probe-*.jsonl (содержит живой thinking модели!), probe-*.control.log,
+#    симлинк evidence.jsonl, malware-scan/. Если они лежат в репо, модель
+#    находит их через Glob и читает свой же транскрипт (self-reference loop).
+EVIDENCE="$REPO/evidence/$LABEL"
+LOG_DIR="${STANOK_LOG_DIR:-/tmp/stanok-logs}"
+LIVE_DIR="$LOG_DIR/$LABEL"
+LOG_LINK="$LIVE_DIR/evidence.jsonl"
+STDOUT_LOG="$EVIDENCE/launcher.stdout.log"
+LAUNCH_LOG="$LOG_DIR/$LABEL.launch.log"
+LIVE="$DIR/live.py"
 
 # --- нативный транскрипт bundled claude (источник реальной активности) ---
 REPO_SLUG="$(printf '%s' "$REPO" | sed 's#^/##; s#/#-#g')"
@@ -338,6 +400,10 @@ stanok_run() {
         | sort > "$SNAPSHOT"
 
     # Запуск stanok-sdk-probe.py в фоне
+    # локальные ретраи main (STANOK_LOCAL_RETRIES, default 1): при FAIL модель получает
+    # в том же прогоне контекст упавшего теста и чинит точечно; только если не помогло —
+    # эскалация на уровень супервайзера (полный рестарт тикета с новым label).
+    # Облако НЕ зовётся никогда (--no-cloud, инвариант).
     env \
         PYTHONUNBUFFERED=1 \
         STANOK_REPO="$REPO" \
@@ -345,7 +411,7 @@ stanok_run() {
         "$PY" -u "$LAUNCHER" \
         "$(cat "$TICKET")" \
         --no-cloud \
-        --local-retries 0 > "$STDOUT_LOG" 2>&1 &
+        --local-retries "${STANOK_LOCAL_RETRIES:-1}" > "$STDOUT_LOG" 2>&1 &
     LAUNCH_PID=$!
 
     cleanup() {

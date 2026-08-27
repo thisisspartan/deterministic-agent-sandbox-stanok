@@ -48,5 +48,57 @@ else
   echo "skip cloud-silence (DOCTOR_EXPECT_NO_CLOUD unset — облако легитимно разрешено)"
 fi
 
+# --- Инварианты launch.sh (регресс-защита; фидбек «старших братьев» 2026-08-27) ---
+# 1) label-guard: launch.sh <ticket> --background (забыт label) -> rc=15. Guard стоит
+#    ДО flags/ROLE-LEAK/lock, так что проверка побочных эффектов не даёт.
+# 2) fail-fast: мёртвый сервер -> rc=20 по пути нормализация->ROLE-LEAK->lock->pre-flight.
+#    STANOK_PY=системный python3, чтобы проверка работала и без развёрнутого .venv
+#    (до pre-flight $PY используется только на проверку -x).
+# 3) fail-closed python3: ROLE-LEAK без set -e молча отключается при пропавшем python3
+#    ($(python3 ...) даёт пустую LEAK). PATH=/nonexistent имитирует отсутствие python3;
+#    ожидаем rc=25. Выход ДО lock/mkdir — побочных эффектов нет.
+LAUNCH="$REPO_ROOT/launch.sh"
+
+# 1) label-guard
+if "$LAUNCH" x.md --background >/dev/null 2>&1; then
+  FAIL=$((FAIL+1)); echo "FAIL launch.sh label-guard: 'launch.sh x.md --background' не упал, ожидали rc=15"
+else
+  RC=$?
+  if [ "$RC" -eq 15 ]; then
+    OK=$((OK+1)); echo "ok   launch.sh label-guard (--background как label -> rc=15)"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL launch.sh label-guard: ожидали rc=15, получили rc=$RC"
+  fi
+fi
+
+# 2) fail-fast на мёртвом сервере (rc=20)
+TMPT="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT"
+DR="doctor-dead-$$-${RANDOM}"
+if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 \
+     "$LAUNCH" "$TMPT" "$DR" >/dev/null 2>&1; then
+  FAIL=$((FAIL+1)); echo "FAIL launch.sh fail-fast: мёртвый сервер должен дать rc=20, а прогон прошёл"
+else
+  RC=$?
+  case "$RC" in
+    20) OK=$((OK+1)); echo "ok   launch.sh fail-fast (мёртвый сервер -> rc=20)";;
+    21) echo "skip launch.sh fail-fast (идёт прогон станка — lock занят)";;
+    *)  FAIL=$((FAIL+1)); echo "FAIL launch.sh fail-fast: ожидали rc=20, получили rc=$RC";;
+  esac
+fi
+rm -rf "$REPO_ROOT/evidence/$DR" "/tmp/stanok-logs/$DR" "$TMPT"
+
+# 3) fail-closed: отсутствие python3 -> rc=25 (имитация: PATH без python3).
+#    bash зовём по абсолютному пути: `VAR=x bash` уже ищет bash в новом PATH.
+if PATH=/nonexistent "$(command -v bash)" "$LAUNCH" x.md doctor-rolepath-$$ >/dev/null 2>&1; then
+  FAIL=$((FAIL+1)); echo "FAIL launch.sh fail-closed python3: ожидали rc=25, а прогон прошёл"
+else
+  RC=$?
+  if [ "$RC" -eq 25 ]; then
+    OK=$((OK+1)); echo "ok   launch.sh fail-closed (python3 недоступен -> rc=25)"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL launch.sh fail-closed python3: ожидали rc=25, получили rc=$RC"
+  fi
+fi
+
 echo "--- doctor: $OK ok, $FAIL fail ---"
 [ "$FAIL" -eq 0 ]
