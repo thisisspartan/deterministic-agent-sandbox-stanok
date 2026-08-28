@@ -47,7 +47,7 @@ import traceback
 import urllib.request
 import uuid
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from urllib.parse import urlparse
 
 # claude_agent_sdk / telegram импортируются ЛЕНИВО (внутри функций, которым нужны):
@@ -515,18 +515,43 @@ def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
     # Общий бюджет: per-test timeout=60s, но если 8 тестов по 60s — 480s суммарно.
     # STANOK_VERIFY_BUDGET_S (default 300s) — общий лимит на все тесты.
     budget_s = int(os.environ.get("STANOK_VERIFY_BUDGET_S", "300"))
-    start = time.time()
     failures: list[tuple[str, str]] = []
-    with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
-        futures = {ex.submit(_run_one_test, t, tests_dir): t for t in tests}
-        for fut in as_completed(futures):
-            if time.time() - start > budget_s:
-                remaining = [os.path.relpath(futures[f], tests_dir) for f in futures if not f.done()]
-                failures.extend((t, f"budget {budget_s}s exceeded, test не запущен") for t in remaining)
-                break
+    budget_hit = False
+    ex = ThreadPoolExecutor(max_workers=min(8, len(tests)))
+    futures = {ex.submit(_run_one_test, t, tests_dir): t for t in tests}
+    try:
+        for fut in as_completed(futures, timeout=budget_s):
             result = fut.result()
             if result is not None:
                 failures.append(result)
+    except FuturesTimeoutError:
+        # Бюджет — дедлайн: отменяем ещё не начатые, честно классифицируем
+        # уже запущенные (cancel не убивает работающий процесс — это
+        # subprocess в node, убьёт его только per-test timeout=60s).
+        budget_hit = True
+        for f in futures:
+            f.cancel()
+    finally:
+        # wait=False: не ждём запущенные node-процессы при budget-hit —
+        # иначе shutdown(wait=True) вернёт нас к поведению «до фикса».
+        ex.shutdown(wait=not budget_hit, cancel_futures=budget_hit)
+    if budget_hit:
+        for f in futures:
+            t = futures[f]
+            rel = os.path.relpath(t, tests_dir)
+            if f.cancelled():
+                failures.append((rel, f"budget {budget_s}s exceeded, test не запущен"))
+            elif not f.done():
+                failures.append((rel, f"budget {budget_s}s exceeded, test не завершён"))
+            else:
+                # Запущен и завершился, но результат не прочитан (as_completed
+                # оборвался по таймауту) — читаем честно, не теряем реальный FAIL.
+                try:
+                    result = f.result()
+                    if result is not None:
+                        failures.append(result)
+                except Exception as e:  # noqa: BLE001 — результат future уже готов
+                    failures.append((rel, f"budget {budget_s}s exceeded, чтение результата: {e}"))
     failures.sort(key=lambda x: x[0])
     return (len(failures) == 0, failures)
 
