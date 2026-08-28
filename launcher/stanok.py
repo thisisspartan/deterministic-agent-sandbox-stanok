@@ -42,9 +42,11 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 # claude_agent_sdk / telegram импортируются ЛЕНИВО (внутри функций, которым нужны):
@@ -87,6 +89,23 @@ ALLOW_WORDS = {"allow", "да", "yes", "разрешить", "approve", "ok"}
 DENY_WORDS = {"deny", "нет", "no", "запретить", "block"}
 
 ALLOWED_WRITE_PREFIXES = ("src/", "tests/", "docs/")
+
+# label — компонент пути (evidence/<label>, /tmp/stanok-logs/<label>, .lock-файлы).
+# Без этого валидатора "../../x" проходил бы единственную старую проверку
+# (label.startswith("--")) и мог вывести evidence/.running/summary.json за пределы
+# evidence-дерева. Разрешён только безопасный алфавит; ".." отдельно запрещён явно,
+# т.к. сам по себе матчится классом [A-Za-z0-9_.-]+.
+_LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def validate_label(label: str) -> str | None:
+    """None, если label безопасен для использования как компонент пути; иначе текст ошибки."""
+    if not _LABEL_RE.match(label):
+        return (f"label {label!r} содержит недопустимые символы "
+                f"(разрешены только [A-Za-z0-9_.-])")
+    if ".." in label or label in (".", ""):
+        return f"label {label!r} недопустим (path traversal)"
+    return None
 
 # --- Текущие пути прогона (устанавливаются в run_job) -----------------------------
 _stdout_log_f = None   # открытый launcher.stdout.log (в репо evidence/<label>)
@@ -176,25 +195,16 @@ def role_leak_check() -> None:
     """Ролевая изоляция: выше репо НЕ должно быть CLAUDE.md (иначе станок
     автозагрузит роль супервайзера). rc=24. Должен идти ДО lock/mkdir."""
     d = os.path.dirname(REPO_ROOT)
-    while d != os.path.dirname(d):
+    while True:
         if os.path.isfile(os.path.join(d, "CLAUDE.md")):
             log(f"ROLE-LEAK: найден родительский CLAUDE.md: {os.path.join(d, 'CLAUDE.md')}")
             log("  Claude Code автозагрузит его в станок -> станок подумает, что он супервайзер.")
             log("  Переименуй/удали файл (роль контроль-рума задаётся через --append-system-prompt-file).")
             sys.exit(24)
-        d = os.path.dirname(d)
-
-
-def acquire_lock() -> None:
-    """flock: ОДИН прогон на репо. rc=21, если lock занят."""
-    lock_file = f"/tmp/stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock"
-    fd = open(lock_file, "w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        log(f"LOCK: уже идёт прогон для репо {REPO_ROOT} (lock {lock_file}) — отказ в запуске.")
-        sys.exit(21)
-    # держим fd открытым весь прогон (flock освобождается при exit)
+        parent = os.path.dirname(d)
+        if parent == d:  # дошли до '/' и уже проверили его выше — стоп
+            break
+        d = parent
 
 
 def preflight_server() -> dict:
@@ -221,10 +231,16 @@ def preflight_server() -> dict:
 def reset_repo() -> int:
     """git reset --hard + clean, mkdir src/tests/docs. rc=14 при провале."""
     try:
-        subprocess.run(["git", "reset", "--hard", "HEAD"],
-                       cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "clean", "-fdq"],
-                       cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        r1 = subprocess.run(["git", "reset", "--hard", "HEAD"],
+                            cwd=REPO_ROOT, capture_output=True, text=True)
+        if r1.returncode != 0:
+            log(f"ERROR: git reset --hard завершился с rc={r1.returncode}: {r1.stderr.strip()}")
+            return 14
+        r2 = subprocess.run(["git", "clean", "-fdq"],
+                            cwd=REPO_ROOT, capture_output=True, text=True)
+        if r2.returncode != 0:
+            log(f"ERROR: git clean -fdq завершился с rc={r2.returncode}: {r2.stderr.strip()}")
+            return 14
     except OSError as e:
         log(f"ERROR: reset репо failed: {e}")
         return 14
@@ -448,28 +464,42 @@ def make_permission_policy(bot, chat_id):
 # ==================================================================================
 # Верификатор (механический гейт, внешний раннер)
 # ==================================================================================
+def _run_one_test(t: str, tests_dir: str) -> tuple[str, str] | None:
+    """Запускает один *.test.js. None = PASS, иначе (относительный путь, причина)."""
+    rel = os.path.relpath(t, tests_dir)
+    try:
+        p = subprocess.run(["node", t], cwd=REPO_ROOT, capture_output=True,
+                           text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return (rel, "timeout 60s")
+    if p.returncode != 0:
+        out = (p.stdout or "") + "\n" + (p.stderr or "")
+        first = next((ln.strip() for ln in out.splitlines()
+                      if re.search(r"fail|expected|assert|error|not ok", ln, re.I)),
+                     "unknown failure")
+        return (rel, first)
+    return None
+
+
 def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
-    tests = sorted(glob.glob(os.path.join(REPO_ROOT, "tests", "*.test.js")))
+    tests_dir = os.path.join(REPO_ROOT, "tests")
+    # "**" + recursive=True: раньше "tests/*.test.js" не видел вложенные
+    # tests/<dir>/*.test.js, хотя ALLOWED_WRITE_PREFIXES разрешает писать именно туда —
+    # рассогласование давало молчаливый пропуск теста и ложный PREMATURE-STOP.
+    tests = sorted(glob.glob(os.path.join(tests_dir, "**", "*.test.js"), recursive=True))
     # headless-STOP: пустой tests/ = «ни один деливерабл не создан» (vacuous-PASS исключён).
     if not tests:
         return (False, [("(нет тестов)",
                          "PREMATURE-STOP / NO-DELIVERABLES: после прогона в tests/ нет ни "
                          "одного *.test.js — задача не выполнена; это FAIL (rc!=0), а не пауза")])
+    # Тесты независимы (отдельный node-процесс на файл) -> безопасно параллелить;
+    # порядок вывода failures не важен для потребителей (format_failures/дедуп по паре).
     failures: list[tuple[str, str]] = []
-    for t in tests:
-        base = os.path.basename(t)
-        try:
-            p = subprocess.run(["node", os.path.join("tests", base)],
-                               cwd=REPO_ROOT, capture_output=True, text=True, timeout=60)
-        except subprocess.TimeoutExpired:
-            failures.append((base, "timeout 60s"))
-            continue
-        if p.returncode != 0:
-            out = (p.stdout or "") + "\n" + (p.stderr or "")
-            first = next((ln.strip() for ln in out.splitlines()
-                          if re.search(r"fail|expected|assert|error|not ok", ln, re.I)),
-                         "unknown failure")
-            failures.append((base, first))
+    with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
+        for result in ex.map(lambda t: _run_one_test(t, tests_dir), tests):
+            if result is not None:
+                failures.append(result)
+    failures.sort(key=lambda x: x[0])
     return (len(failures) == 0, failures)
 
 
@@ -628,9 +658,11 @@ def cloud_review(task_prompt: str, state_desc: str,
     rc = None
     try:
         with open(outfile, "w") as out:
+            # НЕ start_new_session: подпроцесс должен остаться в process group Runner'а
+            # (см. os.setpgid(0, 0) в cmd_run_real), иначе cmd_stop()'s os.killpg(pid, ...)
+            # его не достаёт и claude -p продолжает жить до 1800s после stop/SIGTERM.
             p = subprocess.Popen(cmd, env=_cloud_env(token), stdout=out,
-                                 stderr=subprocess.STDOUT, start_new_session=True,
-                                 cwd=REPO_ROOT)
+                                 stderr=subprocess.STDOUT, cwd=REPO_ROOT)
             try:
                 rc = p.wait(timeout=1800)
             except subprocess.TimeoutExpired:
@@ -639,6 +671,7 @@ def cloud_review(task_prompt: str, state_desc: str,
                 log(f"CLOUD-REVIEWER: TIMEOUT 1800s -> kill, rc={rc}")
     except Exception as e:  # noqa: BLE001
         log(f"CLOUD-REVIEWER: EXCEPTION при спавне: {type(e).__name__}: {e}")
+        log(traceback.format_exc())
         return ("ERROR", "", outfile)
 
     verdict, model = _parse_cloud_review(outfile)
@@ -652,28 +685,40 @@ def cloud_review(task_prompt: str, state_desc: str,
 
 
 def _parse_cloud_review(outfile: str) -> tuple[str, str]:
+    """--output-format stream-json = NDJSON, одна строка = один JSON-объект; последняя
+    строка — result-сообщение с финальным текстом ответа (см. Claude Code CLI reference).
+    Модель берём из любой строки со структурным полем "model"; вердикт — ТОЛЬКО из
+    финального текста result-сообщения (а не по всему файлу: system-prompt содержит
+    буквальные шаблоны "REVIEW-VERDICT: CLEAN/DEFECT", и если модель их процитирует в
+    рассуждениях до итогового ответа, whole-text regex мог словить ложное совпадение)."""
+    model = ""
+    result_text = ""
     try:
         with open(outfile, encoding="utf-8") as f:
-            text = f.read()
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                m = d.get("model") or (d.get("message") or {}).get("model")
+                if isinstance(m, str) and m:
+                    model = m
+                if d.get("type") == "result":
+                    r = d.get("result")
+                    if isinstance(r, str) and r:
+                        result_text = r
     except OSError:
         return ("ERROR", "")
-    model = ""
-    m = re.search(r'resolvedModel["\']?\s*[:=]\s*["\']([^"\']+)', text)
-    if m:
-        model = m.group(1)
-    if not model:
-        m = re.search(r'"?subagentModel"?\s*:\s*"([^"]+)"', text)
-        if m:
-            model = m.group(1)
-    if not model:
-        m = re.search(r'"model"\s*:\s*"([^"]+)"', text)
-        if m:
-            model = m.group(1)
     if not model:
         model = CLOUD_MODEL
-    if re.search(r"REVIEW-VERDICT\s*:\s*DEFECT", text, re.I):
+    if re.search(r"REVIEW-VERDICT\s*:\s*DEFECT", result_text, re.I):
         return ("DEFECT", model)
-    if re.search(r"REVIEW-VERDICT\s*:\s*CLEAN", text, re.I):
+    if re.search(r"REVIEW-VERDICT\s*:\s*CLEAN", result_text, re.I):
         return ("CLEAN", model)
     return ("ERROR", model)
 
@@ -845,6 +890,7 @@ async def run_main_session(prompt: str, session_id: str, stream_out: str,
         except Exception as e:  # noqa: BLE001
             exc = e
             log(f"  [main] !!! EXCEPTION: {type(e).__name__}: {e}")
+            log(traceback.format_exc())
     log(f"  [main] время: {time.time()-t0:.1f}s | типы: {dict(msg_types)}")
     return (str(exc) if exc else "", result or "")
 
@@ -920,13 +966,14 @@ def _security_final(job: Job) -> int | None:
 
 def _finish(job: Job, probe_result: str, rc: int, c5: str | None) -> int:
     job.probe_result = probe_result
-    job.rc = rc
     job.c5 = c5
     job.finished_at = time.time()
     job.state = "done"
     sec = _security_final(job)
+    final_rc = sec if sec is not None else rc
+    job.rc = final_rc  # summary.json обязан отражать РЕАЛЬНЫЙ (пост-security) rc
     if sec is not None:
-        return sec
+        return final_rc
     log(f"PROBE-RESULT: {probe_result} rc={rc} cloud_calls={job.cloud_calls}")
     emit("job.end", {"state": "done", "rc": rc, "probe_result": probe_result,
                      "cloud_calls": job.cloud_calls})
@@ -973,7 +1020,9 @@ async def job_loop(job: Job, args, can_use_tool) -> int:
         return 1
 
     vfail = last.vfail if last else []
-    verdict, model, outfile = cloud_review(prompt, state_desc, [] if (last and last.verify_ok) else vfail)
+    emit("cloud.start", {"state": state_desc})
+    verdict, model, outfile = await asyncio.to_thread(
+        cloud_review, prompt, state_desc, [] if (last and last.verify_ok) else vfail)
     job.cloud_calls = 1
     job.review_verdict = verdict
     log(f"C5: cloud-вердикт={verdict} resolvedModel={model} evidence={outfile}")
@@ -982,8 +1031,10 @@ async def job_loop(job: Job, args, can_use_tool) -> int:
     # 4. результат cloud
     if verdict == "DEFECT":
         for _ in range(args.post_defect_retries):
+            cur = job.last()  # свежая попытка на каждой итерации, а не снэпшот до цикла
+            cur_vfail = cur.vfail if (cur and not cur.verify_ok) else []
             extra = (f"Независимый cloud-ревьюер нашёл дефект (см. cloud-review jsonl): "
-                     f"{format_failures(vfail) if not (last and last.verify_ok) else 'проверь src/tests свежим взглядом'}. "
+                     f"{format_failures(cur_vfail) if cur_vfail else 'проверь src/tests свежим взглядом'}. "
                      f"Исправь САМУ ПРИЧИНУ. Тест после лока правит только tester.")
             a = await _run_attempt(job, prompt, can_use_tool, local_extra_prompt=extra,
                                    pocock_inject=args.pocock_inject)
@@ -1045,6 +1096,18 @@ def _install_signal_handlers() -> None:
 # ==================================================================================
 def cmd_run_real(args) -> int:
     """Полный прогон: гейты -> reset -> доктор -> job_loop. Собирает can_use_tool."""
+    # pid == pgid для ВСЕГО прогона: --background уже даёт это (родитель звал
+    # Popen(..., start_new_session=True)), но foreground-вызов (`stanok run ...` без
+    # --background) — нет, и тогда cmd_stop()'s os.killpg(pid, ...) бьёт по чужой группе
+    # (риск задеть посторонние процессы в той же группе) вместо прогона. Делаем гарантию
+    # универсальной; если ОС отказала — не валим прогон, просто предупреждаем, что stop
+    # для него будет менее надёжен.
+    try:
+        if os.getpgid(0) != os.getpid():
+            os.setpgid(0, 0)
+    except OSError as e:
+        log(f"WARN: не удалось стать лидером своей process group: {e} "
+            f"— 'stop' для этого прогона может не накрыть дочерние процессы")
     global _stdout_log_f, _events_path, _marker_path, _live_dir, _evidence_dir
     label = args.label
     _evidence_dir, _live_dir = label_paths(label)
@@ -1100,6 +1163,7 @@ def cmd_run_real(args) -> int:
     except Exception as e:  # noqa: BLE001
         job.errors.append(str(e))
         log(f"!!! СЕССИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ: {e}")
+        log(traceback.format_exc())
         rc = 1
 
     elapsed_s = int(time.time()) - start_ts
@@ -1194,48 +1258,64 @@ def cmd_stop(label: str) -> int:
     return 0
 
 
+def _print_watch_event(line: str) -> None:
+    try:
+        d = json.loads(line)
+    except json.JSONDecodeError:
+        print(line[:160], flush=True)
+        return
+    et = d.get("type", "")
+    data = d.get("data", {})
+    if et in ("job.start", "job.end"):
+        print(f"\n=== {et}: {json.dumps(data, ensure_ascii=False)} ===", flush=True)
+    elif et == "attempt.start":
+        print(f"\n--- attempt {data.get('attempt','')[:8]} start ---", flush=True)
+    elif et == "attempt.end":
+        print(f"--- attempt {data.get('attempt','')[:8]} end: {data.get('state')} ---", flush=True)
+    elif et == "attempt.verifier":
+        print(f"verifier: {'PASS' if data.get('ok') else 'FAIL'} "
+              f"({len(data.get('failures', []))} failed)", flush=True)
+    elif et == "cloud.start":
+        print("cloud: review started", flush=True)
+    elif et == "cloud":
+        print(f"cloud: {data.get('verdict')}", flush=True)
+    elif et == "summary":
+        print(f"SUMMARY: rc={data.get('rc')} verifier={data.get('verifier')}", flush=True)
+
+
 def cmd_watch(label: str, follow: bool) -> int:
-    """Лёгкий просмотр live-потока: events.jsonl + хвост probe-*.jsonl + stdout."""
+    """Лёгкий просмотр live-потока: events.jsonl + launcher.stdout.log.
+
+    offset-based tail: каждый файл append-only, поэтому храним только byte-offset
+    последнего прочитанного места (f.tell()/f.seek() в text-режиме дают корректные
+    "opaque cookie" для этого) и на каждой итерации читаем ТОЛЬКО дописанное. Старая
+    версия каждую секунду перечитывала файл целиком и дедуплицировала по содержимому
+    строки в неограниченно растущем set — O(размер лога) на итерацию и риск потерять
+    вывод, если два события совпадали побайтово."""
     _, live_dir = label_paths(label)
     evidence_dir, _ = label_paths(label)
     events = os.path.join(live_dir, "events.jsonl")
     stdout_log = os.path.join(evidence_dir, "launcher.stdout.log")
-    seen = set()
+    events_off = 0
+    stdout_off = 0
     try:
         while True:
             if os.path.exists(events):
                 with open(events, encoding="utf-8", errors="replace") as f:
+                    f.seek(events_off)
                     for line in f:
                         line = line.rstrip("\n")
-                        if not line or line in seen:
-                            continue
-                        seen.add(line)
-                        try:
-                            d = json.loads(line)
-                            et = d.get("type", "")
-                            data = d.get("data", {})
-                            if et in ("job.start", "job.end"):
-                                print(f"\n=== {et}: {json.dumps(data, ensure_ascii=False)} ===", flush=True)
-                            elif et == "attempt.start":
-                                print(f"\n--- attempt {data.get('attempt','')[:8]} start ---", flush=True)
-                            elif et == "attempt.end":
-                                print(f"--- attempt {data.get('attempt','')[:8]} end: {data.get('state')} ---", flush=True)
-                            elif et == "attempt.verifier":
-                                print(f"verifier: {'PASS' if data.get('ok') else 'FAIL'} "
-                                      f"({len(data.get('failures', []))} failed)", flush=True)
-                            elif et == "cloud":
-                                print(f"cloud: {data.get('verdict')}", flush=True)
-                            elif et == "summary":
-                                print(f"SUMMARY: rc={data.get('rc')} verifier={data.get('verifier')}", flush=True)
-                        except json.JSONDecodeError:
-                            print(line[:160], flush=True)
+                        if line:
+                            _print_watch_event(line)
+                    events_off = f.tell()
             if os.path.exists(stdout_log):
                 with open(stdout_log, encoding="utf-8", errors="replace") as f:
+                    f.seek(stdout_off)
                     for line in f:
                         line = line.rstrip("\n")
-                        if line and line not in seen:
-                            seen.add(line)
+                        if line:
                             print(f"  {line[:160]}", flush=True)
+                    stdout_off = f.tell()
             if not follow:
                 break
             time.sleep(1)
@@ -1304,11 +1384,17 @@ def _resolve_ticket(arg: str) -> "tuple[str, list[str]]":
     return tried[-1], tried
 
 
+def _is_within(path: str, root: str) -> bool:
+    path_r = os.path.realpath(path)
+    root_r = os.path.realpath(root)
+    return path_r == root_r or path_r.startswith(root_r + os.sep)
+
+
 def cmd_dispatch_run(args) -> int:
-    # label-guard: label не может начинаться с '--' (забыт позиционный аргумент)
-    if args.label.startswith("--"):
-        print("ERROR: label не может начинаться с '--' — забыт позиционный аргумент <evidence-label>?",
-              file=sys.stderr, flush=True)
+    # label-guard: label должен быть безопасным компонентом пути (см. validate_label)
+    label_err = validate_label(args.label)
+    if label_err:
+        print(f"ERROR: {label_err}", file=sys.stderr, flush=True)
         print("  usage: stanok run <ticket.md> <evidence-label> [--direct|--background]",
               file=sys.stderr, flush=True)
         return 15
@@ -1324,6 +1410,15 @@ def cmd_dispatch_run(args) -> int:
         print(f"ERROR: ticket not found: {ticket_path}", file=sys.stderr, flush=True)
         print("  пробовал: " + "  ->  ".join(ticket_tried), file=sys.stderr, flush=True)
         return 13
+
+    # видимость (не hard-fail: оператор и так имеет доступ к файлу с этого CLI) —
+    # тикет пришёл не из REPO_ROOT и не из project_root, а из третьего "arg как есть"
+    # фолбэка _resolve_ticket -> явно логируем, куда мы на самом деле смотрим.
+    project_root = os.path.dirname(REPO_ROOT)
+    if not (_is_within(ticket_path, REPO_ROOT) or _is_within(ticket_path, project_root)):
+        print(f"WARNING: ticket {ticket_path} вне {REPO_ROOT} и {project_root} "
+              f"— прочитан как передан (fail-open, только предупреждение)",
+              file=sys.stderr, flush=True)
 
     # dirty-tree гейт (fail-closed): reset --hard + clean -fdq затёр бы
     # незакоммиченные изменения — не стартуем, пусть TUI закоммитит сначала.
