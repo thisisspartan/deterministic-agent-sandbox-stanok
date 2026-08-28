@@ -124,7 +124,7 @@ def log(msg: str = "") -> None:
         try:
             _stdout_log_f.write(msg + "\n")
             _stdout_log_f.flush()
-        except OSError:
+        except (OSError, ValueError):
             pass
 
 
@@ -389,6 +389,16 @@ async def tg_wait_decision(bot, chat_id: str, ask: str, timeout: float) -> tuple
     offset = await tg_flush_stale(bot)
     if not await tg_send(bot, chat_id, ask):
         return ("error", "sendMessage не прошёл — гейт отказал по error")
+    # Между tg_flush_stale() и tg_send() есть окно (сетевой RTT самого sendMessage), в
+    # которое оператор мог успеть ответить на ПРЕДЫДУЩИЙ вопрос — такой ответ не должен
+    # засчитаться за ответ на этот. Добираем его коротким non-blocking пассом.
+    try:
+        leftover = await bot.get_updates(offset=offset, timeout=0)
+        if leftover:
+            offset = max(u.update_id for u in leftover) + 1
+            log(f"  [TG] добрано отложенных апдейтов из окна flush->send: {len(leftover)}")
+    except Exception as e:  # noqa: BLE001
+        log(f"  [TG] post-send flush warning: {type(e).__name__}: {e}")
     deadline = time.time() + timeout
     last_offset = offset
     log(f"  [TG] вопрос отправлен, ждём ответ <= {timeout:.0f}s")
@@ -534,25 +544,37 @@ def security_gate(sid: str, stream_out: str, live_dir: str) -> tuple[bool, str]:
     """Pending-флаг malware-scan для сессии разрешён ТОЛЬКО если:
     (a) флага уже нет (повторный чистый скан -> CLEARED-AUTO), ЛИБО
     (b) реальный reviewer-субагент вернул REVIEW-VERDICT: CLEAN (из
-        TaskNotificationMessage.summary, последнее вхождение — анти-false-clean)."""
+        TaskNotificationMessage.summary, последнее вхождение — анти-false-clean) И
+        этот вердикт хронологически ПОСЛЕ последнего Write/Edit в стриме — иначе
+        после CLEAN могла появиться новая, ещё не рецензированная правка (модель
+        спавнит reviewer не на каждый Write, как того требует CLAUDE.md шаг 5)."""
     flags = sorted(glob.glob(os.path.join(live_dir, "malware-scan", f"pending-{sid}-*.flag")))
     if not flags:
         return True, ""
     spawned = False
     last_verdict = None
+    verdict_idx = -1
+    last_write_idx = -1
+    idx = 0
     try:
         with open(stream_out, encoding="utf-8") as f:
             for line in f:
+                idx += 1
                 try:
                     d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
                 if d.get("type") == "AssistantMessage":
                     for c in (d.get("data", {}) or {}).get("content", []) or []:
-                        if isinstance(c, dict) and c.get("name") == "Agent":
+                        if not isinstance(c, dict):
+                            continue
+                        name = c.get("name")
+                        if name == "Agent":
                             inp = c.get("input", {}) or {}
                             if inp.get("subagent_type") == "reviewer":
                                 spawned = True
+                        elif name in ("Write", "Edit"):
+                            last_write_idx = idx
                     continue
                 if d.get("type") == "TaskNotificationMessage" and spawned:
                     dd = (d.get("data") or {}).get("data") or {}
@@ -561,12 +583,14 @@ def security_gate(sid: str, stream_out: str, live_dir: str) -> tuple[bool, str]:
                         r"REVIEW-VERDICT\s*:\s*(CLEAN|DEFECT)\b", summ)]
                     if matches:
                         last_verdict = matches[-1].group(1)
+                        verdict_idx = idx
     except OSError:
         pass
-    if spawned and last_verdict == "CLEAN":
+    if spawned and last_verdict == "CLEAN" and verdict_idx > last_write_idx:
         return True, ""
     return False, (f"sid={sid[:8]} pending={[os.path.basename(x) for x in flags]} "
-                   f"reviewer_spawned={spawned} last_reviewer_verdict={last_verdict}")
+                   f"reviewer_spawned={spawned} last_reviewer_verdict={last_verdict} "
+                   f"verdict_idx={verdict_idx} last_write_idx={last_write_idx}")
 
 
 # ==================================================================================
@@ -667,8 +691,14 @@ def cloud_review(task_prompt: str, state_desc: str,
                 rc = p.wait(timeout=1800)
             except subprocess.TimeoutExpired:
                 p.kill()
-                rc = p.wait()
-                log(f"CLOUD-REVIEWER: TIMEOUT 1800s -> kill, rc={rc}")
+                try:
+                    rc = p.wait(timeout=10)
+                    log(f"CLOUD-REVIEWER: TIMEOUT 1800s -> kill, rc={rc}")
+                except subprocess.TimeoutExpired:
+                    rc = None
+                    log("CLOUD-REVIEWER: TIMEOUT 1800s -> kill, но процесс не завершился "
+                        "за 10s после SIGKILL (вероятно D-state / завис на http_proxy) — "
+                        "не блокируем Runner, продолжаем без ожидания reap")
     except Exception as e:  # noqa: BLE001
         log(f"CLOUD-REVIEWER: EXCEPTION при спавне: {type(e).__name__}: {e}")
         log(traceback.format_exc())
@@ -833,6 +863,29 @@ async def noop_user_prompt_hook(input_, tool_use_id, context):
     return {}
 
 
+async def _stall_watchdog(stream_out: str, session_id: str, warn_after_s: float) -> None:
+    """WARN, если сессия не пишет новых сообщений в stream_out дольше warn_after_s.
+
+    Единственный способ заметить, что локальный llama-server завис (не ответил, но и
+    не упал): SDK может ждать один запрос до API_TIMEOUT_MS (10 мин), а запросов в
+    сессии — десятки, так что тихое зависание могло бы длиться часами без единой
+    строки в логе. Не убивает сессию — только предупреждает."""
+    warned = False
+    while True:
+        await asyncio.sleep(30)
+        try:
+            idle_s = time.time() - os.path.getmtime(stream_out)
+        except OSError:
+            continue
+        if idle_s >= warn_after_s and not warned:
+            log(f"  [main] WARN: сессия {session_id[:8]} не пишет новых сообщений "
+                f"{idle_s:.0f}s (>= {warn_after_s:.0f}s) — похоже на зависший "
+                f"llama-server; watchdog только предупреждает, не убивает")
+            warned = True
+        elif idle_s < warn_after_s:
+            warned = False  # снова активна — при новом простое предупредим повторно
+
+
 async def run_main_session(prompt: str, session_id: str, stream_out: str,
                            can_use_tool,
                            local_extra_prompt: str = "",
@@ -876,21 +929,32 @@ async def run_main_session(prompt: str, session_id: str, stream_out: str,
     exc = None
     result = None
     log(f"  [main] сессия {session_id} | model={LOCAL_MODEL} | cwd={REPO_ROOT}")
+    warn_after_s = float(os.environ.get("STANOK_STALL_WARN_S", "900"))
     with open(stream_out, "w", encoding="utf-8") as f:
         f.write(json.dumps({"type": "STANOK_START",
                             "data": {"session_id": session_id, "model": LOCAL_MODEL,
                                      "prompt": full_prompt}}) + "\n")
+        f.flush()
+        watchdog = asyncio.create_task(_stall_watchdog(stream_out, session_id, warn_after_s))
         try:
-            async for msg in query(prompt=stream_prompt(), options=options):
-                t = type(msg).__name__
-                msg_types[t] += 1
-                f.write(json.dumps({"type": t, "data": dataclass_asdict(msg)}) + "\n")
-                if t == "ResultMessage":
-                    result = str(getattr(msg, "result", "") or "")
-        except Exception as e:  # noqa: BLE001
-            exc = e
-            log(f"  [main] !!! EXCEPTION: {type(e).__name__}: {e}")
-            log(traceback.format_exc())
+            try:
+                async for msg in query(prompt=stream_prompt(), options=options):
+                    t = type(msg).__name__
+                    msg_types[t] += 1
+                    f.write(json.dumps({"type": t, "data": dataclass_asdict(msg)}) + "\n")
+                    f.flush()
+                    if t == "ResultMessage":
+                        result = str(getattr(msg, "result", "") or "")
+            except Exception as e:  # noqa: BLE001
+                exc = e
+                log(f"  [main] !!! EXCEPTION: {type(e).__name__}: {e}")
+                log(traceback.format_exc())
+        finally:
+            watchdog.cancel()
+            try:
+                await watchdog
+            except asyncio.CancelledError:
+                pass
     log(f"  [main] время: {time.time()-t0:.1f}s | типы: {dict(msg_types)}")
     return (str(exc) if exc else "", result or "")
 
