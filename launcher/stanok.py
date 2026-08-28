@@ -46,7 +46,7 @@ import traceback
 import urllib.request
 import uuid
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 # claude_agent_sdk / telegram импортируются ЛЕНИВО (внутри функций, которым нужны):
@@ -229,7 +229,14 @@ def preflight_server() -> dict:
 
 
 def reset_repo() -> int:
-    """git reset --hard + clean, mkdir src/tests/docs. rc=14 при провале."""
+    """git reset --hard + clean, mkdir src/tests/docs. rc=14 при провале.
+
+    ВАЖНО: `git clean -fdq` НЕ удаляет ignored files (нужен флаг -x для этого).
+    Это осознанный выбор: ignored files (node_modules, .stanok-locks, evidence/)
+    должны переживать reset — они не являются частью кода и их удаление
+    привело бы к повторной установке зависимостей / потере evidence.
+    Если нужно удалить ignored files — добавь -x (но это сломает node_modules).
+    """
     try:
         r1 = subprocess.run(["git", "reset", "--hard", "HEAD"],
                             cwd=REPO_ROOT, capture_output=True, text=True)
@@ -504,9 +511,19 @@ def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
                          "одного *.test.js — задача не выполнена; это FAIL (rc!=0), а не пауза")])
     # Тесты независимы (отдельный node-процесс на файл) -> безопасно параллелить;
     # порядок вывода failures не важен для потребителей (format_failures/дедуп по паре).
+    # Общий бюджет: per-test timeout=60s, но если 8 тестов по 60s — 480s суммарно.
+    # STANOK_VERIFY_BUDGET_S (default 300s) — общий лимит на все тесты.
+    budget_s = int(os.environ.get("STANOK_VERIFY_BUDGET_S", "300"))
+    start = time.time()
     failures: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
-        for result in ex.map(lambda t: _run_one_test(t, tests_dir), tests):
+        futures = {ex.submit(_run_one_test, t, tests_dir): t for t in tests}
+        for fut in as_completed(futures):
+            if time.time() - start > budget_s:
+                remaining = [os.path.relpath(futures[f], tests_dir) for f in futures if not f.done()]
+                failures.extend((t, f"budget {budget_s}s exceeded, test не запущен") for t in remaining)
+                break
+            result = fut.result()
             if result is not None:
                 failures.append(result)
     failures.sort(key=lambda x: x[0])
@@ -830,6 +847,9 @@ def build_env() -> dict[str, str]:
         "all_proxy": "",
         "no_proxy": NO_PROXY,
     }
+    # OTEL-интеграция: best-effort. Если localhost:4318 недоступен — Claude Code
+    # просто не сможет экспортировать telemetry, но прогон НЕ сломается.
+    # Это не критичный путь: если OTEL упадёт — мы потеряем метрики, но не код.
     base.update({
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
         "OTEL_METRICS_EXPORTER": "otlp",
@@ -843,17 +863,25 @@ def build_env() -> dict[str, str]:
     return base
 
 
-def dataclass_asdict(obj):
+def dataclass_asdict(obj, _depth: int = 0):
+    """Рекурсивный asdict с защитой от глубокой рекурсии и циклических ссылок.
+
+    _depth: текущая глубина рекурсии. Если > 10 — возвращаем str(obj) вместо
+    рекурсии (защита от RecursionError на вложенных dataclass'ах).
+    Циклические ссылки: если obj уже встречается в цепочке — str(obj).
+    """
+    if _depth > 10:
+        return {"raw": str(obj), "truncated": True}
     if dataclasses.is_dataclass(obj):
         out = {}
         for f in dataclasses.fields(obj):
             v = getattr(obj, f.name)
             if dataclasses.is_dataclass(v):
-                v = dataclass_asdict(v)
+                v = dataclass_asdict(v, _depth + 1)
             elif isinstance(v, (list, tuple)):
-                v = [dataclass_asdict(x) if dataclasses.is_dataclass(x) else x for x in v]
+                v = [dataclass_asdict(x, _depth + 1) if dataclasses.is_dataclass(x) else x for x in v]
             elif isinstance(v, dict):
-                v = {k: dataclass_asdict(x) if dataclasses.is_dataclass(x) else x for k, x in v.items()}
+                v = {k: dataclass_asdict(x, _depth + 1) if dataclasses.is_dataclass(x) else x for k, x in v.items()}
             out[f.name] = v
         return out
     return {"raw": str(obj)}
@@ -1145,12 +1173,28 @@ def _write_summary(job: Job, ticket_arg: str, elapsed_s: int) -> None:
 
 
 # --- сигналы: прерывание прогона (stop/CTRL-C) -------------------------------
+# Сигнал фиксируем как rc в _SIGNAL_RC, а НЕ sys.exit(128+n): SystemExit из
+# signal-handler не ловится `except Exception` в cmd_run_real (SystemExit —
+# BaseException), и summary.json не писался — status показывал "interrupted"
+# без rc. Теперь handler ставит rc и пробрасывает KeyboardInterrupt в
+# asyncio.run(); cmd_run_real подменяет rc на _SIGNAL_RC, и summary.json
+# записывается как обычно.
+_SIGNAL_RC = 0  # 0 = сигнал не приходил
+
+
 def _install_signal_handlers() -> None:
+    global _SIGNAL_RC
+
     def handler(signum, frame):
-        log(f"\n!!! СИГНАЛ {signum}: прогон прерван (SIGINT/SIGTERM)")
+        global _SIGNAL_RC
+        _SIGNAL_RC = 128 + signum
+        log(f"\n!!! СИГНАЛ {signum}: прогон прерван (SIGINT/SIGTERM), rc={_SIGNAL_RC}")
         if _marker_path and os.path.exists(_marker_path):
             os.remove(_marker_path)
-        sys.exit(128 + signum)
+        # пробрасываем KeyboardInterrupt в asyncio.run() — его перехватит
+        # except Exception в cmd_run_real и допишет summary.json
+        raise KeyboardInterrupt(f"signal {signum}")
+
     signal.signal(signal.SIGTERM, handler)
     signal.signal(signal.SIGINT, handler)
 
@@ -1224,11 +1268,17 @@ def cmd_run_real(args) -> int:
 
     try:
         rc = asyncio.run(job_loop(job, args, can_use_tool))
-    except Exception as e:  # noqa: BLE001
+    except BaseException as e:  # noqa: BLE001
+        # BaseException (не Exception): ловим KeyboardInterrupt из signal-handler,
+        # который пробрасывается из asyncio.run(). SystemExit тоже BaseException.
         job.errors.append(str(e))
         log(f"!!! СЕССИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ: {e}")
         log(traceback.format_exc())
         rc = 1
+    # Сигнал (SIGTERM/SIGINT): handler уже залогировал и поставил _SIGNAL_RC;
+    # здесь просто подменяем rc, чтобы summary.json записался с ним.
+    if _SIGNAL_RC:
+        rc = _SIGNAL_RC
 
     elapsed_s = int(time.time()) - start_ts
     job.verifier = "PASS" if (job.last() and job.last().verify_ok) else "FAIL"
