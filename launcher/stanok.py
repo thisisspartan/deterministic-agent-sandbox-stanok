@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1545,14 +1546,21 @@ def cmd_dispatch_run(args) -> int:
         os.makedirs(log_dir, exist_ok=True)
         launch_log = os.path.join(LOG_DIR, f"{args.label}.launch.log")
         cmd = [sys.executable, os.path.abspath(__file__), "run", ticket_path, args.label]
+        # Семантика прогона обязана наследоваться ребёнком, иначе --background
+        # молча запускает прогон с дефолтными настройками:
+        cmd += ["--local-retries", str(args.local_retries)]
+        cmd += ["--post-defect-retries", str(args.post_defect_retries)]
         if args.direct:
             cmd.append("--direct")
         if args.no_cloud:
             cmd.append("--no-cloud")
         if args.pocock_inject:
             cmd.append("--pocock-inject")
+        # КАТЕГОРИЧЕСКИ НЕ добавлять: --background, --detached (спавн-цикл),
+        # --direct (ticket_path уже разрешён в конкретный путь).
         cmd.append("--background")
         cmd.append("--detached")
+        log(f"[background] child cmd: {shlex.join(cmd)}")
         with open(launch_log, "ab") as fd:
             subprocess.Popen(cmd, stdout=fd, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True)
