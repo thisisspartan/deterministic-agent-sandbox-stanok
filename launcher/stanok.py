@@ -86,6 +86,12 @@ if not (TG_TOKEN and TG_ALLOWED_IDS) and os.path.exists(CREDS):
         elif line.startswith("TG_ALLOWED_IDS="):
             TG_ALLOWED_IDS = line.split("=", 1)[1]
 
+# Множество разрешённых операторских ID (TG_ALLOWED_IDS — запятая/пробел).
+# Первый ID в списке — chat для отправки вопросов; остальные — только для приёма решений.
+_TG_ID_LIST = [x.strip() for x in TG_ALLOWED_IDS.replace(",", " ").split() if x.strip()]
+TG_ALLOWED_SET = frozenset(_TG_ID_LIST)
+TG_PRIMARY_CHAT = _TG_ID_LIST[0] if _TG_ID_LIST else ""
+
 ALLOW_WORDS = {"allow", "да", "yes", "разрешить", "approve", "ok"}
 DENY_WORDS = {"deny", "нет", "no", "запретить", "block"}
 
@@ -368,7 +374,7 @@ def tg_build():
     _bot_req = HTTPXRequest(proxy=LOCAL_PROXY, read_timeout=40, connect_timeout=15,
                             write_timeout=15)
     bot = Bot(token=TG_TOKEN, request=_bot_req, get_updates_request=_bot_req)
-    return bot, TG_ALLOWED_IDS
+    return bot, TG_PRIMARY_CHAT
 
 
 async def tg_send(bot, chat_id: str, text: str) -> bool:
@@ -426,7 +432,7 @@ async def tg_wait_decision(bot, chat_id: str, ask: str, timeout: float) -> tuple
             if not m or not m.from_user:
                 continue
             uid = str(m.from_user.id)
-            if uid != chat_id:
+            if uid not in TG_ALLOWED_SET:
                 log(f"  [TG] игнор сообщения от чужого id={uid}")
                 continue
             text = (m.text or "").strip().lower()
