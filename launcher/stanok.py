@@ -1054,6 +1054,7 @@ async def _run_attempt(job: Job, prompt: str, can_use_tool,
     job.attempts.append(attempt)  # важно: job.last()/len(job.attempts) живут этим
     if exc:
         attempt.state = "error"
+        attempt.ended_at = time.time()
         job.errors.append(exc)
         log(f"!!! СЕССИЯ ЗАВЕРШИЛАСЬ С ОШИБКОЙ: {exc}")
         emit("attempt.end", {"attempt": attempt.id, "state": "error"})
@@ -1082,11 +1083,12 @@ def _security_final(job: Job) -> int | None:
     return None
 
 
-def _finish(job: Job, probe_result: str, rc: int, c5: str | None) -> int:
+def _finish(job: Job, probe_result: str, rc: int, c5: str | None,
+            state: str = "done") -> int:
     job.probe_result = probe_result
     job.c5 = c5
     job.finished_at = time.time()
-    job.state = "done"
+    job.state = state
     sec = _security_final(job)
     final_rc = sec if sec is not None else rc
     job.rc = final_rc  # summary.json обязан отражать РЕАЛЬНЫЙ (пост-security) rc
@@ -1109,7 +1111,7 @@ async def job_loop(job: Job, args, can_use_tool) -> int:
     # 1. первый main-прогон
     a1 = await _run_attempt(job, prompt, can_use_tool, pocock_inject=args.pocock_inject)
     if a1.exc:
-        return 1
+        return _finish(job, "SESSION-ERROR", 1, "ERROR", state="error")
     if a1.verify_ok:
         log("C5: PASS с первой попытки -> rc=0, БЕЗ cloud (policy: не звать когда не нужно)")
         return _finish(job, "CLEAN-FIRST", 0, "PASS")
@@ -1119,7 +1121,7 @@ async def job_loop(job: Job, args, can_use_tool) -> int:
         a = await _run_attempt(job, prompt, can_use_tool, local_extra_prompt=_fail_context(job.last()),
                                pocock_inject=args.pocock_inject)
         if a.exc:
-            return 1
+            return _finish(job, "SESSION-ERROR", 1, "ERROR", state="error")
         if a.verify_ok:
             log("VERIFIER: PASS — все тесты прошли (после локального ретрая)")
             log("C5: PASS после локального ретрая -> rc=0")
@@ -1157,7 +1159,7 @@ async def job_loop(job: Job, args, can_use_tool) -> int:
             a = await _run_attempt(job, prompt, can_use_tool, local_extra_prompt=extra,
                                    pocock_inject=args.pocock_inject)
             if a.exc:
-                return 1
+                return _finish(job, "SESSION-ERROR", 1, "ERROR", state="error")
             if a.verify_ok:
                 log("C5: после DEFECT-рерана verify PASS -> rc=0 (PASS+CLEAN)")
                 return _finish(job, "CLOUD-DEFECT-TO-PASS", 0, "PASS")
