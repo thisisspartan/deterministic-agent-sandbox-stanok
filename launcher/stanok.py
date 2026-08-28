@@ -142,7 +142,7 @@ def emit(etype: str, data: dict) -> None:
     try:
         with open(_events_path, "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": time.time(), "type": etype, "data": data},
-                               ensure_ascii=False) + "\n")
+                               ensure_ascii=False, default=str) + "\n")
     except OSError:
         pass
 
@@ -896,11 +896,13 @@ def build_env() -> dict[str, str]:
 
 
 def dataclass_asdict(obj, _depth: int = 0):
-    """Рекурсивный asdict с защитой от глубокой рекурсии и циклических ссылок.
+    """Рекурсивный asdict с ограничением глубины.
 
-    _depth: текущая глубина рекурсии. Если > 10 — возвращаем str(obj) вместо
-    рекурсии (защита от RecursionError на вложенных dataclass'ах).
-    Циклические ссылки: если obj уже встречается в цепочке — str(obj).
+    _depth: текущая глубина рекурсии. Если > 10 — возвращаем
+    {"raw": str(obj), "truncated": True} вместо рекурсии (защита от
+    RecursionError на вложенных dataclass'ах). Циклические ссылки НЕ
+    отслеживаются: при глубине > 10 сработает depth-guard, при меньшей —
+    зацикливание завершится RecursionError (не ожидается в наших dataclass'ах).
     """
     if _depth > 10:
         return {"raw": str(obj), "truncated": True}
@@ -1001,7 +1003,8 @@ async def run_main_session(prompt: str, session_id: str, stream_out: str,
                 async for msg in query(prompt=stream_prompt(), options=options):
                     t = type(msg).__name__
                     msg_types[t] += 1
-                    f.write(json.dumps({"type": t, "data": dataclass_asdict(msg)}) + "\n")
+                    f.write(json.dumps({"type": t, "data": dataclass_asdict(msg)},
+                                       default=str) + "\n")
                     f.flush()
                     if t == "ResultMessage":
                         result = str(getattr(msg, "result", "") or "")
