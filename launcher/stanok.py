@@ -110,6 +110,8 @@ def validate_label(label: str) -> str | None:
     if not _LABEL_RE.match(label):
         return (f"label {label!r} содержит недопустимые символы "
                 f"(разрешены только [A-Za-z0-9_.-])")
+    if label.startswith("--"):
+        return f"label {label!r} недопустим (начинается с '--')"
     if ".." in label or label in (".", ""):
         return f"label {label!r} недопустим (path traversal)"
     return None
