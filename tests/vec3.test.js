@@ -360,7 +360,11 @@ test('normalize({x:0, y:0, z:5}) -> {x:0, y:0, z:1}', () => {
 });
 
 test('normalize({x:3, y:4, z:0}) -> {x:0.6, y:0.8, z:0}', () => {
-  assert.deepStrictEqual(normalize({ x: 3, y: 4, z: 0 }), { x: 0.6, y: 0.8, z: 0 });
+  const r = normalize({ x: 3, y: 4, z: 0 });
+  // Дробный результат scale: 3/5 = 0.6000000000000001, сравниваем по eps
+  assert.ok(Math.abs(r.x - 0.6) < 1e-9);
+  assert.ok(Math.abs(r.y - 0.8) < 1e-9);
+  assert.strictEqual(r.z, 0);
 });
 
 test('normalize({x:-1, y:0, z:0}) -> {x:-1, y:0, z:0}', () => {
