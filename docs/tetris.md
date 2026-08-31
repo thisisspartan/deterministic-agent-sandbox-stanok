@@ -173,7 +173,8 @@ line-clear, level-up (old level), lock-out, top-out, pause/resume, reset,
 
 `←`/`→` — move; `↓` — softDrop; `↑`/`X` — rotate CW; `Z` — rotate CCW;
 `Space` — hardDrop; `P` — pause/resume; `Q` — `onQuit`; `R` — reset (только если
-`over`). Стрелки приходят escape-последовательностями `\x1b[A..D` (CSI/SS3).
+`over`); `ESC` — осознанный no-op (сбрасывает DAS-держку, ничего не делает).
+Стрелки приходят escape-последовательностями `\x1b[A..D` (CSI/SS3).
 
 ### DAS
 
@@ -181,6 +182,24 @@ line-clear, level-up (old level), lock-out, top-out, pause/resume, reset,
 терминалы не шлют key-up: каждое событие `←`/`→` держит направление до другого
 ключа/`stop()`; цикл кадров по `now()-heldSince` запускает повторы. DAS вызывает
 `game.move` (НЕ `softDrop`) — очки не начисляет.
+
+### Аудит управления (тикет 025)
+
+- **Key-up (фикс).** Raw-mode stdin шлёт key-down и key-up стрелки идентичными
+  байтами, так что сам терминал key-up не различает. `attach` теперь отдаёт
+  `handleKeyUp(dir)`: если driver (PTY/SSH bridge) эмитит key-up, он сбрасывает
+  `heldDir`/`heldSince`/`repeatsFired` — DAS останавливается немедленно, фигура
+  больше не «дрейфует» после отпускания. Без ключа `handleKeyUp` (main.js его не
+  передаёт) поведение не меняется — держка живёт до другого ключа/`stop()`.
+- **Soft-drop.** Удержание `↓` даёт повтор по каждому key-down-повтору терминала
+  (raw-mode); DAS для `↓` нет — по одному cell на событие. Поведение корректно.
+- **Повороты.** `↑`/`X` = CW, `Z` = CCW — совпадает с этими доками (раздел «Ввод»
+  main/ui) — расхождений нет.
+- **Пауза/рестарт.** При `paused`/`over` все действия и `dasStep()` gated через
+  `flags()`. `P` toggle, `R` только при `over`, `Q` всегда. Тупика «пауза поверх
+  game-over» нет.
+- **ESC.** `parseKeys` эмитит `'esc'` на одиночный ESC; `handleKey` его игнорирует
+  (через `default` — сбрасывает держку). Осознанный no-op.
 
 ### Чистота
 

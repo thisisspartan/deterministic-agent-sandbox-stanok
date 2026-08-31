@@ -273,6 +273,25 @@ function attach(io, game, opts) {
     }
   }
 
+  // Key-up handling (ticket 025): a real terminal's raw-mode input is
+  // byte-identical for press and release, so key-ups only arrive when a driver
+  // that emits them (e.g. a PTY/SSH bridge) hands one to attach via this hook.
+  // Releasing the arrow that is currently held stops DAS immediately;
+  // releasing anything else is a no-op. This is the minimal fix for "DAS does
+  // not reset on key-up": without it the hold persists until another key or
+  // stop(), so a released left/right would keep drifting the piece.
+  function handleKeyUp(k) {
+    if (k === 'left' && heldDir === -1) {
+      heldDir = 0;
+      repeatsFired = 0;
+      heldSince = 0;
+    } else if (k === 'right' && heldDir === 1) {
+      heldDir = 0;
+      repeatsFired = 0;
+      heldSince = 0;
+    }
+  }
+
   // Fire the DAS auto-repeats that have come due since the last frame.
   function dasStep() {
     if (heldDir === 0) return;
@@ -319,6 +338,10 @@ function attach(io, game, opts) {
   timer = setTimeout(frame, FPS);
 
   return {
+    // Exposed so a key-up-aware driver can stop DAS on release (ticket 025).
+    // The 33ms frame loop only reads heldDir, so releasing here takes effect on
+    // the next frame without touching the public attach(io, game, opts) API.
+    handleKeyUp(k) { handleKeyUp(k); },
     stop() {
       if (stopped) return;
       stopped = true;

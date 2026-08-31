@@ -274,6 +274,36 @@ test('DAS uses game.move, not softDrop: hold left leaves score unchanged', async
   h.stop();
 });
 
+test('DAS key-up: a keyup token (handleKeyUp) releases the hold and stops auto-repeat', async () => {
+  const io = makeIo(60);
+  const game = makeMockGame();
+  let t0 = 0;
+  const h = attach(io, game, { now: () => t0, onQuit: () => {} });
+
+  // Press left once: one immediate move, heldDir now set.
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 1, 'initial press moved once');
+  assert.strictEqual(game._state.col, 2);
+
+  // Release (key-up): the hold must be cleared. No move may be re-armed.
+  if (typeof h.handleKeyUp !== 'function') throw new Error('attach has no handleKeyUp');
+  h.handleKeyUp('left');
+
+  // Advance the clock far past DAS(170)+ARR(50): if the hold were still alive
+  // the frame loop would keep firing auto-repeats. It must not.
+  t0 = 400;
+  await sleep(120);
+  assert.strictEqual(game._calls.move, 1, 'no auto-repeat after key-up');
+  assert.strictEqual(game._state.col, 2);
+
+  // A fresh press re-arms from now (heldSince reset), moves once.
+  t0 = 500;
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 2, 'fresh press moved once');
+  assert.strictEqual(game._state.col, 1);
+  h.stop();
+});
+
 test('DAS: auto-repeat only while the key is held in the frame poll', async () => {
   const io = makeIo(60);
   const game = makeMockGame();
