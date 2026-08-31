@@ -21,6 +21,18 @@ const ROWS = 22;
 const DAS_DELAY = 170; // ms before auto-repeat starts
 const ARR = 50;        // ms between auto-repeats
 const FPS = 33;        // ms per frame (~30 FPS)
+// Key-up silence window (ticket 028, Variant A). A raw-mode Linux terminal
+// (VT100/xterm class) sends NO key-up for arrows — release is the SAME bytes
+// as press (e.g. `\x1b[D` both ways), so a released left/right cannot be
+// detected from the byte stream alone. Instead the hold is considered released
+// once no arrow event arrives for longer than this: `now() - lastArrowEventT
+// > KEY_UP_TIMEOUT` clears heldDir in dasStep(). The window is chosen larger
+// than any sane terminal/OS auto-repeat period (typically 30–80 ms) so a
+// genuinely held arrow (which keeps emitting key-down repeats and refreshes
+// lastArrowEventT on every event) is never misread as a release, while a
+// truly released key (silence) stops DAS within one frame (~33 ms) after the
+// window expires. Verified in docs/tetris.md «Управление».
+const KEY_UP_TIMEOUT = 200; // ms of arrow silence treated as key release
 
 // ANSI styling.
 const BOLD = '\u001b[1m';
@@ -192,6 +204,12 @@ function attach(io, game, opts) {
   let heldDir = 0;
   let heldSince = 0;
   let repeatsFired = 0; // count of auto-repeats already applied (function-local reset)
+  // Ticket 028: timestamp of the last arrow (left/right) key event. The
+  // terminal sends no key-up, so a RELEASE is emulated by silence: when
+  // now() - lastArrowEventT exceeds KEY_UP_TIMEOUT the hold is dropped in
+  // dasStep(). Every arrow event (press or terminal auto-repeat of the same
+  // "burst") refreshes this, which keeps a genuine hold alive.
+  let lastArrowEventT = 0;
 
   function onKey(chunk) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
@@ -213,6 +231,7 @@ function attach(io, game, opts) {
         heldDir = -1;
         heldSince = t;
         repeatsFired = 0;
+        lastArrowEventT = t; // ticket 028: refresh the silence timer
         const f = flags();
         if (!f.over && !f.paused) game.move(-1);
         break;
@@ -221,6 +240,7 @@ function attach(io, game, opts) {
         heldDir = 1;
         heldSince = t;
         repeatsFired = 0;
+        lastArrowEventT = t; // ticket 028: refresh the silence timer
         const f = flags();
         if (!f.over && !f.paused) game.move(1);
         break;
@@ -285,21 +305,45 @@ function attach(io, game, opts) {
       heldDir = 0;
       repeatsFired = 0;
       heldSince = 0;
+      lastArrowEventT = 0;
     } else if (k === 'right' && heldDir === 1) {
       heldDir = 0;
       repeatsFired = 0;
       heldSince = 0;
+      lastArrowEventT = 0;
     }
   }
 
   // Fire the DAS auto-repeats that have come due since the last frame.
+  //
+  // Ticket 028 (Variant A): a raw-mode terminal sends no key-up for arrows, so
+  // a RELEASE is emulated by SILENCE — if no arrow event arrived for longer
+  // than KEY_UP_TIMEOUT, the hold is considered released and cleared here.
+  // The terminal's OS/terminal auto-repeat (every ~30–80 ms) refreshes
+  // lastArrowEventT in handleKey on each event, so a genuinely held arrow
+  // never accumulates >KEY_UP_TIMEOUT ms of silence, while a released one
+  // does. A new input event also resets heldSince/repeatsFired (re-arms DAS
+  // from that event), so elapsed since the last re-arm is the source of the
+  // auto-repeat schedule: the n-th repeat fires at DAS_DELAY + (n-1)*ARR
+  // after the last event/re-arm. The release check runs BEFORE the fire: a
+  // frame that crosses the window must not also deliver repeats computed
+  // from a hold that just ended (tap = exactly one move, no drift).
   function dasStep() {
     if (heldDir === 0) return;
     const f = flags();
     if (f.over || f.paused) return;
     const t = now();
+    // Silence = key release: no arrow event for longer than the timeout.
+    if (t - lastArrowEventT > KEY_UP_TIMEOUT) {
+      heldDir = 0;
+      repeatsFired = 0;
+      heldSince = 0;
+      return;
+    }
+    // Auto-repeats due since the last re-arm (each event reset heldSince and
+    // repeatsFired, so `elapsed` never spans across events — a jump past the
+    // silence window would have released the hold first).
     const elapsed = t - heldSince;
-    // Number of repeats due by now: the n-th fires at DAS_DELAY + (n-1)*ARR.
     const due = elapsed >= DAS_DELAY ? Math.floor((elapsed - DAS_DELAY) / ARR) + 1 : 0;
     const fireCount = due - repeatsFired;
     if (fireCount > 0) {

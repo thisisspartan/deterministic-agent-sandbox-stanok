@@ -244,16 +244,30 @@ test('DAS: holding left past 170ms+50ms calls game.move(-1) >= 2 times', async (
   let t0 = 0;
   const h = attach(io, game, { now: () => t0, onQuit: () => {} });
 
+  // Hold left: a real terminal keeps emitting the same arrow while the key
+  // is held (OS auto-repeat), so model the hold as a stream of events that
+  // stay inside the 200ms KEY_UP_TIMEOUT silence window. A single press
+  // followed by silence is a RELEASE (ticket 028, variant A), not a hold —
+  // that case is covered by 'DAS silence timeout'.
+  //
+  // Step 1: initial press at t=0 -> move 1 (heldSince=0, lastArrowEventT=0).
   io.write(Buffer.from('\x1b[D'));
   assert.strictEqual(game._state.col, 2, 'initial press moved once');
   assert.strictEqual(game._calls.move, 1);
 
-  // Advance the injected clock well past DAS(170) + ARR(50). The 33ms frame
-  // loop polls the held key each frame; by now()=250 at least one auto-repeat
-  // must have fired, and by now()=400 a second one is guaranteed.
-  t0 = 250;
-  await sleep(80);
-  t0 = 400;
+  // Step 2: auto-repeat of the same held arrow at t=100 (100 is not strictly
+  // > 200 after the t=0 event, so the hold refreshes, not releases). The
+  // repeat re-arms: heldSince=100, repeatsFired=0, lastArrowEventT=100, and
+  // moves once immediately -> move 2.
+  t0 = 100;
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 2, 'repeat press moved once');
+
+  // Step 3: DAS fires by t=270. The first frame observed after the re-arm
+  // sees t=270: 270-100=170 is NOT strictly > 200, so the hold is alive;
+  // elapsed = 270-heldSince(100) = 170 >= DAS_DELAY(170), so
+  // due = floor((170-170)/50)+1 = 1 -> exactly one auto-repeat -> move 3.
+  t0 = 270;
   await sleep(80);
 
   assert.ok(game._calls.move >= 2, 'DAS auto-repeats: move(-1) called >=2, got ' + game._calls.move);
@@ -301,6 +315,116 @@ test('DAS key-up: a keyup token (handleKeyUp) releases the hold and stops auto-r
   io.write(Buffer.from('\x1b[D'));
   assert.strictEqual(game._calls.move, 2, 'fresh press moved once');
   assert.strictEqual(game._state.col, 1);
+  h.stop();
+});
+
+test('DAS silence timeout: left pressed then released (no repeat bytes) stops auto-repeat (ticket 028)', async () => {
+  const io = makeIo(60);
+  const game = makeMockGame();
+  let t0 = 0;
+  const h = attach(io, game, { now: () => t0, onQuit: () => {} });
+
+  // Single press at t=0: exactly one immediate move; no further input events.
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 1, 'initial press moved once');
+  assert.strictEqual(game._state.col, 2);
+
+  // Emulate key release: a raw-mode terminal sends NO key-up for arrows,
+  // so "release" = silence. Advance the injected clock far past both
+  // DAS_DELAY (170ms) and the KEY_UP_TIMEOUT silence window (200ms). If the
+  // silence release is not implemented, dasStep keeps auto-repeating.
+  t0 = 500;
+  await sleep(150);
+
+  const movesAfterRelease = game._calls.move;
+  assert.strictEqual(movesAfterRelease, 1,
+    'no auto-repeat after the silence window, got ' + game._calls.move + ' moves');
+  assert.strictEqual(game._state.col, 2, 'col unchanged after release');
+  h.stop();
+});
+
+test('DAS hold: repeat arrow events < KEY_UP_TIMEOUT apart keep auto-repeat (regression)', async () => {
+  const io = makeIo(60);
+  const game = makeMockGame();
+  let t0 = 0;
+  const h = attach(io, game, { now: () => t0, onQuit: () => {} });
+
+  // The injected clock is monotonic in this test: t0 only ever increases.
+  // handleKey reads t = now() at call time, so a write executed while t0=100
+  // re-arms heldSince=100 / repeatsFired=0 / lastArrowEventT=100, and a write
+  // at t0=320 re-arms them to 320. dasStep likewise evaluates on the frame-
+  // poll clock: the hold is released ONLY when t - lastArrowEventT is
+  // STRICTLY > KEY_UP_TIMEOUT (200ms of silence after the last arrow event);
+  // every frame before that sees the hold alive.
+  //
+  // Step 1: initial press at t=0 -> move 1 (heldSince=0, lastArrowEventT=0).
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 1, 'initial press moved once');
+
+  // Step 2: terminal/OS auto-repeat of the SAME held arrow at t=100 — within
+  // the 200ms silence window after the t=0 event (100 is not strictly > 200),
+  // so the hold is refreshed, not released. handleKey re-arms:
+  // heldSince=100, repeatsFired=0, lastArrowEventT=100, and moves once
+  // immediately -> move 2.
+  t0 = 100;
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 2, 'repeat press moved once');
+
+  // Step 3: DAS must fire by t=270. The frame loop only ever sees the clock
+  // at the frames it runs, and the first frame evaluated after the re-arm
+  // sees t=270 (the clock jumps — no earlier intermediate frame exists to
+  // trip a gap). At t=270: 270-100=170 is NOT strictly > 200, so the hold is
+  // ALIVE; elapsed = 270-heldSince(100) = 170 >= DAS_DELAY(170), so
+  // due = floor((170-170)/50)+1 = 1 -> exactly one auto-repeat -> move 3.
+  // Timing: 170ms since the last arrow event (inside the STRICTLY > 200ms
+  // release window) and exactly DAS_DELAY since re-arm, so one repeat is due.
+  t0 = 270;
+  await sleep(80);
+  assert.ok(game._calls.move >= 3,
+    'auto-repeat fired while the hold was kept alive by repeat events, got ' + game._calls.move);
+
+  // Step 4: a SECOND repeat press at t=320 — a new event, so lastArrowEventT
+  // refreshes to 320 regardless; the point is that another event inside the
+  // release window re-arms DAS from 320: heldSince=320, repeatsFired=0,
+  // and the immediate move fires -> move 4. DAS must keep running past it.
+  t0 = 320;
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 4, 'second repeat press moved once');
+
+  // Step 5: DAS survived the second repeat press. The next frame sees t=490:
+  // 490-320=170 is NOT strictly > 200 -> hold alive; elapsed = 490-320 = 170
+  // >= DAS_DELAY(170) -> due=1 -> one auto-repeat -> move 5. Timing: again
+  // exactly 170ms of silence after the last event (within window) and exactly
+  // DAS_DELAY since the last re-arm.
+  t0 = 490;
+  await sleep(80);
+  assert.ok(game._calls.move >= 5,
+    'auto-repeat survived the second repeat press (hold < KEY_UP_TIMEOUT kept DAS alive), got ' + game._calls.move);
+
+  h.stop();
+});
+
+test('DAS release: left pressed, released, then right pressed -> moves only right (ticket 028)', async () => {
+  const io = makeIo(60);
+  const game = makeMockGame();
+  let t0 = 0;
+  const h = attach(io, game, { now: () => t0, onQuit: () => {} });
+
+  io.write(Buffer.from('\x1b[D')); // left press at t=0
+  assert.strictEqual(game._state.col, 2);
+
+  // Release = silence: wait past KEY_UP_TIMEOUT with no events.
+  t0 = 300;
+  await sleep(80);
+  assert.strictEqual(game._state.col, 2, 'no drift while held-then-released');
+
+  // Fresh right press: move right once, hold cleared, nothing else moves left.
+  t0 = 310;
+  io.write(Buffer.from('\x1b[C'));
+  assert.strictEqual(game._state.col, 3, 'right press moved right once');
+  t0 = 600;
+  await sleep(120);
+  assert.strictEqual(game._state.col, 3, 'no left/right drift after the hold was released by timeout');
   h.stop();
 });
 
