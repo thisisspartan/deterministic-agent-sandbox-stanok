@@ -193,3 +193,53 @@ line-clear, level-up (old level), lock-out, top-out, pause/resume, reset,
 render (пустой frame, фигура, next-превью, PAUSED, GAME OVER, узкий frame),
 attach lifecycle (raw-mode on/off, ≥1 render, stop()), ввод (каждая клавиша),
 DAS (автоповтор ≥2, без softDrop/score), чистота модуля.
+
+## Module: main (`src/tetris/main.js`)
+
+Точка входа и сборка (тикет 023, модуль 6/6): собирает чистую игру (021) с
+консольным UI (022), подключает `process.stdin`/`process.stdout` и владеет
+process-level жизненным циклом: Q → `stop()` + `exit(0)`; R (из game-over) →
+`game.reset(Date.now())`; SIGINT/SIGTERM → `stop()` (raw-mode off, курсор
+показать) + exit (SIGINT = 130, SIGTERM = 0).
+
+Запуск: `node src/tetris/main.js`. Внешних зависимостей нет (package.json
+без `dependencies` — только stdlib + локальные модули).
+
+### Экспорт
+
+- `createApp({ io, game, now, onQuit, seed })` → `{ stop }` — DI-фабрика:
+  оборачивает `game.reset` так, что вызов `game.reset()` (без аргумента,
+  как делает ui.attach по R из game-over) становится `game.reset(Date.now())`
+  (или `seed()` если передана функция `seed`); `Q` маршрутизируется через
+  `onQuit` ui.attach — сначала `stop()`, потом `onQuit()`. `stop()` — raw-mode
+  off, listener снят, цикл остановлен, курсор показан.
+- `start()` — реальная сборка: `newGame({ seed: Date.now(), now: () => Date.now() })`
+  + `io = { stdin: process.stdin, stdout: process.stdout, columns: process.stdout.columns }`
+  + `createApp({ io, game, now: () => Date.now(), onQuit: () => process.exit(0) })`
+  + обработчики SIGINT/SIGTERM. Вызывается ТОЛЬКО из `require.main === module`,
+  поэтому `require()` этого файла в тестах НЕ запускает интерактивный цикл.
+
+### Управление (см. также «Ввод» в module ui)
+
+`←`/`→` — move; `↓` — softDrop; `↑`/`X` — rotate CW; `Z` — rotate CCW;
+`Space` — hardDrop; `P` — pause/resume; `Q` — выход (exit 0);
+`R` (только из game-over) — заново (новый seed = `Date.now()`).
+
+### Тесты
+
+`tests/tetris/main.test.js` — `node --test tests/tetris/main.test.js`:
+source-hygiene (newGame/attach/SIGINT/process.stdin в исходнике); smoke e2e
+(запуск child-процесса, render 'TETRIS', Q → exit 0; SIGINT → exit 0/130);
+Q (child, 'q' → exit 0 с таймаутом); R из game-over (mock io/game через
+createApp: 'r' → `game.reset` вызван ровно 1 раз с числовым seed, quit НЕ
+вызван).
+
+## Запуск и правила
+
+- Запуск: `node src/tetris/main.js` (или `npm start`, если в package.json
+  есть script — см. требование 7 тикета; без внешних зависимостей).
+- Управление: см. выше (клавиши ui + Q/R/SIGINT/SIGTERM от main).
+- Модули: pieces → board → bag → game → ui → main (каждый предыдущий —
+  чистая функция/модуль, только main владет process-level жизненным циклом).
+- Правила: см. «Lock + score/level» в module game (line-clear score,
+  level-up по floor(lines/10)+1, lock-out, top-out); «Ввод»/«DAS» в module ui.
