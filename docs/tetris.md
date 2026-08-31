@@ -141,3 +141,55 @@ soft/hard drop, lock + line-clear + score/level, pause/resume, reset. Чисты
 spawn, гравитация tick, dropInterval, move/rotate, softDrop, hardDrop,
 line-clear, level-up (old level), lock-out, top-out, pause/resume, reset,
 чистота модуля.
+
+## Module: ui (`src/tetris/ui.js`)
+
+Консольный UI (тикет 022): чистый ANSI-рендер + тонкий слой `attach()`
+(raw-mode, ввод, DAS, 30 FPS-цикл). Зависимость: `game.js` (021) + `pieces.js`.
+Две части (DI-граница): `render` — чистая функция без io/process; `attach` —
+единственный модуль с raw-mode и `now()`.
+
+### Экспорт
+
+- `render(frame, columns?)` → string — ЧИСТАЯ функция. `frame` = снапшот
+  `{ board, piece, state, col, row, score, lines, level, next, over, paused }`.
+  Возвращает ANSI-строку: поле 10 колонок × 22 ряда (клетка = 2 display-колонки
+  `█ ` / `▓ ` / `∙ `), HUD `score/lines/level/next`, оверлей `PAUSED` (центр)
+  или `GAME OVER` + статистика + «R — заново, Q — выход». `columns` — ширина
+  терминала для clamp: на узком frame лишние правые колонки отбрасываются
+  (не crash). `columns` по умолчанию = полное поле.
+- `attach(io, game, { now, onQuit })` → `{ stop }` — тонкий слой. `io = { stdin,
+  stdout, columns }` (DI, не `process` напрямую). Включает raw-mode на `io.stdin`,
+  polling ввода, DAS, цикл 30 FPS (33мс): каждый кадр `game.tick(dt)` +
+  `io.stdout.write(render(gameSnapshot(game), io.columns))`. `stop()` — raw-mode
+  off, курсор показать, остановить цикл. `now` — инъекция времени (по умолчанию
+  `() => 0`); внутри `attach` время читается только через `now()`.
+  Input/DAS читают `over`/`paused` через тот же accessor, что `gameSnapshot()`:
+  `game._state ? game._state : game` (real `newGame()` — flat, mock — `_state`).
+- `gameSnapshot(game)` → frame — снапшот game (или mock с `_state`) в render-frame.
+- `COLS` (=10), `ROWS` (=22), `idForPiece`, `visibleCells` — вспомогательные.
+
+### Ввод
+
+`←`/`→` — move; `↓` — softDrop; `↑`/`X` — rotate CW; `Z` — rotate CCW;
+`Space` — hardDrop; `P` — pause/resume; `Q` — `onQuit`; `R` — reset (только если
+`over`). Стрелки приходят escape-последовательностями `\x1b[A..D` (CSI/SS3).
+
+### DAS
+
+Задержка 170мс, затем автоповтор каждые 50мс в то же направление. Реальные
+терминалы не шлют key-up: каждое событие `←`/`→` держит направление до другого
+ключа/`stop()`; цикл кадров по `now()-heldSince` запускает повторы. DAS вызывает
+`game.move` (НЕ `softDrop`) — очки не начисляет.
+
+### Чистота
+
+`render` не трогает `process`/`Date` (чистая функция). `attach` — единственный
+владелец raw-mode и `now()`.
+
+### Тесты
+
+`tests/tetris/ui.test.js` — `node --test tests/tetris/ui.test.js`:
+render (пустой frame, фигура, next-превью, PAUSED, GAME OVER, узкий frame),
+attach lifecycle (raw-mode on/off, ≥1 render, stop()), ввод (каждая клавиша),
+DAS (автоповтор ≥2, без softDrop/score), чистота модуля.
