@@ -523,7 +523,7 @@ test('DAS (ticket 029, B2): a 250ms auto-repeat gap does not kill a held arrow',
   // the gap: the hold was never released, the event is a REPEAT and bumps
   // `events` to 2 → DAS is now allowed to run. move 2.
   t0 = 250;
-  io.write(Buffer.from('\x1b[D']));
+  io.write(Buffer.from('\x1b[D'));
   assert.strictEqual(game._calls.move, 2, 'auto-repeat of the held arrow moved once');
   assert.strictEqual(game._state.col, 1);
 
@@ -601,4 +601,35 @@ test('module purity: attach is the only raw-mode owner', () => {
   }
   const outside = src.slice(0, aStart) + src.slice(aEnd);
   assert.ok(!/setRawMode\(/.test(outside), 'setRawMode only inside attach');
+});
+
+test('DAS (ticket 029, H1): unknown/junk bytes must not cancel a held arrow (default: drift)', async () => {
+  const io = makeIo(60);
+  const game = makeMockGame();
+  let t0 = 0;
+  const h = attach(io, game, { now: () => t0, onQuit: () => {} });
+
+  // A genuinely HELD left arrow: press at t=0, then terminal auto-repeats
+  // keep arriving (growing `events` past 1 so DAS is allowed to run).
+  io.write(Buffer.from('\x1b[D'));           // t=0  press (events=1)
+  t0 = 40;  io.write(Buffer.from('\x1b[D')); // t=40  repeat (events=2)
+  t0 = 80;  io.write(Buffer.from('\x1b[D')); // t=80  repeat (events=3)
+  const movesAtHold = game._calls.move;
+  assert.strictEqual(movesAtHold, 3, 'hold produced 3 moves so far');
+
+  // Stray junk bytes hit stdin while the arrow is still held. They are
+  // UNRECOGNIZED tokens (fall into handleKey's default:), not a key-up.
+  // They must NOT cancel the hold.
+  t0 = 90; io.write(Buffer.from([0x01, 0x03, 0x9b]));
+
+  // The hold must survive the junk: DAS keeps firing (events >= 2 and the
+  // 500ms silence window is intact). At t=270 the hold is alive
+  // (270-80=190 < 500) and DAS_DELAY(170) has passed since the t=80
+  // re-arm, so repeats fire: move count grows past 3.
+  t0 = 270;
+  await sleep(80);
+  assert.ok(game._calls.move > movesAtHold,
+    'junk bytes must not cancel a held arrow — DAS kept firing after junk, got ' +
+    game._calls.move + ' moves (expected > ' + movesAtHold + ')');
+  h.stop();
 });

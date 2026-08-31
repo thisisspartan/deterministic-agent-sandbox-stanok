@@ -311,10 +311,20 @@ function attach(io, game, opts) {
       case 'Q':
         onQuit();
         break;
-      default:
-        // Any other key (including ESC and unhandled chars) releases the hold.
+      case 'esc':
+        // ESC is the ONLY byte-level release path (besides handleKeyUp).
+        // parseKeys emits 'esc' for a lone ESC or an in-buffer partial
+        // sequence the player explicitly typed; that IS a deliberate
+        // "stop drifting" gesture, so it releases the hold.
         heldDir = 0;
         repeatsFired = 0;
+        break;
+      default:
+        // Ticket 029 (H1): unrecognized/garbage bytes are NOT a key-up.
+        // The terminal sends NO key-up for arrows; a stray byte must not
+        // cancel a genuine hold. Only 'esc' (above) and handleKeyUp() may
+        // release the hold. (Pre-029 this branch reset heldDir on every
+        // unknown byte, cutting in-progress DAS short on junk input.)
         break;
     }
   }
