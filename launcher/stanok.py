@@ -66,6 +66,11 @@ SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://192.168.8.131:8080")
 LOCAL_PROXY = os.environ.get("STANOK_PROXY", "http://192.168.8.131:8118")
 NO_PROXY = os.environ.get("STANOK_NO_PROXY", "192.168.8.131,localhost,127.0.0.1")
 TG_TIMEOUT = float(os.environ.get("STANOK_TG_TIMEOUT", "120"))
+# Жёсткий дедлайн на ОДНУ попытку main-прогона (секунды). 0 = выключен (поведение не
+# меняется). При ненулевом значении зависшая попытка (молчаливый stall llama-server,
+# бесконечный gen loop) не сожжёт часы: asyncio.wait_for отменит её -> SESSION-ERROR.
+# WARN-only _stall_watchdog остаётся диагностикой; kill — только по этому дедлайну.
+ATTEMPT_TIMEOUT_S = float(os.environ.get("STANOK_ATTEMPT_TIMEOUT_S", "0") or 0)
 
 # --- Cloud-ревьюер (C2): внешний LLM, секрет только через envp --------------------
 CLOUD_BASE_URL = os.environ.get("STANOK_CLOUD_BASE_URL", "https://api.deepseek.com/anthropic")
@@ -494,8 +499,12 @@ def _run_one_test(t: str, tests_dir: str) -> tuple[str, str] | None:
     """Запускает один *.test.js. None = PASS, иначе (относительный путь, причина)."""
     rel = os.path.relpath(t, tests_dir)
     try:
-        p = subprocess.run(["node", t], cwd=REPO_ROOT, capture_output=True,
-                           text=True, timeout=60)
+        # --test: node:test-раннер (честные TAP/exit-коды). --test-force-exit:
+        # файл с живыми таймерами (setInterval в ui.test.js) не держит event loop —
+        # без него реальный PASS висел до timeout 60s -> ложный FAIL -> лишний ретрай
+        # (022: 2 попытки сгорели). Проверено: pass=0, fail=1, timer-hang завершается.
+        p = subprocess.run(["node", "--test", "--test-force-exit", t], cwd=REPO_ROOT,
+                           capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
         return (rel, "timeout 60s")
     if p.returncode != 0:
@@ -1041,9 +1050,13 @@ def _verify_and_log(attempt: Attempt) -> None:
         for test, line in vfail:
             log(f"VERIFIER: FAIL — {test}: {line}")
         if _last_turn_is_text_only(attempt.stream):
-            log("HEADLESS-STOP: последний ход модели — ТЕКСТОВАЯ реплика без tool_use "
-                "(end_turn/EOS), деливераблы не созданы; в headless оператора нет — "
-                "это FAIL (rc!=0), а не пауза")
+            # Диагностика, НЕ причина: модель могла написать все файлы и закончить
+            # текстовым отчётом (CLAUDE.md прямо просит ≤10 строк текста). Решающий
+            # FAIL определяется упавшими тестами ВЫШЕ. Старый текст «деливераблы не
+            # созданы» вводил в заблуждение (red-team принял его за первопричину).
+            log("NOTE: последний ход модели — текстовая реплика без tool_use. "
+                "Это НЕ самостоятельный FAIL: если файлы записаны, а тесты падают — "
+                "смотри реальные причины выше (таймеры/timeout/баг в коде).")
     emit("attempt.verifier", {"attempt": attempt.id, "ok": verify_ok,
                               "failures": attempt.vfail})
 
@@ -1057,9 +1070,22 @@ async def _run_attempt(job: Job, prompt: str, can_use_tool,
     emit("attempt.start", {"attempt": attempt.id})
     log(f"\n--- попытка {len(job.attempts) + 1} (сессия {sid[:8]}) "
         f"{'(FAIL-контекст)' if local_extra_prompt else ''} ---")
-    exc, result = await run_main_session(prompt, sid, attempt.stream, can_use_tool,
-                                         local_extra_prompt=local_extra_prompt,
-                                         pocock_inject=pocock_inject)
+    if ATTEMPT_TIMEOUT_S > 0:
+        try:
+            exc, result = await asyncio.wait_for(
+                run_main_session(prompt, sid, attempt.stream, can_use_tool,
+                                 local_extra_prompt=local_extra_prompt,
+                                 pocock_inject=pocock_inject),
+                timeout=ATTEMPT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            exc = f"ATTEMPT-TIMEOUT ({int(ATTEMPT_TIMEOUT_S)}s)"
+            result = None
+            log(f"!!! ДЕДЛАЙН ПОПЫТКИ ({int(ATTEMPT_TIMEOUT_S)}s): попытка отменена — "
+                f"сессия {sid[:8]} не завершилась вовремя (stall/долгий gen-loop)")
+    else:
+        exc, result = await run_main_session(prompt, sid, attempt.stream, can_use_tool,
+                                             local_extra_prompt=local_extra_prompt,
+                                             pocock_inject=pocock_inject)
     attempt.exc = exc
     attempt.result = result
     job.attempts.append(attempt)  # важно: job.last()/len(job.attempts) живут этим
@@ -1491,7 +1517,14 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--background", action="store_true", help="детач в фон")
     r.add_argument("--local-retries", type=int, default=int(os.environ.get("STANOK_LOCAL_RETRIES", "1")))
     r.add_argument("--post-defect-retries", type=int, default=2)
-    r.add_argument("--no-cloud", action="store_true", help="подавить cloud_review")
+    # Облако ПОДАВЛЕНО по умолчанию (решение оператора 2026-08-31): дефолтный прогон
+    # идёт локально и без внешних вызовов. Явный --cloud включает FAIL-only cloud_review
+    # (он ловил реальные дефекты в 019/022, но стоит внешних вызовов и времени).
+    r.add_argument("--cloud", action="store_false", dest="no_cloud",
+                   help="ВКЛЮЧИТЬ cloud-ревью (FAIL-only). По умолчанию облако подавлено.")
+    r.add_argument("--no-cloud", action="store_true", dest="no_cloud",
+                   help="подавить cloud_review (по умолчанию; можно указывать явно)")
+    r.set_defaults(no_cloud=True)
     r.add_argument("--pocock-inject", action="store_true")
     r.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
     r.set_defaults(func=cmd_dispatch_run)
@@ -1590,8 +1623,10 @@ def cmd_dispatch_run(args) -> int:
         cmd += ["--post-defect-retries", str(args.post_defect_retries)]
         if args.direct:
             cmd.append("--direct")
-        if args.no_cloud:
-            cmd.append("--no-cloud")
+        # Облако по умолчанию подавлено (--no-cloud); ребёнку передаём ЯВНО актуальное
+        # значение — иначе --cloud у родителя (no_cloud=False) молча терялся бы на
+        # дефолте ребёнка (no_cloud=True) и облако подавлялось вопреки явному флагу.
+        cmd.append("--no-cloud" if args.no_cloud else "--cloud")
         if args.pocock_inject:
             cmd.append("--pocock-inject")
         # КАТЕГОРИЧЕСКИ НЕ добавлять: --background, --detached (спавн-цикл),
