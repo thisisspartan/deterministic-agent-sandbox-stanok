@@ -89,3 +89,53 @@ golden-14 для seed=1 (первые 14 `next()` = 2 мешка), 7-bag propert
 8–14 = перестановки всех 7), `peek()` не расходует мешок, `reset(1)` = `newBag(1)`,
 детерминизм (два `newBag(42)`, 21 `next()`), все значения ∈ 7 фигур, чистота
 модуля в исходнике (нет `process`/`readline`/`setInterval`/`Date`).
+
+## Module: game (`src/tetris/game.js`)
+
+Состояние игры (state machine, тикет 021): гравитация, движение/поворот,
+soft/hard drop, lock + line-clear + score/level, pause/resume, reset. Чистый
+модуль: время — только через `now()`/`dt`, нет `process`/`readline`/
+`setInterval`/`Date`. Зависимости: `pieces.js` (collides/rotate), `board.js`
+(newBoard/lock), `bag.js` (newBag).
+
+### Экспорт
+
+- `newGame({ seed, now })` → game-объект. `now` — функция `() => ms` (инъекция
+  времени; по умолчанию `() => 0`). Инициализация: `board=newBoard()`,
+  `bag=newBag(seed)`, `score=0`, `lines=0`, `level=1`, `over=false`,
+  `paused=false`, spawn первой фигуры, `next=bag.peek()`.
+- `dropInterval(level)` → `max(80, 812 - level*82)` мс (level 1 = 730,
+  floor 80 с level 9).
+
+### Поля game
+
+`{ piece, state, col, row, board, score, lines, level, next, over, paused }`
+(внутренний аккумулятор `_acc` не часть публичного контракта).
+
+### Методы
+
+- `tick(dt)` — накопление `acc += dt`; пока `acc >= dropInterval(level)`:
+  `acc -= interval`, шаг вниз (при коллизии — lock). No-op при over/paused.
+- `move(dir)` dir∈{−1,+1} → сдвинуть col, если не коллизия; true если сдвинул.
+- `rotate(dir)` dir∈{'CW','CCW'} → `pieces.rotate`; если null — не менять;
+  true если повернул.
+- `softDrop()` — 1 шаг вниз если можно, `score += 1`.
+- `hardDrop()` — вниз до упора, `score += 2*cells`, затем lock.
+- `pause()` / `resume()` — flag; при паузе сброс `_acc=0`.
+- `reset(newSeed)` — полный сброс (board/score/lines/level/bag/over/paused),
+  новый seed, spawn.
+
+### Lock + score/level
+
+После hardDrop или когда гравитация упёрлась (упрощённый lock-delay):
+`board.lock` → `{board, clearedRows n}`; `score += [0,100,300,500,800][n]*level`
+(СТАРЫЙ level); `lines += n`; `level = floor(lines/10)+1`. Lock-out: зафиксированная
+фигура имела ≥1 клетки в row 0–1 ПОСЛЕ clear → `over=true`. Spawn следующей;
+если spawn коллизит → `over=true`.
+
+### Тесты
+
+`tests/tetris/game.test.js` — `node --test tests/tetris/game.test.js`:
+spawn, гравитация tick, dropInterval, move/rotate, softDrop, hardDrop,
+line-clear, level-up (old level), lock-out, top-out, pause/resume, reset,
+чистота модуля.
