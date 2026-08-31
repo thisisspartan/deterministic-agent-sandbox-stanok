@@ -30,3 +30,29 @@
 ### Тесты
 
 `tests/tetris/pieces.test.js` — `node --test tests/tetris/pieces.test.js`.
+
+## Module: board (`src/tetris/board.js`)
+
+Доска 10×22, фиксация фигур, очистка рядов. Чистый модуль: без IO, таймеров,
+`Date` и импорта `pieces.js` (таблица клеток продублирована внутри — board
+работает с клетками, а не с фигурами).
+
+Сетка: `grid[row][col]`, row 0 = верх (скрытый), row 21 = дно; `0` = пусто,
+`>0` = занято (значение = id фигуры для цвета). Все функции чистые: вход не
+мутируется, новый board возвращается объектом.
+
+### Экспорт
+
+- `newBoard()` → `{ grid }` — 22 ряда × 10 колонок, все `0`, ряды независимы.
+- `inBounds(col, row)` → boolean: `0<=col<10 && 0<=row<22`.
+- `isFullRow(grid, row)` → boolean: все 10 клеток ряда заняты.
+- `clearLines(grid)` → `{ board, n }` — удаляет полные ряды, сдвигает верх
+  вниз, дополняет сверху пустыми; `n` = число удалённых рядов.
+- `lock(grid, piece, state, col, row)` → `{ board, clearedRows }` — записывает
+  клетки фигуры (значение = piece-id) в grid (клетки со `row < 0` пропускаются),
+  затем делает то же, что `clearLines`. score/level/lines не трогает
+  (это game.js, тикет 021).
+
+### Тесты
+
+`tests/tetris/board.test.js` — `node --test tests/tetris/board.test.js`.
