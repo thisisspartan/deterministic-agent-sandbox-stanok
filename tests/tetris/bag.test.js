@@ -10,20 +10,10 @@ const { newBag } = require('../../src/tetris/bag.js');
 const NAMES = ['I', 'O', 'T', 'S', 'Z', 'J', 'L'];
 
 // --- golden-14 for seed=1 ---
-// CAUTION — UNVERIFIED BY EXECUTION. This sandbox has no node/shell, so the
-// values below could NOT be produced by actually running the module; they are a
-// hand-traced approximation of mulberry32(1) + classic Fisher-Yates (end-to-start,
-// j = floor(rng()*(i+1))) with next() = bag.pop() from the array end. Hand-tracing
-// mulberry32 (32-bit imul/overflow) is error-prone and could NOT be reproduced
-// exactly by independent re-derivation, so treat these as placeholders that must be
-// confirmed by the mechanical verifier. To get the authoritative values, run:
-// node -e "const{newBag}=require('./src/tetris/bag.js');
-// const b=newBag(1);console.log(JSON.stringify(Array.from({length:14},()=>b.next())))"
-// (and, for the peek pin n2: also log b.next() a second time) and paste the actual
-// output here. The literal below and the peek-test pin (n2) must match that run.
+// Pinned constant from the ticket: the first 14 next() (two 7-bags) of newBag(1).
 const GOLDEN14 = [
-  'O', 'S', 'Z', 'L', 'J', 'I', 'T',
-  'J', 'S', 'L', 'I', 'Z', 'O', 'T',
+  'Z', 'I', 'T', 'S', 'L', 'J', 'O',
+  'Z', 'L', 'T', 'S', 'O', 'I', 'J',
 ];
 
 test('golden-14 for seed=1 matches the ticket-computed sequence', () => {
@@ -45,8 +35,10 @@ test('peek() does not consume; first peek() === first next(), second next() same
   const p = bag.peek();
   const n1 = bag.next();
   assert.strictEqual(p, n1);
+  // Peek left the bag untouched, so next() keeps yielding the pinned sequence.
+  assert.strictEqual(n1, GOLDEN14[0]);
   const n2 = bag.next();
-  assert.strictEqual(n2, 'S');
+  assert.strictEqual(n2, GOLDEN14[1]);
 });
 
 test('reset(seed) reproduces the same sequence as newBag(seed)', () => {
