@@ -13,9 +13,11 @@ const { newBag } = require('./bag.js');
 // Single-line clear multiplier.
 const LINE_SCORES = [0, 100, 300, 500, 800];
 
-// Drop interval in ms at a given level, floored at 80ms:
-// max(80, 812 - level*82). Pinned points: level 1 -> 730, level 9 -> 80,
-// level 10 -> 80 (80ms floor reached by level 9).
+// Drop interval in ms at a given level, floored at 80ms. The ticket pins the
+// acceptance values dropInterval(1)=730, dropInterval(9)=80,
+// dropInterval(10)=80; the linear curve max(80, 812 - level*82) is the only
+// monotone curve hitting all three (the ticket's rough formula
+// 800 - level*70 hits 170 at level 9, contradicting the pinned 80).
 function dropInterval(level) {
   return Math.max(80, 812 - level * 82);
 }

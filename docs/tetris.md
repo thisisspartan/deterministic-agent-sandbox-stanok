@@ -105,7 +105,9 @@ soft/hard drop, lock + line-clear + score/level, pause/resume, reset. Чисты
   `bag=newBag(seed)`, `score=0`, `lines=0`, `level=1`, `over=false`,
   `paused=false`, spawn первой фигуры, `next=bag.peek()`.
 - `dropInterval(level)` → `max(80, 812 - level*82)` мс (level 1 = 730,
-  floor 80 с level 9).
+  level 9 = 80, level 10 = 80; кривая подобрана под закреплённые точками
+  730/80/80 значения тикета — rough-формула `800 - level*70` даёт 170 на
+  level 9 и противоречит закреплённому 80).
 
 ### Поля game
 

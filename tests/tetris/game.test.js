@@ -88,28 +88,47 @@ test('softDrop: row+1, score+1', () => {
 
 test('hardDrop: piece on bottom, score += 2*cells, cells locked into board', () => {
   const g = newGame({ seed: 1 }); // Z, row 0; Z A max dr=1 -> anchor stops at 20
+  // Snapshot the falling piece BEFORE the drop: after the lock, g.piece/col/row
+  // describe the NEW spawned piece, not the dropped one.
+  const p0 = g.piece;
+  const c0 = g.col;
+  const r0 = g.row;
   const s0 = g.score;
   g.hardDrop();
-  assert.strictEqual(g.row, 20); // bottom cells at rows 20,21
-  assert.strictEqual(g.score, s0 + 2 * 20);
-  // All Z A-cells at (g.col, g.row) must be occupied in the grid.
-  const locked = cells('Z', 'A', g.col, g.row).every(([c, r]) => g.board.grid[r][c] !== 0);
+  // Simulated rest: Z A max dr=1, empty board -> 20 rows of fall, anchor at 20
+  // (cells span rows 20..21 at col 3).
+  assert.strictEqual(p0, 'Z');
+  assert.strictEqual(r0, 0);
+  assert.strictEqual(s0 + 2 * 20, g.score);
+  // All Z A-cells at the KNOWN rest anchor (3, 20) must be occupied in the grid.
+  const locked = cells('Z', 'A', c0, 20).every(([c, r]) => g.board.grid[r][c] !== 0);
   assert.ok(locked);
+  // Spawn-after-lock: the game now holds the next bag piece (golden 2nd = I)
+  // at its spawn position.
+  assert.strictEqual(g.piece, 'I');
+  assert.strictEqual(g.col, SPAWN.I.col);
+  assert.strictEqual(g.row, 0);
 });
 
 test('line-clear: fill a row except 1 cell, hardDrop completes it -> n=1', () => {
   // Seed whose first piece is 'L': A = [[2,0],[0,1],[1,1],[2,1]] (max dr=1).
   const seed = seedWithFirst('L');
   const g = newGame({ seed });
-  // L at anchor row 20 occupies row 21 cols 0,1,2 and row 20 col 2.
-  // Pre-fill row 21 except cols 0,1,2 so L completes it.
-  for (let c = 0; c < 10; c++) if (c >= 3) g.board.grid[21][c] = 9;
+  // L at spawn col 3, anchor row 20, occupies row 21 cols 3,4,5 and row 20 col 5.
+  // Pre-fill row 21 at every col EXCEPT where L lands (3,4,5): cols 0,1,2 and
+  // 6,7,8,9. That makes row 21 complete exactly when L locks -> n=1.
+  for (let c = 0; c < 10; c++) if (c < 3 || c >= 6) g.board.grid[21][c] = 9;
   const s0 = g.score;
   g.hardDrop();
   assert.strictEqual(g.lines, 1);
-  assert.strictEqual(g.row, 20);
   // 2*20 hard-drop + single-line clear 100*level(1).
   assert.strictEqual(g.score, s0 + 2 * 20 + 100 * 1);
+  // Clearing the bottom row (21) removes it; the L cell that sat just above it
+  // (row 20, col 5) drops down into the vacated bottom row, landing at (5,21).
+  assert.ok(g.board.grid[21][5] !== 0);
+  // Spawn-after-lock: the next piece is freshly spawned at row 0, state A.
+  assert.strictEqual(g.row, 0);
+  assert.strictEqual(g.state, 'A');
 });
 
 test('level-up: lines 9 -> 10 raises level 1 -> 2, clear score uses OLD level', () => {
@@ -117,9 +136,10 @@ test('level-up: lines 9 -> 10 raises level 1 -> 2, clear score uses OLD level', 
   const g = newGame({ seed });
   // Put the game at 9 lines already; this clear takes it to 10.
   g.lines = 9;
-  // L at anchor row 20 occupies row 21 cols 0,1,2 (spawn col 3). Pre-fill the
-  // rest of row 21 so the single clear brings lines 9 -> 10.
-  for (let c = 0; c < 10; c++) if (c >= 3) g.board.grid[21][c] = 9;
+  // L at spawn col 3, anchor row 20, occupies row 21 cols 3,4,5. Pre-fill every
+  // other col of row 21 (0,1,2 and 6,7,8,9) so the drop completes it and the
+  // single clear brings lines 9 -> 10.
+  for (let c = 0; c < 10; c++) if (c < 3 || c >= 6) g.board.grid[21][c] = 9;
   const s0 = g.score;
   g.hardDrop();
   assert.strictEqual(g.lines, 10);
