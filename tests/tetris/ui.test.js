@@ -331,9 +331,10 @@ test('DAS silence timeout: left pressed then released (no repeat bytes) stops au
 
   // Emulate key release: a raw-mode terminal sends NO key-up for arrows,
   // so "release" = silence. Advance the injected clock far past both
-  // DAS_DELAY (170ms) and the KEY_UP_TIMEOUT silence window (200ms). If the
+  // DAS_DELAY (170ms) and the KEY_UP_TIMEOUT silence window (500ms, ticket
+  // 029 — raised from 200ms to outlast a slow auto-repeat interval). If the
   // silence release is not implemented, dasStep keeps auto-repeating.
-  t0 = 500;
+  t0 = 600;
   await sleep(150);
 
   const movesAfterRelease = game._calls.move;
@@ -413,16 +414,17 @@ test('DAS release: left pressed, released, then right pressed -> moves only righ
   io.write(Buffer.from('\x1b[D')); // left press at t=0
   assert.strictEqual(game._state.col, 2);
 
-  // Release = silence: wait past KEY_UP_TIMEOUT with no events.
-  t0 = 300;
+  // Release = silence: wait past KEY_UP_TIMEOUT (500ms, ticket 029) with no
+  // events. At t=600 the left hold is dropped, so no left drift.
+  t0 = 600;
   await sleep(80);
   assert.strictEqual(game._state.col, 2, 'no drift while held-then-released');
 
   // Fresh right press: move right once, hold cleared, nothing else moves left.
-  t0 = 310;
+  t0 = 620;
   io.write(Buffer.from('\x1b[C'));
   assert.strictEqual(game._state.col, 3, 'right press moved right once');
-  t0 = 600;
+  t0 = 1300;
   await sleep(120);
   assert.strictEqual(game._state.col, 3, 'no left/right drift after the hold was released by timeout');
   h.stop();
@@ -445,6 +447,120 @@ test('DAS: auto-repeat only while the key is held in the frame poll', async () =
 });
 
 // --- purity ------------------------------------------------------------------
+
+// --- ticket 029: post-release drift -----------------------------------------
+//
+// Operator symptom: "press left/right and release — but the piece keeps
+// moving". Root cause found by reading src/tetris/ui.js (ticket 029): the
+// pre-029 dasStep() decided whether to fire auto-repeats PURELY from
+// elapsed = now() - heldSince, with no notion of how many arrow events the
+// current hold has actually seen. A raw-mode terminal sends NO key-up for
+// arrows (release = the same bytes as press), so a single TAP leaves the
+// hold armed; once elapsed reaches DAS_DELAY (170ms) dasStep fires repeats
+// until the KEY_UP_TIMEOUT silence window happens to be crossed on a frame
+// boundary. A tap was therefore indistinguishable from a hold.
+//
+//   B1 (deterministic, the operator's exact symptom): a single tap
+//      auto-repeats. The `events` counter (ticket 029 fix) records how many
+//      arrow events the current hold has seen; dasStep() refuses to fire
+//      when events < 2, so a one-event tap can never repeat while a genuine
+//      hold (which keeps arriving terminal auto-repeats and grows `events`
+//      past 1) still does.
+//
+//   B2 (environment-dependent, "drag freezes mid-hold"): KEY_UP_TIMEOUT was
+//      200ms, smaller than the maximum plausible OS/terminal arrow
+//      auto-repeat interval (Linux/GNOME repeat_delay is commonly 250–500ms,
+//      slower on some remote setups). A genuinely HELD arrow whose repeats
+//      arrive slower than 200ms accumulated >200ms of arrow-silence between
+//      events, so dasStep killed the hold mid-drag. Ticket 029 raises the
+//      window to 500ms: it outlasts the maximum sane repeat interval while
+//      still stopping DAS within one frame (~33ms) of a real release.
+//
+// The three tests below are red-phase: each FAILS against the pre-029 code
+// (B1: a tap drifts to move 2; B2: a 250ms-gap hold is killed and DAS
+// never fires) and PASSES against the fixed code.
+
+test('DAS (ticket 029, B1): a single tap must not auto-repeat — the operator drift', async () => {
+  const io = makeIo(60);
+  const game = makeMockGame();
+  let t0 = 0;
+  const h = attach(io, game, { now: () => t0, onQuit: () => {} });
+
+  // One left press at t=0 (a tap: the key is released immediately, but the
+  // terminal cannot say so — no key-up bytes arrive). Immediate move only.
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 1, 'single press moved once');
+  assert.strictEqual(game._state.col, 2);
+
+  // Advance the clock to t=180 and let frames run. 180ms is PAST DAS_DELAY
+  // (170) but WITHIN the silence window, so the pre-029 dasStep — which
+  // looked only at elapsed — fires an auto-repeat here: elapsed=180>=170,
+  // due=1 → move 2 (the drift). The ticket-029 `events < 2` gate stops it:
+  // a tap has exactly one event, so dasStep returns before reaching the
+  // fire logic and the piece stays put.
+  t0 = 180;
+  await sleep(80);
+  assert.strictEqual(game._calls.move, 1,
+    'a single tap must never auto-repeat (tap drift), got ' + game._calls.move + ' moves');
+  assert.strictEqual(game._state.col, 2, 'col unchanged after a tap');
+  h.stop();
+});
+
+test('DAS (ticket 029, B2): a 250ms auto-repeat gap does not kill a held arrow', async () => {
+  const io = makeIo(60);
+  const game = makeMockGame();
+  let t0 = 0;
+  const h = attach(io, game, { now: () => t0, onQuit: () => {} });
+
+  // Press LEFT at t=0 (the initial press of a HELD arrow) → immediate move.
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 1, 'initial press moved once');
+  assert.strictEqual(game._state.col, 2);
+
+  // 250ms later the OS/terminal delivers the arrow's auto-repeat (the key is
+  // genuinely still held; repeat_delay is commonly 250–500ms). The write is
+  // synchronous with t0=250, so handleKey runs before any frame loop sees
+  // the gap: the hold was never released, the event is a REPEAT and bumps
+  // `events` to 2 → DAS is now allowed to run. move 2.
+  t0 = 250;
+  io.write(Buffer.from('\x1b[D']));
+  assert.strictEqual(game._calls.move, 2, 'auto-repeat of the held arrow moved once');
+  assert.strictEqual(game._state.col, 1);
+
+  // DAS must continue: 170ms after the re-arm (t=420) one repeat is due.
+  // The gap that killed the hold under KEY_UP_TIMEOUT=200 is bridged here —
+  // the repeat arrived, refreshed the silence timer, and `events` crossed
+  // the tap gate, so the hold is a real hold and DAS runs.
+  t0 = 420;
+  await sleep(90);
+  assert.ok(game._calls.move >= 3,
+    'a held arrow whose first repeat arrived after a 250ms gap must keep ' +
+    'auto-repeating (KEY_UP_TIMEOUT must outlast the max repeat interval), ' +
+    'got ' + game._calls.move + ' moves');
+  h.stop();
+});
+
+test('DAS (ticket 029, B3): a released key still stops DAS within one frame past the window', async () => {
+  const io = makeIo(60);
+  const game = makeMockGame();
+  let t0 = 0;
+  const h = attach(io, game, { now: () => t0, onQuit: () => {} });
+
+  // Press LEFT at t=0 → immediate move. Then silence (the key was released;
+  // the terminal cannot say so, so "release" = arrow-silence).
+  io.write(Buffer.from('\x1b[D'));
+  assert.strictEqual(game._calls.move, 1, 'single press moved once');
+  assert.strictEqual(game._state.col, 2);
+
+  // t=600 > KEY_UP_TIMEOUT (500) → dasStep clears the hold; nothing may
+  // move after this frame. (Under pre-029 code a tap could already have
+  // drifted before the window; B1 covers that path.)
+  t0 = 600;
+  await sleep(90);
+  assert.strictEqual(game._calls.move, 1, 'no auto-repeat after the silence window');
+  assert.strictEqual(game._state.col, 2, 'col unchanged after release');
+  h.stop();
+});
 
 test('module purity: render is pure (no process/Date/Date.now in render body)', () => {
   const src = fs.readFileSync(

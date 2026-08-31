@@ -21,18 +21,20 @@ const ROWS = 22;
 const DAS_DELAY = 170; // ms before auto-repeat starts
 const ARR = 50;        // ms between auto-repeats
 const FPS = 33;        // ms per frame (~30 FPS)
-// Key-up silence window (ticket 028, Variant A). A raw-mode Linux terminal
-// (VT100/xterm class) sends NO key-up for arrows — release is the SAME bytes
-// as press (e.g. `\x1b[D` both ways), so a released left/right cannot be
-// detected from the byte stream alone. Instead the hold is considered released
-// once no arrow event arrives for longer than this: `now() - lastArrowEventT
-// > KEY_UP_TIMEOUT` clears heldDir in dasStep(). The window is chosen larger
-// than any sane terminal/OS auto-repeat period (typically 30–80 ms) so a
-// genuinely held arrow (which keeps emitting key-down repeats and refreshes
-// lastArrowEventT on every event) is never misread as a release, while a
-// truly released key (silence) stops DAS within one frame (~33 ms) after the
-// window expires. Verified in docs/tetris.md «Управление».
-const KEY_UP_TIMEOUT = 200; // ms of arrow silence treated as key release
+// Key-up silence window (ticket 028, Variant A; widened in ticket 029). A
+// raw-mode Linux terminal (VT100/xterm class) sends NO key-up for arrows —
+// release is the SAME bytes as press (e.g. `\x1b[D` both ways), so a released
+// left/right cannot be detected from the byte stream alone. Instead the hold
+// is considered released once no arrow event arrives for longer than this:
+// `now() - lastArrowEventT > KEY_UP_TIMEOUT` clears heldDir in dasStep().
+// Ticket 029 raises the window from 200ms to 500ms: the OS/terminal
+// auto-repeat interval (Linux/GNOME `repeat_delay`) is commonly 250–500ms and
+// can be configured higher, so a genuinely HELD arrow whose repeats arrive
+// slower than 200ms was being misread as released mid-hold (DAS froze, or —
+// combined with the opposite-arrow stale-hold bug — the piece kept drifting
+// after the player let go). 500ms outlasts the maximum sane repeat interval
+// while still stopping DAS within one frame (~33ms) of a real release.
+const KEY_UP_TIMEOUT = 500; // ms of arrow silence treated as key release
 
 // ANSI styling.
 const BOLD = '\u001b[1m';
@@ -204,6 +206,15 @@ function attach(io, game, opts) {
   let heldDir = 0;
   let heldSince = 0;
   let repeatsFired = 0; // count of auto-repeats already applied (function-local reset)
+  // Ticket 029: how many left/right arrow events the current hold has seen.
+  // A single tap = exactly one event; a genuinely held arrow keeps arriving
+  // terminal auto-repeats and grows this past 1. dasStep() only fires
+  // auto-repeats when events >= 2, which is what stops a tap from drifting:
+  // a tap (1 event) never reaches the fire threshold, while a hold's first
+  // auto-repeat (arriving ~30–80ms after the press, well before DAS_DELAY
+  // = 170ms) bumps events to 2 so DAS can run. Reset to 0 on every release
+  // path (silence timeout, handleKeyUp, opposite-direction switch).
+  let events = 0;
   // Ticket 028: timestamp of the last arrow (left/right) key event. The
   // terminal sends no key-up, so a RELEASE is emulated by silence: when
   // now() - lastArrowEventT exceeds KEY_UP_TIMEOUT the hold is dropped in
@@ -228,19 +239,34 @@ function attach(io, game, opts) {
     const t = now();
     switch (k) {
       case 'left': {
+        // A 'left' event re-arms the left hold from NOW. The terminal
+        // auto-repeat of a genuinely held left keeps arriving and keeps
+        // re-arming here; a single tap produces exactly ONE such event and
+        // then goes silent. `events` counts how many arrow events this hold
+        // has seen — a tap stays at 1, a hold grows past 1 on its first
+        // auto-repeat. dasStep() only fires repeats when events >= 2, so a
+        // tap can never drift. lastArrowEventT is refreshed on every event so
+        // the silence window in dasStep() measures from the MOST RECENT
+        // event, not the initial press.
+        const isRepeat = (heldDir === -1);
         heldDir = -1;
         heldSince = t;
-        repeatsFired = 0;
         lastArrowEventT = t; // ticket 028: refresh the silence timer
+        repeatsFired = 0;
+        events = isRepeat ? events + 1 : 1;
         const f = flags();
         if (!f.over && !f.paused) game.move(-1);
         break;
       }
       case 'right': {
+        // Symmetric to 'left': a single tap is one event; a held right keeps
+        // re-arming and growing `events`, which is what enables DAS.
+        const isRepeat = (heldDir === 1);
         heldDir = 1;
         heldSince = t;
-        repeatsFired = 0;
         lastArrowEventT = t; // ticket 028: refresh the silence timer
+        repeatsFired = 0;
+        events = isRepeat ? events + 1 : 1;
         const f = flags();
         if (!f.over && !f.paused) game.move(1);
         break;
@@ -305,11 +331,13 @@ function attach(io, game, opts) {
       heldDir = 0;
       repeatsFired = 0;
       heldSince = 0;
+      events = 0;
       lastArrowEventT = 0;
     } else if (k === 'right' && heldDir === 1) {
       heldDir = 0;
       repeatsFired = 0;
       heldSince = 0;
+      events = 0;
       lastArrowEventT = 0;
     }
   }
@@ -338,8 +366,14 @@ function attach(io, game, opts) {
       heldDir = 0;
       repeatsFired = 0;
       heldSince = 0;
+      events = 0;
       return;
     }
+    // Ticket 029: a single tap (one arrow event, no follow-up repeats) must
+    // NOT auto-repeat. A genuinely held arrow has already delivered at least
+    // one terminal auto-repeat (events >= 2) by the time DAS_DELAY elapses,
+    // so this gate only ever suppresses the one-event tap case.
+    if (events < 2) return;
     // Auto-repeats due since the last re-arm (each event reset heldSince and
     // repeatsFired, so `elapsed` never spans across events — a jump past the
     // silence window would have released the hold first).
