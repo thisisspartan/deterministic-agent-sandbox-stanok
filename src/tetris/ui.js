@@ -174,10 +174,14 @@ function parseKeys(buf) {
         i += 3;
         continue;
       }
-      // Trailing ESC (or ESC + one byte) at end of buffer: the arrow sequence
-      // was probably split across reads. Treat as an incomplete sequence and
-      // drop it rather than emitting a spurious 'esc' key.
-      if (i + 1 >= buf.length) break;
+      // Trailing incomplete arrow at end of buffer: a 3-byte arrow can only be
+      // SPLIT across reads if the buffer ends with a lone ESC or with ESC + a
+      // CSI/SS3 introducer ([ / O). In those two shapes drop the remainder and
+      // wait for the next chunk rather than emitting a spurious 'esc' key
+      // (which would cancel a live DAS hold). Any OTHER byte after the ESC
+      // (e.g. ESC 'c') cannot start an arrow, so that ESC is a genuine
+      // standalone ESC and falls through to the 'esc' token below.
+      if (i + 1 >= buf.length || ((b1 === 0x5b || b1 === 0x4f) && i + 2 >= buf.length)) break;
       keys.push('esc');
       i += 1;
       continue;
