@@ -5,7 +5,9 @@
 #
 # Rule — on Write|Edit of a file under src/ or tests/:
 #   * if the matching test file exists  -> run `node tests/<mod>.test.js` from REPO_ROOT;
-#       rc=0 => VERIFY: PASS, else VERIFY: FAIL (reason = first fail line).
+#       rc=0 => VERIFY: PASS, else VERIFY: FAIL (reason = failure block: first
+#       "not ok" TAP block with assertion/expected/actual, up to 25 lines;
+#       non-TAP output -> tail with the stack).
 #   * if no matching test exists yet    -> NO verdict (a non-existent test cannot be run).
 #   * files outside src/ and tests/     -> NO verdict.
 # A NO-verdict exit is silent: nothing is appended to the model context, nothing denied.
@@ -51,7 +53,15 @@ if [ "$RC" -eq 0 ]; then
   jq -n --arg r "VERIFY: PASS reason: $REASON" \
     '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:$r}}'
 else
-  FIRST="$(printf '%s' "$OUT" | grep -iE 'fail|expected|assert|error|not ok' | head -1)"
+  # Failure block: for TAP output (node --test) take the first "not ok" block
+  # (the test line + indented assertion/expected/actual lines) so the model sees
+  # WHY it failed, not just one grep line. Non-TAP output (plain node script):
+  # tail with the stack. Cap at 25 lines to keep the context small.
+  if printf '%s' "$OUT" | grep -qE '^not ok '; then
+    FIRST="$(printf '%s' "$OUT" | awk '/^not ok /{f=1} f{print} f && /^$/{exit}' | head -25)"
+  else
+    FIRST="$(printf '%s' "$OUT" | tail -25)"
+  fi
   REASON="node tests/$MOD.test.js rc=$RC ${FIRST:-unknown failure}"
   jq -n --arg r "VERIFY: FAIL reason: $REASON" \
     '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:$r}}'

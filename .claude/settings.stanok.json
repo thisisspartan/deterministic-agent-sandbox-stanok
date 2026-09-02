@@ -24,7 +24,7 @@
   },
   "permissions": {
     "allow": ["Read", "Write", "Edit", "Grep", "Glob", "Agent"],
-    "deny": ["Bash", "WebSearch", "NotebookEdit", "EnterWorktree", "ExitWorktree", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "Workflow", "SendMessage", "ReportFindings", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate"]
+    "deny": ["WebSearch", "NotebookEdit", "EnterWorktree", "ExitWorktree", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "Workflow", "SendMessage", "ReportFindings", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate"]
   },
   "hooks": {
     "PreToolUse": [
@@ -45,6 +45,12 @@
         "matcher": "Task|Agent",
         "hooks": [
           { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/agent-gate.sh\"" }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/bash-gate.sh\"" }
         ]
       }
     ],
