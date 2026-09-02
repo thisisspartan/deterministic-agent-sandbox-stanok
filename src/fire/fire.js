@@ -36,8 +36,13 @@ const DEFAULT_W = 80;
 const DEFAULT_H = 24;
 const DEFAULT_DECAY = 0.88;   // per-step attenuation, in [0.85..0.92]
 const DEFAULT_SPARKS = 16;
+const SOURCE_HALF = 0.25;     // base source spans W*(1/2..3/4): central 50% (ticket 031 F1)
 const BASE_FLOOR = 0.9;       // base row temperature floor (~1.0 with flicker)
 const SPARKLE = 0.12;         // per-cell noise amplitude (centered, E[0])
+const BREATH_PERIOD = 60;     // frames; 2 s at 30 FPS (ticket 031 F3)
+const BREATH_AMP = 0.15;      // ±15% intensity modulation
+const TAPER_K = 2;            // vertical taper exponent (ticket 031 F2)
+const TAPER_MAX = 0.6;        // top-row rows down to 1 - TAPER_MAX of base intensity
 const SPARK_LIFE_MIN = 0.4;
 const SPARK_LIFE_MAX = 0.9;
 
@@ -55,6 +60,26 @@ function createFire(opts) {
   const heat = Array.from({ length: H }, () => new Array(W).fill(0));
   const base = H - 1;
 
+  // --- ticket 031 geometry ---------------------------------------------------
+  // Central source zone: middle 50% of the width, smooth cosine profile by X
+  // (F1). sparkL/sparkR are the integer column bounds used for spark respawn
+  // and clamping (F4: sparks live only inside the source zone).
+  const srcL = Math.floor(W * (0.5 - SOURCE_HALF));      // W/4
+  const srcR = Math.ceil(W * (0.5 + SOURCE_HALF));       // 3W/4 (exclusive)
+  const srcHalf = Math.max(1, srcR - srcL);
+  const srcMask = new Array(W).fill(0);
+  for (let x = srcL; x < srcR; x++) {
+    const u = (x - srcL) / srcHalf;          // 0..1 across the zone
+    srcMask[x] = 0.5 * (1 + Math.cos(Math.PI * (u * 2 - 1))); // 1 at center, 0 at edges
+  }
+  // Vertical taper (F2): row strength decreases from the base upward so the
+  // flame becomes a tongue, wide at the bottom and thin at the top.
+  const taper = new Array(H);
+  for (let y = 0; y < H; y++) {
+    const fromBase = (base - y) / H;
+    taper[y] = 1 - Math.pow(fromBase, TAPER_K) * TAPER_MAX;
+  }
+
   // Sparks live at float coordinates so they drift smoothly; life counts down
   // to 0 then the spark respawns at the base (resurrection per ticket).
   const sparks = [];
@@ -65,43 +90,58 @@ function createFire(opts) {
   }
 
   function respawn(s) {
-    s.x = 1 + rng() * (Math.max(1, W - 2));
+    // F4: sparks are born only inside the central source zone.
+    s.x = srcL + 0.5 + rng() * (srcHalf - 1);
     s.y = base - rng() * 0.5;
     s.vy = -(0.15 + rng() * 0.1);
     s.life = SPARK_LIFE_MIN + rng() * (SPARK_LIFE_MAX - SPARK_LIFE_MIN);
   }
 
+  let frame = 0;
+
   function step() {
-    // Ticket formula: heat[y][x] = avg(heat[y+1][x-1..x+1]) * decay +
-    // noise*sparkle. The noise is CENTERED ((rng()-0.5)*SPARKLE, E[0]), so the
-    // expected field decays geometrically upward (0.88^rows above the base) —
-    // the flame cools with height while the jitter makes it flicker.
+    // Ticket formula: heat[y][x] = avg(heat[y+1][x-1..x+1]) * decay *
+    // taper(y) + noise*sparkle. The noise is CENTERED ((rng()-0.5)*SPARKLE,
+    // E[0]); the expected field decays geometrically upward (0.88^rows above
+    // the base) while taper() squeezes the upper rows — the flame cools and
+    // narrows with height (F2) while the jitter makes it flicker.
     const next = Array.from({ length: H }, () => new Array(W).fill(0));
     for (let y = 0; y < H; y++) {
       const below = heat[y + 1]; // undefined above the top row => row stays 0
       if (!below) continue;
       const row = next[y];
+      const t = taper[y];
       for (let x = 0; x < W; x++) {
         const l = x > 0 ? below[x - 1] : 0;
         const r = x < W - 1 ? below[x + 1] : 0;
-        const v = ((l + below[x] + r) / 3) * decay + (rng() - 0.5) * SPARKLE;
+        const v = ((l + below[x] + r) / 3) * decay * t + (rng() - 0.5) * SPARKLE;
         row[x] = clamp01(v);
       }
     }
-    // Heat source: base row ~1.0 with flicker (noise).
+    // F3: slow breathing — a low-frequency sine (period 60 frames = 2 s at
+    // 30 FPS, ±15%) modulates the SOURCE intensity, so the whole flame
+    // "breathes" as the wave propagates up through transport (it must not
+    // multiply each row: that would compound with height). Deterministic via
+    // the frame counter: one seed => identical frames.
+    const breath = 1 - BREATH_AMP * (0.5 + 0.5 * Math.sin(2 * Math.PI * frame / BREATH_PERIOD));
+    // Heat source (F1): central zone only, cosine profile by X, flicker
+    // (per-cell noise) preserved.
     const b = next[base];
     for (let x = 0; x < W; x++) {
-      b[x] = clamp01(BASE_FLOOR + 0.1 * rng());
+      const m = srcMask[x];
+      b[x] = m === 0 ? 0 : clamp01(m * (BASE_FLOOR + 0.1 * rng()) * breath);
     }
     for (let y = 0; y < H; y++) heat[y] = next[y];
+    frame++;
 
-    // Sparks: rise, fade, respawn at the base (life or leaving the top).
+    // Sparks: rise, fade, respawn inside the source zone (life or top exit).
     const dt = 1;
     for (const s of sparks) {
       s.y += s.vy * dt;
       s.x += (rng() - 0.5) * 0.2 * dt; // lateral drift
-      if (s.x < 0) s.x = 0;
-      else if (s.x >= W) s.x = W - 1; // keep x within [0, W)
+      // Keep sparks inside the flame column (F4).
+      if (s.x < srcL + 0.5) s.x = srcL + 0.5;
+      else if (s.x >= srcR - 0.5) s.x = srcR - 0.5;
       s.life -= 0.004 * dt;
       if (s.life <= 0 || s.y < 0) respawn(s);
     }
