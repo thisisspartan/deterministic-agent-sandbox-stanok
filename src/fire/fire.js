@@ -218,6 +218,24 @@ const BRICK_COLORS = [24, 25, 26, 27, 58];     // dark brick palette (ticket 033
 const DARK_BG = 234;                            // window background, heat≈0 (233–235 range)
 const BG_CODE = ESC + '[38;5;' + DARK_BG + 'm';
 
+// --- flame density glyphs (ticket 034 R1) -------------------------------------
+//
+// Ramp from sparse (index 0 = space) to dense. Must avoid brick glyphs
+// (▓█▒), spark glyph (✦), and the log glyphs (=, #, -) that R3 test forbids
+// anywhere in the frame. Index 0 is a space so cells with heat <= FLAME_MIN
+// look identical to the previous "invisible flame" behavior (background).
+// The last glyph "@" is the heaviest visually.
+const FLAME_GLYPHS = ' .,;:~*oO@';
+const FLAME_MIN = 0.08;
+
+// Map a heat value to a ramp index in [1..len-1]; 0 (heat <= FLAME_MIN) -> 0.
+function flameGlyphIndex(heat) {
+  if (heat <= FLAME_MIN) return 0;
+  const n = FLAME_GLYPHS.length - 1;
+  const i = Math.floor(heat * n);
+  return i >= n ? n : i;
+}
+
 // Deterministic pseudo-random brick pattern (fixed seed — static frame).
 // Ticket 033 F1: 5-color dark brick palette {24,25,26,27,58}.
 function brickAt(row, col) {
@@ -249,8 +267,12 @@ function render(state, width) {
     const line = cells[y];
     for (let x = 0; x < cols; x++) {
       if (frame(y, x)) continue; // filled after the flame pass
-      const idx = row[x] > 0 ? colorIndex(row[x]) : DARK_BG; // R2: dark window bg
-      line[x] = { c: ESC + '[38;5;' + idx + 'm' };
+      const h = row[x];
+      const idx = h > 0 ? colorIndex(h) : DARK_BG; // R2: dark window bg
+      // Ticket 034 R1: window cell with heat > FLAME_MIN carries a density
+      // glyph from FLAME_GLYPHS; color code is left untouched.
+      const g = FLAME_GLYPHS[flameGlyphIndex(h)];
+      line[x] = { c: ESC + '[38;5;' + idx + 'm', glyph: g };
     }
   }
   // Static frame (R1): bricks in dark palette, state-independent.
