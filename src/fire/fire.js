@@ -34,11 +34,13 @@ function clamp(v, lo, hi) {
 
 const DEFAULT_W = 80;
 const DEFAULT_H = 24;
-const DEFAULT_DECAY = 0.88;   // per-step attenuation, in [0.85..0.92]
+const DEFAULT_DECAY = 0.96;   // per-step attenuation, in [0.85..0.96] (ticket 033 F3)
 const DEFAULT_SPARKS = 16;
 const SOURCE_HALF = 0.25;     // base source spans W*(1/2..3/4): central 50% (ticket 031 F1)
 const BASE_FLOOR = 0.9;       // base row temperature floor (~1.0 with flicker)
 const SPARKLE = 0.12;         // per-cell noise amplitude (centered, E[0])
+const FLICKER_LOW = -0.25;    // per-cell flicker offset (ticket 033 F2)
+const FLICKER_HIGH = 0.5;     // per-cell flicker scale: flicker = LOW + HIGH*rng()
 const BREATH_PERIOD = 60;     // frames; 2 s at 30 FPS (ticket 031 F3)
 const BREATH_AMP = 0.15;      // ±15% intensity modulation
 const TAPER_K = 2;            // vertical taper exponent (ticket 031 F2)
@@ -51,7 +53,7 @@ function createFire(opts) {
   const W = options.W > 0 ? Math.floor(options.W) : DEFAULT_W;
   const H = options.H > 0 ? Math.floor(options.H) : DEFAULT_H;
   const decay = typeof options.decay === 'number'
-    ? clamp(options.decay, 0.85, 0.92) : DEFAULT_DECAY;
+    ? clamp(options.decay, 0.85, 0.96) : DEFAULT_DECAY;
   const rng = typeof options.rng === 'function'
     ? options.rng
     : mulberry32(options.seed !== undefined ? options.seed : 1);
@@ -100,21 +102,34 @@ function createFire(opts) {
   let frame = 0;
 
   function step() {
-    // Ticket formula: heat[y][x] = avg(heat[y+1][x-1..x+1]) * decay *
-    // taper(y) + noise*sparkle. The noise is CENTERED ((rng()-0.5)*SPARKLE,
-    // E[0]); the expected field decays geometrically upward (0.88^rows above
+    // Ticket formula: heat[y][x] = vertical_diffusion(heat[y+1..y+2]) * decay
+    // * taper(y) + noise*sparkle. The noise is CENTERED ((rng()-0.5)*SPARKLE,
+    // E[0]); the expected field decays geometrically upward (decay^rows above
     // the base) while taper() squeezes the upper rows — the flame cools and
-    // narrows with height (F2) while the jitter makes it flicker.
+    // narrows with height while the per-cell flicker at the source (F2) and
+    // the SPARKLE jitter make it flicker.
     const next = Array.from({ length: H }, () => new Array(W).fill(0));
     for (let y = 0; y < H; y++) {
       const below = heat[y + 1]; // undefined above the top row => row stays 0
       if (!below) continue;
+      const up = (y + 2 < H) ? heat[y + 2] : null; // row two below (vertical diffusion)
       const row = next[y];
       const t = taper[y];
       for (let x = 0; x < W; x++) {
         const l = x > 0 ? below[x - 1] : 0;
         const r = x < W - 1 ? below[x + 1] : 0;
-        const v = ((l + below[x] + r) / 3) * decay * t + (rng() - 0.5) * SPARKLE;
+        let v;
+        if (up) {
+          const ul = x > 0 ? up[x - 1] : 0;
+          const ur = x < W - 1 ? up[x + 1] : 0;
+          // Ticket 033 F3: 3x3 + 3x1 vertical diffusion (rows y+1 and y+2).
+          // Pulls heat from two rows below so the flame tongue extends upward
+          // while the taper still squeezes the top.
+          v = ((l + 2 * below[x] + r + ul + 2 * up[x] + ur) / 8) * decay * t
+            + (rng() - 0.5) * SPARKLE;
+        } else {
+          v = ((l + below[x] + r) / 3) * decay * t + (rng() - 0.5) * SPARKLE;
+        }
         row[x] = clamp01(v);
       }
     }
@@ -127,9 +142,15 @@ function createFire(opts) {
     // Heat source (F1): central zone only, cosine profile by X, flicker
     // (per-cell noise) preserved.
     const b = next[base];
+    // Ticket 033 F2: per-cell flicker. Each cell of the base row receives its
+    // own noise `fl = FLICKER_LOW + FLICKER_HIGH * rng()` in [-0.25, 0.25),
+    // so adjacent cells differ sharply (not a smooth cosine wave). Amplitude
+    // picked so the row's max-min stays well above the 0.3 threshold.
     for (let x = 0; x < W; x++) {
       const m = srcMask[x];
-      b[x] = m === 0 ? 0 : clamp01(m * (BASE_FLOOR + 0.1 * rng()) * breath);
+      if (m === 0) { b[x] = 0; continue; }
+      const fl = FLICKER_LOW + FLICKER_HIGH * rng();
+      b[x] = clamp01(m * (BASE_FLOOR + fl) * breath);
     }
     for (let y = 0; y < H; y++) heat[y] = next[y];
     frame++;
@@ -193,15 +214,16 @@ const SPARK_GLYPH = '\u2726'; // ✦ bright pixel over the flame
 // (same for any `state`), so the flame never flickers the bricks.
 
 const BRICKS = ['\u2593', '\u2588', '\u2592']; // ▓ █ ▒
-const BRICK_COLORS = [236, 237, 238];           // dark gray brick tones (236–239 range)
+const BRICK_COLORS = [24, 25, 26, 27, 58];     // dark brick palette (ticket 033 F1)
 const DARK_BG = 234;                            // window background, heat≈0 (233–235 range)
 const BG_CODE = ESC + '[38;5;' + DARK_BG + 'm';
 
 // Deterministic pseudo-random brick pattern (fixed seed — static frame).
+// Ticket 033 F1: 5-color dark brick palette {24,25,26,27,58}.
 function brickAt(row, col) {
   // row: frame row (0..H-1), col: frame column (0..cols-1)
-  const n = (row * 7919 + col * 104729 + 12345) % 3;
-  return { glyph: BRICKS[n], code: BRICK_COLORS[(n + 1) % 3] };
+  const n = (row * 7919 + col * 104729 + 12345) % BRICKS.length;
+  return { glyph: BRICKS[n], code: BRICK_COLORS[(row * 5 + col * 11 + 3) % BRICK_COLORS.length] };
 }
 
 // Pure: one frame as a single string block. `width` clamps rendered columns on
