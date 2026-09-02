@@ -328,6 +328,15 @@ ALLOWED_WEBFETCH_HOSTS = {
 }
 
 
+def _is_pisonchitsa(cmd: str) -> bool:
+    """Bash-команда = ровно 'bash scripts/run.sh <args>' (или './scripts/...').
+    Никаких shell-операторов/подстановок. Дублирует hooks/bash-gate.sh на
+    уровне лаунчера (can_use_tool срабатывает до хуков)."""
+    if not cmd or any(op in cmd for op in ("|", ";", "&", ">", "<", "$(", "`", "\n")):
+        return False
+    return bool(re.match(r"^\s*(bash\s+)?(\./)?scripts/run\.sh\s+\S", cmd))
+
+
 def classify_criticality(tool_name: str, tool_input: dict) -> tuple[str, str]:
     """C3: hook domain-allowlist отсекает чужие домены до can_use_tool, поэтому
     долетевший WebFetch всегда SAFE. realpath (не abspath): симлинк внутри репо
@@ -344,6 +353,13 @@ def classify_criticality(tool_name: str, tool_input: dict) -> tuple[str, str]:
         if secure and host in ALLOWED_WEBFETCH_HOSTS:
             return "SAFE", f"WebFetch https://{host} (разрешённый read-only домен): {url}"
         return "CRITICAL", f"WebFetch НЕ-разрешённый домен/схема: {url}"
+    if tool_name == "Bash":
+        # Писочница: Bash ТОЛЬКО через scripts/run.sh (test/smoke/list).
+        # Форму признаёт лаунчер (SAFE), остальной Bash — CRITICAL как раньше.
+        # Механический гейт формы — hooks/bash-gate.sh (PreToolUse).
+        cmd = (tool_input or {}).get("command", "")
+        if _is_pisonchitsa(cmd):
+            return "SAFE", f"Bash via pisonchitsa: {cmd[:80]}"
     if tool_name in CRITICAL_TOOLS:
         return "CRITICAL", f"tool={tool_name} в списке критичных"
 
