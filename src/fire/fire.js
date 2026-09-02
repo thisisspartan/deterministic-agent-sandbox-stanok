@@ -186,31 +186,67 @@ const CURSOR_HOME = ESC + '[H';
 const CLEAR_TAIL = ESC + '[' + 'J';
 const SPARK_GLYPH = '\u2726'; // ✦ bright pixel over the flame
 
+// --- fireplace frame (ticket 032 R1/R2) --------------------------------------
+//
+// Static 2D frame, no logs: brick/stone glyphs ▓ █ ▒ in dark palette colors,
+// drawn around a dark window where the flame burns. Frame is state-independent
+// (same for any `state`), so the flame never flickers the bricks.
+
+const BRICKS = ['\u2593', '\u2588', '\u2592']; // ▓ █ ▒
+const BRICK_COLORS = [236, 237, 238];           // dark gray brick tones (236–239 range)
+const DARK_BG = 234;                            // window background, heat≈0 (233–235 range)
+const BG_CODE = ESC + '[38;5;' + DARK_BG + 'm';
+
+// Deterministic pseudo-random brick pattern (fixed seed — static frame).
+function brickAt(row, col) {
+  // row: frame row (0..H-1), col: frame column (0..cols-1)
+  const n = (row * 7919 + col * 104729 + 12345) % 3;
+  return { glyph: BRICKS[n], code: BRICK_COLORS[(n + 1) % 3] };
+}
+
 // Pure: one frame as a single string block. `width` clamps rendered columns on
 // narrow terminals; never touches process/io.
 //
-// Rows are built as per-CELL token arrays ({c: colorCode|null, spark: bool})
-// and emitted at the end — the spark overlay replaces the CELL at (sx, sy),
-// never a raw string offset, so ANSI escape sequences can never be split.
+// Rows are built as per-CELL token arrays ({c: colorCode|null, spark: bool,
+// brick: glyph|null}) and emitted at the end — the spark overlay replaces the
+// CELL at (sx, sy), never a raw string offset, so ANSI escape sequences can
+// never be split.
 function render(state, width) {
   const H = state.H;
-  const cols = typeof width === 'number' && width > 0 ? Math.min(state.W, width) : state.W;
+  const W = state.W;
+  const cols = typeof width === 'number' && width > 0 ? Math.min(W, width) : W;
+  const plinth = H > 4 ? 2 : 1;
+  const lintel = H > 4 ? 2 : 1;
+  const pillar = W > 8 ? 2 : 1;
+  const frame = (y, x) =>
+    y >= H - plinth || y < lintel || x < pillar || x >= cols - pillar;
+
   const cells = Array.from({ length: H }, () => Array.from({ length: cols }, () => ({ c: null })));
   for (let y = 0; y < H; y++) {
     const row = state.heat[y];
     const line = cells[y];
     for (let x = 0; x < cols; x++) {
-      const idx = colorIndex(row[x]);
-      line[x] = { c: idx === null ? null : ESC + '[38;5;' + idx + 'm' };
+      if (frame(y, x)) continue; // filled after the flame pass
+      const idx = row[x] > 0 ? colorIndex(row[x]) : DARK_BG; // R2: dark window bg
+      line[x] = { c: ESC + '[38;5;' + idx + 'm' };
+    }
+  }
+  // Static frame (R1): bricks in dark palette, state-independent.
+  for (let y = 0; y < H; y++) {
+    const line = cells[y];
+    for (let x = 0; x < cols; x++) {
+      if (!frame(y, x)) continue;
+      const b = brickAt(y, x);
+      line[x] = { c: ESC + '[38;5;' + b.code + 'm', glyph: b.glyph };
     }
   }
   // Sparks overlay the flame as bright pixels (cell-level replace).
   for (const s of state.sparks) {
     const sy = Math.max(0, Math.min(H - 1, Math.floor(s.y)));
     const sx = Math.max(0, Math.min(cols - 1, Math.floor(s.x)));
-    cells[sy][sx].spark = true;
+    if (!frame(sy, sx)) cells[sy][sx].spark = true;
   }
-  const lines = cells.map((line, y) => {
+  const lines = cells.map((line) => {
     const parts = [];
     let open = null; // current color code, or null (empty/space)
     for (let x = 0; x < line.length; x++) {
@@ -220,7 +256,7 @@ function render(state, width) {
         open = cell.c;
         if (open !== null) parts.push(open);
       }
-      parts.push(cell.spark ? SPARK_GLYPH : ' ');
+      parts.push(cell.spark ? SPARK_GLYPH : (cell.glyph || ' '));
     }
     if (open !== null) parts.push(ESC + '[0m');
     return parts.join('');
