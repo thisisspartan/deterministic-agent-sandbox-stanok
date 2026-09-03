@@ -48,6 +48,30 @@ const TAPER_MAX = 0.6;        // top-row rows down to 1 - TAPER_MAX of base inte
 const SPARK_LIFE_MIN = 0.4;
 const SPARK_LIFE_MAX = 0.9;
 
+// --- ticket 035: fire life cycle (BURN -> DIE -> EMBER -> REKINDLE) -----------
+// The cycle is driven by a step counter (30 FPS), fully deterministic: same
+// seed => identical phase sequence. BURN keeps the classic steady flame; DIE
+// fades the source multiplier 1.0 -> DIE_MIN linearly; EMBER kills the source
+// and lets a few embers glow in the window base; REKINDLE ramps the multiplier
+// 0 -> 1.0. Phase transitions are counted by steps, not wall-clock time.
+const PHASE_BURN = 0;
+const PHASE_DIE = 1;
+const PHASE_EMBER = 2;
+const PHASE_REKINDLE = 3;
+const BURN_STEPS = 1500;       // ~50 s at 30 FPS
+const DIE_STEPS = 360;         // ~12 s
+const DIE_MIN = 0.15;          // source multiplier at the end of DIE
+const EMBER_STEPS = 240;       // ~8 s
+const REKINDLE_STEPS = 240;    // ~8 s
+const PHASE_STEPS = [BURN_STEPS, DIE_STEPS, EMBER_STEPS, REKINDLE_STEPS];
+const EMBER_ROWS = 2;          // ember rows: base-2, base-3 (window base)
+const EMBER_COUNT = 6;         // how many ember cells smoulder
+const EMBER_FLICK_PERIOD = 8;  // ember flicker period (longer than flame flicker)
+const EMBER_FLICK_AMP = 0.05;  // small flicker amplitude
+const EMBER_BASE_MIN = 0.12;   // ember core heat base in [0.12 .. 0.24]
+const EMBER_BASE_SPAN = 0.12;
+const SPARK_SOURCE_MIN = 0.3;  // sparks re-ignite only above this source strength
+
 function createFire(opts) {
   const options = opts || {};
   const W = options.W > 0 ? Math.floor(options.W) : DEFAULT_W;
@@ -101,7 +125,54 @@ function createFire(opts) {
 
   let frame = 0;
 
+  // --- ticket 035: life cycle (step-counted, deterministic) --------------------
+  let phase = PHASE_BURN;
+  let phaseStep = 0;   // steps elapsed inside the current phase
+  let embers = [];    // [{y, x, base, off}] smouldering cells of the window base
+
+  // Source strength multiplier for the current phase (BURN => 1, DIE fades to
+  // DIE_MIN, EMBER => 0, REKINDLE ramps 0 -> 1 with a smoothstep flare).
+  function sourceMult() {
+    switch (phase) {
+      case PHASE_DIE:
+        return 1 - (1 - DIE_MIN) * (phaseStep / DIE_STEPS);
+      case PHASE_EMBER:
+        return 0;
+      case PHASE_REKINDLE: {
+        const t = phaseStep / REKINDLE_STEPS;
+        return t * t * (3 - 2 * t); // slow ignition, fast flare-up at the end
+      }
+      default:
+        return 1; // BURN
+    }
+  }
+
+  // Entering EMBER: pick a fixed PRNG subset of the source-zone cells in the
+  // window base (1-2 rows above the plinth) — those will smoulder as embers.
+  function enterEmbers() {
+    embers = [];
+    const rows = [base - 2, base - 3];
+    for (let i = 0; i < EMBER_COUNT; i++) {
+      embers.push({
+        y: rows[i % rows.length],
+        x: srcL + 1 + Math.floor(rng() * Math.max(1, srcHalf - 2)),
+        base: EMBER_BASE_MIN + rng() * EMBER_BASE_SPAN,
+        off: Math.floor(rng() * EMBER_FLICK_PERIOD),
+      });
+    }
+  }
+
   function step() {
+    // Advance the phase machine first: transitions fire on step counts, so the
+    // source of THIS frame already reflects the new phase (BURN->DIE is
+    // continuous at mult=1, EMBER->REKINDLE at mult=0).
+    phaseStep++;
+    if (phaseStep >= PHASE_STEPS[phase]) {
+      phaseStep = 0;
+      phase = (phase + 1) % PHASE_STEPS.length;
+      if (phase === PHASE_EMBER) enterEmbers();
+    }
+
     // Ticket formula: heat[y][x] = vertical_diffusion(heat[y+1..y+2]) * decay
     // * taper(y) + noise*sparkle. The noise is CENTERED ((rng()-0.5)*SPARKLE,
     // E[0]); the expected field decays geometrically upward (decay^rows above
@@ -146,25 +217,55 @@ function createFire(opts) {
     // own noise `fl = FLICKER_LOW + FLICKER_HIGH * rng()` in [-0.25, 0.25),
     // so adjacent cells differ sharply (not a smooth cosine wave). Amplitude
     // picked so the row's max-min stays well above the 0.3 threshold.
+    // Ticket 035: multiplied by the phase source multiplier (BURN=1, DIE fades
+    // to DIE_MIN, EMBER=0, REKINDLE ramps 0->1).
+    const mult = sourceMult();
     for (let x = 0; x < W; x++) {
       const m = srcMask[x];
       if (m === 0) { b[x] = 0; continue; }
       const fl = FLICKER_LOW + FLICKER_HIGH * rng();
-      b[x] = clamp01(m * (BASE_FLOOR + fl) * breath);
+      b[x] = clamp01(m * (BASE_FLOOR + fl) * breath * mult);
+    }
+    // Ticket 035 EMBER: the source is out, but a PRNG-chosen subset of the
+    // window-base cells smoulders as embers — a slow sine (period
+    // EMBER_FLICK_PERIOD, longer than flame flicker) plus a small per-frame
+    // jitter. They live in rows 1-2 above the plinth, inside the source zone.
+    if (phase === PHASE_EMBER) {
+      for (const e of embers) {
+        if (e.y < 0 || e.y >= H) continue;
+        const sway = Math.sin(2 * Math.PI * (frame + e.off) / EMBER_FLICK_PERIOD);
+        next[e.y][e.x] = clamp01(e.base + EMBER_FLICK_AMP * sway + (rng() - 0.5) * 0.04);
+      }
     }
     for (let y = 0; y < H; y++) heat[y] = next[y];
     frame++;
 
     // Sparks: rise, fade, respawn inside the source zone (life or top exit).
+    // Ticket 035: a spark can re-ignite only above a minimum source strength
+    // — in EMBER/late-DIE they park at the plinth base (a frame row, where
+    // render() skips them) until the fire is strong enough again. No
+    // hardcoding by phase name: it follows the physical source multiplier.
     const dt = 1;
     for (const s of sparks) {
+      if (s.dead) {
+        if (mult >= SPARK_SOURCE_MIN) { s.dead = false; respawn(s); }
+        continue;
+      }
       s.y += s.vy * dt;
       s.x += (rng() - 0.5) * 0.2 * dt; // lateral drift
       // Keep sparks inside the flame column (F4).
       if (s.x < srcL + 0.5) s.x = srcL + 0.5;
       else if (s.x >= srcR - 0.5) s.x = srcR - 0.5;
       s.life -= 0.004 * dt;
-      if (s.life <= 0 || s.y < 0) respawn(s);
+      if (s.life <= 0 || s.y < 0) {
+        if (mult >= SPARK_SOURCE_MIN) {
+          respawn(s);
+        } else {
+          s.dead = true; // park at the base (plinth row, invisible)
+          s.y = base;
+          s.life = 0.5;
+        }
+      }
     }
     return heat;
   }
