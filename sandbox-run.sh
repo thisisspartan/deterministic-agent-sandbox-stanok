@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Корень репозитория
+# Корень репозитория станка
 REPO_ROOT="${STANOK_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 if ! command -v bwrap &>/dev/null; then
@@ -60,7 +60,6 @@ for bin_file in "$HOST_CLAUDE" "$HOST_NODE"; do
   if [ -n "$bin_file" ] && [ -e "$bin_file" ]; then
     REAL_TARGET="$(readlink -f "$bin_file" || true)"
     if [ -n "$REAL_TARGET" ] && [[ "$REAL_TARGET" == "$HOME/"* ]]; then
-      # Монтируем родительскую папку таргета симлинки, если она внутри $HOME
       REAL_DIR="$(dirname "$REAL_TARGET")"
       if [ -d "$REAL_DIR" ]; then
         BWRAP_ARGS+=(--ro-bind "$REAL_DIR" "$REAL_DIR")
@@ -81,7 +80,13 @@ if [ -f "$HOME/.claude.json" ]; then
   BWRAP_ARGS+=(--bind "$HOME/.claude.json" "$HOME/.claude.json")
 fi
 
-# Монтируем рабочий репозиторий
+# 4. Пробрасываем тикеты супервайзера из родительского каталога СТРОГО в режиме Read-Only
+PARENT_DIR="$(dirname "$REPO_ROOT")"
+if [ -d "$PARENT_DIR/tickets" ]; then
+  BWRAP_ARGS+=(--ro-bind "$PARENT_DIR/tickets" "$PARENT_DIR/tickets")
+fi
+
+# 5. Монтируем рабочий репозиторий станка (чтение/запись)
 BWRAP_ARGS+=(
   --bind "$REPO_ROOT" "$REPO_ROOT"
   --chdir "$REPO_ROOT"
@@ -94,7 +99,7 @@ BWRAP_ARGS+=(
   --unshare-uts
 )
 
-# В фоновом режиме процесс переживает родительскую оболочку
+# В фоновом режиме процесс переживает родительскую оболочку launch.sh
 if [ "${STANOK_BACKGROUND:-0}" != "1" ]; then
   BWRAP_ARGS+=(--die-with-parent)
 fi
