@@ -8,7 +8,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { createFire, render } = require('../../src/fire/fire.js');
+const { createFire, render, FLAME_GLYPHS } = require('../../src/fire/fire.js');
 
 // Window geometry (must match src/fire/fire.js for H=24, W=80).
 const plinth = 2, lintel = 2, pillar = 2;
