@@ -60,39 +60,22 @@ test('G2 density ramp: cells with heat>0.3 differ from cells with heat in (0.08,
     Array.from(hotGlyphs).join('') + ' vs ' + Array.from(warmGlyphs).join(''));
 });
 
-test('G3 bricks untouched: frame glyphs ⊆ {▓,█,▒}, frame colors ⊆ {24,25,26,27,58}, no 236..239', () => {
+test('G3 no frame: zero brick glyphs (▓,█,▒) anywhere, no 236..239; every non-space glyph ∈ FLAME_GLYPHS ∪ {✦}', () => {
   const f = createFire({ seed: 42 });
   for (let i = 0; i < 30; i++) f.step();
   const W = f.W, H = f.H;
   const lines = render(f).split('\n');
-  const allowedColors = new Set([24, 25, 26, 27, 58]);
-  const isFrame = (y, x) => !isWindow(W, H, y, x);
-  const frameGlyphs = new Set();
   for (let y = 0; y < H; y++) {
-    const line = lines[y];
-    // Walk raw string tracking current SGR color.
-    let cur = null;
-    let plainX = 0;
-    let i = 0;
-    while (i < line.length) {
-      if (line.charCodeAt(i) === 0x1b) {
-        const rest = line.slice(i);
-        const m = /^\u001b\[38;5;(\d+)m/.exec(rest);
-        if (m) { cur = parseInt(m[1], 10); i += m[0].length; continue; }
-        const m2 = /^\u001b\[[0-9;]*[A-Za-z]/.exec(rest);
-        if (m2) { if (m2[0] === '\u001b[0m') cur = null; i += m2[0].length; continue; }
-        i++; continue;
+    const plain = strip(lines[y]);
+    // Line 0 carries the cursor-home prefix (\x1b[H, 3 chars, not SGR).
+    const start = y === 0 ? 3 : 0;
+    assert.strictEqual(plain.length, W + start, 'row ' + y + ' has exactly W plain cells');
+    for (let px = start; px < start + W; px++) {
+      const ch = plain[px];
+      assert.ok(!/[▓█▒]/.test(ch), 'no brick glyph at (' + y + ',' + (px - start) + ')');
+      if (ch !== ' ' && ch !== '\u2726') {
+        assert.ok(FLAME_GLYPHS.includes(ch), 'glyph "' + ch + '" belongs to FLAME_GLYPHS');
       }
-      if (isFrame(y, plainX)) {
-        frameGlyphs.add(line[i]);
-        if (line[i] !== ' ') {
-          assert.ok(/[▓█▒]/.test(line[i]), 'frame glyph ' + line[i] + ' is brick');
-          assert.ok(cur !== null && allowedColors.has(cur),
-            'frame color ' + cur + ' in {24,25,26,27,58}');
-        }
-      }
-      plainX++;
-      i++;
     }
   }
   const allColors = [];
@@ -104,7 +87,6 @@ test('G3 bricks untouched: frame glyphs ⊆ {▓,█,▒}, frame colors ⊆ {24,
   for (const c of allColors) {
     assert.ok(!(c >= 236 && c <= 239), 'forbidden color ' + c + ' present');
   }
-  assert.ok(frameGlyphs.size > 0, 'bricks rendered');
 });
 
 test('G4 sparks: ✦ still present in the frame', () => {

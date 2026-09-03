@@ -302,30 +302,25 @@ function colorIndex(t) {
 }
 
 // --- render -------------------------------------------------------------------
+//
+// Ticket 040: the fireplace frame is gone — the flame burns on the whole
+// W×H grid: every cell is a window cell (dark background 234 at heat <= 0,
+// density glyph otherwise). Parked (dead) sparks are not drawn.
 
 const ESC = '\u001b';
 const CURSOR_HOME = ESC + '[H';
 const CLEAR_TAIL = ESC + '[' + 'J';
 const SPARK_GLYPH = '\u2726'; // ✦ bright pixel over the flame
-
-// --- fireplace frame (ticket 032 R1/R2) --------------------------------------
-//
-// Static 2D frame, no logs: brick/stone glyphs ▓ █ ▒ in dark palette colors,
-// drawn around a dark window where the flame burns. Frame is state-independent
-// (same for any `state`), so the flame never flickers the bricks.
-
-const BRICKS = ['\u2593', '\u2588', '\u2592']; // ▓ █ ▒
-const BRICK_COLORS = [24, 25, 26, 27, 58];     // dark brick palette (ticket 033 F1)
-const DARK_BG = 234;                            // window background, heat≈0 (233–235 range)
-const BG_CODE = ESC + '[38;5;' + DARK_BG + 'm';
+const DARK_BG = 234;          // empty-cell background, heat <= 0 (233–235 range)
 
 // --- flame density glyphs (ticket 034 R1) -------------------------------------
 //
 // Ramp from sparse (index 0 = space) to dense. Must avoid brick glyphs
-// (▓█▒), spark glyph (✦), and the log glyphs (=, #, -) that R3 test forbids
-// anywhere in the frame. Index 0 is a space so cells with heat <= FLAME_MIN
-// look identical to the previous "invisible flame" behavior (background).
-// The last glyph "@" is the heaviest visually.
+// (▓█▒ — the frame of ticket 032 has been removed), spark glyph (✦), and
+// the log glyphs (=, #, -) that R3 test forbids anywhere in the frame.
+// Index 0 is a space so cells with heat <= FLAME_MIN look identical to the
+// previous "invisible flame" behavior (background). The last glyph "@" is
+// the heaviest visually.
 const FLAME_GLYPHS = ' .,;:~*oO@';
 const FLAME_MIN = 0.08;
 
@@ -342,59 +337,41 @@ function flameGlyphIndex(heat) {
   return i < 1 ? 1 : i > n ? n : i;
 }
 
-// Deterministic pseudo-random brick pattern (fixed seed — static frame).
-// Ticket 033 F1: 5-color dark brick palette {24,25,26,27,58}.
-function brickAt(row, col) {
-  // row: frame row (0..H-1), col: frame column (0..cols-1)
-  const n = (row * 7919 + col * 104729 + 12345) % BRICKS.length;
-  return { glyph: BRICKS[n], code: BRICK_COLORS[(row * 5 + col * 11 + 3) % BRICK_COLORS.length] };
-}
-
 // Pure: one frame as a single string block. `width` clamps rendered columns on
 // narrow terminals; never touches process/io.
 //
-// Rows are built as per-CELL token arrays ({c: colorCode|null, spark: bool,
-// brick: glyph|null}) and emitted at the end — the spark overlay replaces the
-// CELL at (sx, sy), never a raw string offset, so ANSI escape sequences can
-// never be split.
+// Ticket 040: no fireplace frame — every grid cell is rendered: dark
+// background (234) at heat <= 0, density glyph otherwise. Parked (dead)
+// sparks are invisible.
+//
+// Rows are built as per-CELL token arrays ({c: colorCode|null, spark: bool})
+// and emitted at the end — the spark overlay replaces the CELL at (sx, sy),
+// never a raw string offset, so ANSI escape sequences can never be split.
 function render(state, width) {
   const H = state.H;
   const W = state.W;
   const cols = typeof width === 'number' && width > 0 ? Math.min(W, width) : W;
-  const plinth = H > 4 ? 2 : 1;
-  const lintel = H > 4 ? 2 : 1;
-  const pillar = W > 8 ? 2 : 1;
-  const frame = (y, x) =>
-    y >= H - plinth || y < lintel || x < pillar || x >= cols - pillar;
 
   const cells = Array.from({ length: H }, () => Array.from({ length: cols }, () => ({ c: null })));
   for (let y = 0; y < H; y++) {
     const row = state.heat[y];
     const line = cells[y];
     for (let x = 0; x < cols; x++) {
-      if (frame(y, x)) continue; // filled after the flame pass
       const h = row[x];
-      const idx = h > 0 ? colorIndex(h) : DARK_BG; // R2: dark window bg
-      // Ticket 034 R1: window cell with heat > FLAME_MIN carries a density
-      // glyph from FLAME_GLYPHS; color code is left untouched.
+      const idx = h > 0 ? colorIndex(h) : DARK_BG; // dark bg for empty cells
+      // Cell with heat > FLAME_MIN carries a density glyph from FLAME_GLYPHS;
+      // color code is left untouched.
       const g = FLAME_GLYPHS[flameGlyphIndex(h)];
       line[x] = { c: ESC + '[38;5;' + idx + 'm', glyph: g };
     }
   }
-  // Static frame (R1): bricks in dark palette, state-independent.
-  for (let y = 0; y < H; y++) {
-    const line = cells[y];
-    for (let x = 0; x < cols; x++) {
-      if (!frame(y, x)) continue;
-      const b = brickAt(y, x);
-      line[x] = { c: ESC + '[38;5;' + b.code + 'm', glyph: b.glyph };
-    }
-  }
-  // Sparks overlay the flame as bright pixels (cell-level replace).
+  // Sparks overlay the flame as bright pixels (cell-level replace); parked
+  // (dead) sparks are not drawn (ticket 040).
   for (const s of state.sparks) {
+    if (s.dead) continue;
     const sy = Math.max(0, Math.min(H - 1, Math.floor(s.y)));
     const sx = Math.max(0, Math.min(cols - 1, Math.floor(s.x)));
-    if (!frame(sy, sx)) cells[sy][sx].spark = true;
+    cells[sy][sx].spark = true;
   }
   const lines = cells.map((line) => {
     const parts = [];

@@ -1,7 +1,8 @@
 'use strict';
 
 // Ticket 033: visual liveness quantum criteria.
-// F1 dark bricks, F2 source turbulence, F3 flame height, F4 liveness.
+// F1 no frame (ticket 040: brick frame removed — zero ▓█▒ glyphs),
+// F2 source turbulence, F3 flame height, F4 liveness.
 // Determinism is re-verified here too (same seed -> identical heat over 30 steps).
 
 const test = require('node:test');
@@ -18,75 +19,23 @@ const colorsIn = (s) => {
   return out;
 };
 
-test('F1 dark bricks: frame region uses only {24,25,26,27,58} and 236-239 is absent frame-wide', () => {
+test('F1 no frame: zero brick glyphs (▓█▒) anywhere in the frame and 236-239 absent frame-wide', () => {
   const f = createFire({ W: 80, H: 24, seed: 42 });
   for (let i = 0; i < 10; i++) f.step();
   const out = render(f);
   const lines = out.split('\n');
   assert.strictEqual(lines.length, f.H + 1, 'H rows + tail');
-  const W = f.W;
-  const plinth = 2, lintel = 2, pillar = 2;
 
-  const isFrame = (y, x) => y >= f.H - plinth || y < lintel || x < pillar || x >= W - pillar;
-
-  // 1) Frame region colors are exactly from {24,25,26,27,58}.
-  const allowed = new Set([24, 25, 26, 27, 58]);
-  // We parse per-line color codes with positions by stripping and matching
-  // token boundaries. Simpler approach: for each frame cell, take the plain
-  // ANSI segment up to the cell's plain glyph position and inspect its last
-  // 38;5; code. Instead, we check globally: any 236-239 color code in the
-  // frame string is a fail; then per-line we count cells and compare the
-  // multiset of colors in the frame region against the allowed set by
-  // walking tokens. To keep this deterministic and simple, we rely on the
-  // fact that the frame cells are rendered as brick glyphs, and each brick
-  // is preceded by a 38;5;<c>m code. We extract every brick glyph together
-  // with the immediately preceding color code.
-  const BRICK_GLYPH = /[▓█▒]/g;
-  for (const line of lines) {
-    // For every brick glyph in the line, the immediately preceding color
-    // code must be in the allowed set.
-    const plainIdx = [];
-    let pos = 0;
-    const noansi = line.replace(/\u001b\[[0-9;]*m/g, (m2) => {
-      pos += m2.length;
-      return m2; // keep length; we will re-scan
-    });
-    // Re-scan the raw line: for each brick position in the stripped string,
-    // map it back to the raw string via a mapping. Simpler: iterate raw
-    // chars, tracking current color state.
-    let cur = null;
-    let i2 = 0;
-    while (i2 < line.length) {
-      if (line.charCodeAt(i2) === 0x1b) {
-        // ESC sequence
-        const rest = line.slice(i2);
-        const mm = /^\u001b\[38;5;(\d+)m/.exec(rest);
-        if (mm) {
-          cur = parseInt(mm[1], 10);
-          i2 += mm[0].length;
-          continue;
-        }
-        const mm2 = /^\u001b\[[0-9;]*m/.exec(rest);
-        if (mm2) {
-          if (mm2[0] === '\u001b[0m') cur = null;
-          i2 += mm2[0].length;
-          continue;
-        }
-        i2++;
-        continue;
-      }
-      if (/[▓█▒]/.test(line[i2])) {
-        assert.ok(cur !== null && allowed.has(cur),
-          'brick glyph color ' + cur + ' not in {24,25,26,27,58}');
-      }
-      i2++;
-    }
+  // 1) The fireplace frame is gone: no brick glyph on any rendered row.
+  for (let y = 0; y < f.H; y++) {
+    const plain = lines[y].replace(/\u001b\[[0-9;]*m/g, '');
+    assert.ok(!/[▓█▒]/.test(plain), 'no brick glyphs on row ' + y);
   }
 
   // 2) 236..239 must NOT appear anywhere in the whole rendered frame.
   const allColors = colorsIn(out);
   for (const c of allColors) {
-    assert.ok(!(c >= 236 && c <= 239), 'forbidden frame color ' + c + ' present');
+    assert.ok(!(c >= 236 && c <= 239), 'forbidden color ' + c + ' present');
   }
 });
 
