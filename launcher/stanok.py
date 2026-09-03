@@ -32,7 +32,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Константы контура -------------------------------------------------------------
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.environ.get("STANOK_REPO", os.path.dirname(LAUNCHER_DIR)))
+# Если STANOK_REPO не задан, поднимаемся на 2 уровня выше (stanok/launcher -> stanok -> darkcast)
+DEFAULT_REPO = os.path.abspath(os.path.join(LAUNCHER_DIR, "..", ".."))
+REPO_ROOT = os.path.abspath(os.environ.get("STANOK_REPO", DEFAULT_REPO))
 LOG_DIR = os.environ.get("STANOK_LOG_DIR", "/tmp/stanok-logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -527,8 +529,25 @@ def cmd_run(args) -> int:
     _marker_path = os.path.join(_evidence_dir, ".running")
 
     start_ts = int(time.time())
+    recorded_pid = os.getpid()
+
+    # Сохраняем хостовый PID, если он уже был выставлен launch.sh
+    if os.path.exists(_marker_path):
+        try:
+            parts = open(_marker_path, "r", encoding="utf-8").read().split()
+            if len(parts) >= 2:
+                start_ts = int(parts[0])
+                recorded_pid = int(parts[1])
+        except (ValueError, OSError):
+            pass
+    elif os.environ.get("STANOK_HOST_PID"):
+        try:
+            recorded_pid = int(os.environ["STANOK_HOST_PID"])
+        except ValueError:
+            pass
+
     with open(_marker_path, "w", encoding="utf-8") as f:
-        f.write(f"{start_ts} {os.getpid()}\n")
+        f.write(f"{start_ts} {recorded_pid}\n")
 
     _install_signal_handlers()
 
@@ -559,7 +578,10 @@ def cmd_run(args) -> int:
         job["rc"] = rc
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
-            os.remove(_marker_path)
+            try:
+                os.remove(_marker_path)
+            except OSError:
+                pass
 
     log(f"ПРОГОН ЗАВЕРШЕН: rc={rc}")
     return rc
@@ -708,7 +730,7 @@ def main() -> int:
             print(f"Станок запущен в фоне. Лог: {launch_log}")
             return 0
 
-        lock_path = f"/tmp/stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock"
+        lock_path = os.path.join(LOG_DIR, f"stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock")
         lf = open(lock_path, "w")
         try:
             fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
