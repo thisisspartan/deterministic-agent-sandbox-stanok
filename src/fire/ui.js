@@ -9,6 +9,8 @@
 // opts.fpsMs) steps the fire and writes one full frame per tick.
 
 const FPS = 33; // ms per frame (~30 FPS)
+// Cap for one timer tick: at most this many catch-up frames in a burst.
+const MAX_CATCHUP = 30;
 const { render } = require('./fire.js');
 
 // Ticket 038: a chunk quits ONLY if it is a lone quit key; any escape
@@ -44,6 +46,8 @@ function attach(io, fire, opts) {
   let restored = false;
   let timer = null;
   let frameCount = 0;
+  // Fixed-timestep clock: logical frame time vs wall clock.
+  let lastFrameTime = Date.now();
 
   function onKey(chunk) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
@@ -56,8 +60,7 @@ function attach(io, fire, opts) {
     }
   }
 
-  function frame() {
-    if (stopped) return;
+  function stepFrame() {
     frameCount++;
     if (frameCount % 30 === 0) dlog('frame #' + frameCount); // liveness: every 30th frame
     try {
@@ -67,6 +70,25 @@ function attach(io, fire, opts) {
       // Never let a render edge case crash the loop; a bad frame must not
       // take the animation down.
     }
+  }
+
+  function frame() {
+    if (stopped) return;
+    // Fixed-timestep catch-up: a timer tick does NOT equal one frame period —
+    // on a loaded machine each setTimeout fires late (event-loop overhead),
+    // and a naive 1-frame-per-tick loop would silently render below the
+    // nominal fps. Instead advance the sim by however many frameMs periods
+    // actually elapsed (capped), keeping the logical rate at 1000/fpsMs.
+    // Only the last frame of a burst is visible anyway.
+    const now = Date.now();
+    let due = Math.floor((now - lastFrameTime) / frameMs);
+    if (due < 1) due = 1;
+    if (due > MAX_CATCHUP) due = MAX_CATCHUP;
+    lastFrameTime += due * frameMs;
+    for (let i = 0; i < due && !stopped; i++) {
+      stepFrame();
+    }
+    if (stopped) return;
     const next = setTimeout(frame, frameMs);
     if (stopped) {
       clearTimeout(next);
