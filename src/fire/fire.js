@@ -329,12 +329,17 @@ const BG_CODE = ESC + '[38;5;' + DARK_BG + 'm';
 const FLAME_GLYPHS = ' .,;:~*oO@';
 const FLAME_MIN = 0.08;
 
-// Map a heat value to a ramp index in [1..len-1]; 0 (heat <= FLAME_MIN) -> 0.
+// Ticket 036: map heat to a ramp index with NO gap. heat <= FLAME_MIN -> 0
+// (space); heat in (FLAME_MIN, 1] -> index in [1, len-1], monotone in heat and
+// continuous from the left at FLAME_MIN (the old floor(heat*(len-1)) left
+// (FLAME_MIN, 1/(len-1)) rendering as a space — embers were invisible). Max
+// heat maps to the heaviest glyph (len-1).
 function flameGlyphIndex(heat) {
   if (heat <= FLAME_MIN) return 0;
   const n = FLAME_GLYPHS.length - 1;
-  const i = Math.floor(heat * n);
-  return i >= n ? n : i;
+  const u = (heat - FLAME_MIN) / (1 - FLAME_MIN); // 0..1 across the visible range
+  const i = Math.round(u * n);
+  return i < 1 ? 1 : i > n ? n : i;
 }
 
 // Deterministic pseudo-random brick pattern (fixed seed — static frame).
@@ -409,4 +414,10 @@ function render(state, width) {
   return CURSOR_HOME + lines.join('\n') + '\n' + CLEAR_TAIL;
 }
 
-module.exports = { createFire, render, colorIndex, mulberry32 };
+module.exports = {
+  createFire, render, colorIndex, mulberry32,
+  // Ticket 036: deterministic phase access + glyph mapping for tests.
+  flameGlyphIndex, FLAME_GLYPHS, FLAME_MIN,
+  PHASE_BURN, PHASE_DIE, PHASE_EMBER, PHASE_REKINDLE,
+  BURN_STEPS, DIE_STEPS, EMBER_STEPS, REKINDLE_STEPS,
+};
