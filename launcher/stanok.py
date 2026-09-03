@@ -34,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.environ.get("STANOK_REPO", os.path.dirname(LAUNCHER_DIR)))
 LOG_DIR = os.environ.get("STANOK_LOG_DIR", "/tmp/stanok-logs")
+os.makedirs(LOG_DIR, exist_ok=True)
 
 LOCAL_MODEL = os.environ.get("STANOK_MODEL", "Qwen3.8-27B-MTP")
 SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://192.168.8.131:8080")
