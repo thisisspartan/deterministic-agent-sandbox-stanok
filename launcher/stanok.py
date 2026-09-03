@@ -32,8 +32,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Константы контура -------------------------------------------------------------
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
-# Если STANOK_REPO не задан, поднимаемся на 2 уровня выше (stanok/launcher -> stanok -> darkcast)
-DEFAULT_REPO = os.path.abspath(os.path.join(LAUNCHER_DIR, "..", ".."))
+# Если STANOK_REPO не задан, поднимаемся на 1 уровень выше (stanok/launcher -> stanok)
+DEFAULT_REPO = os.path.abspath(os.path.join(LAUNCHER_DIR, ".."))
 REPO_ROOT = os.path.abspath(os.environ.get("STANOK_REPO", DEFAULT_REPO))
 LOG_DIR = os.environ.get("STANOK_LOG_DIR", "/tmp/stanok-logs")
 os.makedirs(LOG_DIR, exist_ok=True)

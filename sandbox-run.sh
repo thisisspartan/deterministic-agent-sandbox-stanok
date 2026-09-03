@@ -89,6 +89,7 @@ BWRAP_ARGS+=(
   --setenv HOME "$HOME"
   --setenv STANOK_REPO "$REPO_ROOT"
   --setenv STANOK_LOG_DIR "$LOG_DIR"
+  --setenv STANOK_HOST_PID "$$"
   --unshare-pid
   --unshare-uts
   --die-with-parent

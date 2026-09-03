@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$DIR/.." && pwd)"
+PROJECT_ROOT="$DIR"
 export STANOK_REPO="$PROJECT_ROOT"
 cd "$PROJECT_ROOT"
 
