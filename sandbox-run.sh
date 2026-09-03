@@ -92,7 +92,11 @@ BWRAP_ARGS+=(
   --setenv STANOK_HOST_PID "$$"
   --unshare-pid
   --unshare-uts
-  --die-with-parent
 )
+
+# В фоновом режиме процесс переживает родительскую оболочку
+if [ "${STANOK_BACKGROUND:-0}" != "1" ]; then
+  BWRAP_ARGS+=(--die-with-parent)
+fi
 
 exec bwrap "${BWRAP_ARGS[@]}" "$@"

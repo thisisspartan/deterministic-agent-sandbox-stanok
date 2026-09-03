@@ -145,23 +145,22 @@ def dirty_tree_gate() -> bool:
         out = subprocess.run(["git", "status", "--porcelain"],
                              cwd=REPO_ROOT, capture_output=True, text=True)
         if out.returncode == 0 and out.stdout.strip():
-            log("ERROR: репозиторий станка содержит незакоммиченные изменения (rc=22)")
             return True
     except OSError:
         pass
     return False
 
 
-def preflight_server() -> None:
+def preflight_server() -> bool:
     if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
-        return
+        return True
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(urllib.request.Request(f"{SERVER_URL}/props"), timeout=5):
-            pass
+            return True
     except Exception as e:
         log(f"СЕРВЕР НЕДОСТУПЕН ({SERVER_URL}: {type(e).__name__}) (rc=20)")
-        sys.exit(20)
+        return False
 
 
 def reset_repo() -> int:
@@ -486,8 +485,11 @@ def write_summary(job: dict, elapsed_s: int) -> None:
         probe_result = "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
         c5 = "PASS"
     else:
-        probe_result = "VERIFY-FAIL"
-        c5 = "FAIL"
+        probe_result = "VERIFY-FAIL" if rc != 0 else "PASS"
+        c5 = "PASS" if rc == 0 else "FAIL"
+
+    if job.get("probe_result"):
+        probe_result = job["probe_result"]
 
     summary = {
         "label": job.get("label"),
@@ -509,6 +511,18 @@ def write_summary(job: dict, elapsed_s: int) -> None:
     with open(os.path.join(_evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     emit("summary", summary)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def cmd_run(args) -> int:
@@ -552,15 +566,28 @@ def cmd_run(args) -> int:
     _install_signal_handlers()
 
     job = {"label": args.label, "ticket": args.ticket}
-    emit("job.start", {"label": args.label, "pid": os.getpid()})
+    emit("job.start", {"label": args.label, "pid": recorded_pid})
 
     log(f"STANOK 4.2 RUNNER | Репо: {REPO_ROOT} | Label: {args.label}")
     if args.direct:
         log("РЕЖИМ --direct: путь к тикету разрешён относительно репозитория")
 
-    preflight_server()
+    if not preflight_server():
+        job["rc"] = 20
+        job["error"] = f"Сервер недоступен ({SERVER_URL})"
+        write_summary(job, int(time.time()) - start_ts)
+        if os.path.exists(_marker_path):
+            try: os.remove(_marker_path)
+            except OSError: pass
+        return 20
 
     if reset_repo() != 0:
+        job["rc"] = 14
+        job["error"] = "Ошибка git reset/clean"
+        write_summary(job, int(time.time()) - start_ts)
+        if os.path.exists(_marker_path):
+            try: os.remove(_marker_path)
+            except OSError: pass
         return 14
 
     rc = 1
@@ -596,21 +623,36 @@ def cmd_status(label: str) -> int:
     summary = os.path.join(evidence_dir, "summary.json")
 
     if os.path.exists(marker):
-        start_ts, pid = open(marker).read().split()
-        print(json.dumps({"state": "running", "pid": int(pid), "elapsed_s": int(time.time()) - int(start_ts)}))
+        try:
+            parts = open(marker, encoding="utf-8").read().split()
+            start_ts = int(parts[0]) if len(parts) >= 1 else int(time.time())
+            pid = int(parts[1]) if len(parts) >= 2 else 0
+
+            alive = _pid_alive(pid) if pid > 0 else False
+            state = "running" if alive else "dead"
+            print(json.dumps({
+                "state": state,
+                "pid": pid,
+                "elapsed_s": int(time.time()) - start_ts
+            }))
+        except (ValueError, OSError):
+            print(json.dumps({"state": "dead", "error": "corrupted marker"}))
     elif os.path.exists(summary):
-        data = json.load(open(summary))
-        print(json.dumps({
-            "state": "done",
-            "rc": data.get("rc"),
-            "verifier": data.get("verifier"),
-            "probe_result": data.get("probe_result"),
-            "turns": data.get("turns"),
-            "session_id": data.get("session_id"),
-            "cache_hit_rate": data.get("cache_hit_rate"),
-            "elapsed_s": data.get("elapsed_s"),
-            "errors": data.get("errors", [])
-        }))
+        try:
+            data = json.load(open(summary, encoding="utf-8"))
+            print(json.dumps({
+                "state": "done",
+                "rc": data.get("rc"),
+                "verifier": data.get("verifier"),
+                "probe_result": data.get("probe_result"),
+                "turns": data.get("turns"),
+                "session_id": data.get("session_id"),
+                "cache_hit_rate": data.get("cache_hit_rate"),
+                "elapsed_s": data.get("elapsed_s"),
+                "errors": data.get("errors", [])
+            }))
+        except Exception as e:
+            print(json.dumps({"state": "done", "error": f"summary read error: {e}"}))
     else:
         print(json.dumps({"state": "missing"}))
     return 0
@@ -622,15 +664,21 @@ def cmd_stop(label: str) -> int:
     if not os.path.exists(marker):
         log(f"Прогон {label} не запущен")
         return 1
-    _, pid_s = open(marker).read().split()
-    pid = int(pid_s)
     try:
-        os.killpg(pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
+        parts = open(marker, encoding="utf-8").read().split()
+        pid = int(parts[1]) if len(parts) >= 2 else 0
+    except (ValueError, OSError):
+        log(f"Не удалось прочитать PID из маркера {marker}")
+        return 1
+
+    if pid > 0:
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.killpg(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
-            pass
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
     log(f"Сигнал остановки отправлен для {label} (PID {pid})")
     return 0
 
@@ -706,17 +754,49 @@ def main() -> int:
         return cmd_watch(args.label, args.follow)
 
     if args.cmd == "run":
+        evidence_dir, _ = label_paths(args.label)
+        marker = os.path.join(evidence_dir, ".running")
+
+        def early_abort(rc: int, err_msg: str) -> int:
+            log(err_msg)
+            if os.path.exists(marker):
+                try:
+                    os.remove(marker)
+                except OSError:
+                    pass
+            os.makedirs(evidence_dir, exist_ok=True)
+            sum_path = os.path.join(evidence_dir, "summary.json")
+            if not os.path.exists(sum_path):
+                payload = {
+                    "label": args.label,
+                    "ticket": args.ticket,
+                    "rc": rc,
+                    "verifier": "FAIL",
+                    "probe_result": "EARLY-ABORT",
+                    "review_verdict": "DEFECT",
+                    "cloud_calls": 0,
+                    "c5": "FAIL",
+                    "turns": 0,
+                    "elapsed_s": 0,
+                    "session_id": None,
+                    "tokens": {},
+                    "cache_hit_rate": "0.0%",
+                    "errors": [err_msg],
+                    "failures": [],
+                }
+                with open(sum_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+            return rc
+
         if validate_label(args.label):
-            log(f"ERROR: Недопустимый label {args.label}")
-            return 15
+            return early_abort(15, f"ERROR: Недопустимый label {args.label}")
 
         args.ticket_path = _resolve_ticket(args.ticket, direct=args.direct)
         if not os.path.isfile(args.ticket_path):
-            log(f"ERROR: Тикет не найден: {args.ticket_path}")
-            return 13
+            return early_abort(13, f"ERROR: Тикет не найден: {args.ticket_path}")
 
         if dirty_tree_gate():
-            return 22
+            return early_abort(22, "ERROR: репозиторий станка содержит незакоммиченные изменения (rc=22)")
 
         if args.background:
             launch_log = os.path.join(LOG_DIR, f"{args.label}.launch.log")
@@ -735,8 +815,7 @@ def main() -> int:
         try:
             fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            log(f"LOCK: Репозиторий уже занят другим прогоном ({lock_path})")
-            return 21
+            return early_abort(21, f"LOCK: Репозиторий уже занят другим прогоном ({lock_path})")
 
         return cmd_run(args)
 
