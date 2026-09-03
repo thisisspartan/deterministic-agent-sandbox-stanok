@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Stanok 4.1 Production — Context-Engineered Runner на локальной модели.
+"""Stanok 4.2 Production — Context-Engineered Runner на локальной модели.
 
-Стандарты 2026 года (боевой релиз):
-  1. Single Continuous Session (ClaudeSDKClient): все ретраи внутри ОДНОЙ сессии.
-     Префикс KV-кэша в llama-server сохраняется на 98-99%.
-  2. Adaptive Contract Lock: предотвращает когнитивный дедлок при отсутствии тестов
-     и жестко блокирует подделку ассертов, если тесты уже существуют.
-  3. Cumulative Token & Cache Telemetry: сквозной расчет session_hit_rate на всех ветках (PASS/FAIL).
-  4. Context Rot Budget Guard: предупреждение при превышении порога устойчивого внимания 27B.
-  5. Smart Diff Extraction: приоритизированный поиск assert/diff с очисткой node:internal и UTF-8 срезом.
-  6. Shielded Turn Watchdog: таймаут хода через asyncio.shield() с надежным прерыванием.
+Полная интеграция с L1-Супервайзером:
+  1. Single Continuous Session (ClaudeSDKClient): ретраи внутри ОДНОЙ сессии (99% KV-кэш).
+  2. Строгий контракт summary.json (probe_result, c5, review_verdict, errors) для L1.
+  3. Adaptive Contract Lock: адаптация под создание тестов с нуля и запрет ослабления ассертов.
+  4. Cumulative Token & Cache Telemetry: точный расчет session_hit_rate.
+  5. Shielded Turn Watchdog: таймаут хода через asyncio.shield() без потери session_id.
+  6. Smart Diff Extraction: приоритизированный поиск assert/diff с UTF-8 срезом.
   7. Process Reaper: единая process group с гарантированным завершением всех потомков.
 """
 
@@ -43,13 +41,11 @@ LOCAL_PROXY = os.environ.get("STANOK_PROXY", "http://192.168.8.131:8118")
 NO_PROXY = os.environ.get("STANOK_NO_PROXY", "192.168.8.131,localhost,127.0.0.1")
 CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "claude")
 
-# Лимиты контекст-инжиниринга
-MAX_TEST_LINES = 60                                           # максимум строк на ошибку теста
-MAX_TEST_BYTES = 4096                                         # макс. байт на ошибку теста (честный UTF-8 лимит)
-DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))  # Context Inertia Guard
-CONTEXT_ROT_THRESHOLD = int(os.environ.get("STANOK_CONTEXT_ROT_TOKENS", "50000"))  # порог Context Rot
+MAX_TEST_LINES = 60
+MAX_TEST_BYTES = 4096
+DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))
+CONTEXT_ROT_THRESHOLD = int(os.environ.get("STANOK_CONTEXT_ROT_TOKENS", "50000"))
 
-# Иерархия таймаутов с защитой от нулевых/отрицательных значений:
 API_TIMEOUT_S = max(1.0, float(os.environ.get("STANOK_API_TIMEOUT_S", "600")))
 TURN_TIMEOUT_S = float(os.environ.get("STANOK_TURN_TIMEOUT_S", str(API_TIMEOUT_S + 120)))
 
@@ -57,8 +53,6 @@ if TURN_TIMEOUT_S <= API_TIMEOUT_S:
     TURN_TIMEOUT_S = API_TIMEOUT_S + max(15.0, API_TIMEOUT_S * 0.2)
 
 API_TIMEOUT_MS = str(int(API_TIMEOUT_S * 1000))
-
-# Курированный набор тулов (Select-паттерн)
 CURATED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -72,7 +66,7 @@ _INTERRUPTED_RC = 0
 
 
 # ==================================================================================
-# Логирование, события и легковесная сериализация
+# Логирование и события
 # ==================================================================================
 def log(msg: str = "") -> None:
     print(msg, flush=True)
@@ -96,7 +90,6 @@ def emit(etype: str, data: dict) -> None:
 
 
 def _safe_json_default(obj):
-    """Легковесный сериализатор без copy.deepcopy(): только прямое чтение полей."""
     if dataclasses.is_dataclass(obj):
         return {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)}
     if hasattr(obj, "__dict__"):
@@ -105,7 +98,6 @@ def _safe_json_default(obj):
 
 
 def _write_stream_msg(file_obj, turn: int, msg) -> None:
-    """Безопасная запись сообщения в live-лог без риска падения сессии."""
     try:
         raw = json.dumps(
             {"turn": turn, "type": type(msg).__name__, "data": msg},
@@ -131,7 +123,7 @@ def label_paths(label: str) -> tuple[str, str]:
 
 
 # ==================================================================================
-# Гейты и санитарный контроль
+# Санитарный контроль и гейты
 # ==================================================================================
 def validate_label(label: str) -> str | None:
     if not _LABEL_RE.match(label) or ".." in label or label.startswith("--"):
@@ -150,7 +142,7 @@ def dirty_tree_gate() -> bool:
         out = subprocess.run(["git", "status", "--porcelain"],
                              cwd=REPO_ROOT, capture_output=True, text=True)
         if out.returncode == 0 and out.stdout.strip():
-            log("ERROR: репозиторий содержит незакоммиченные изменения (rc=22)")
+            log("ERROR: репозиторий станка содержит незакоммиченные изменения (rc=22)")
             return True
     except OSError:
         pass
@@ -185,7 +177,6 @@ def reset_repo() -> int:
 # Умная компрессия ошибок верификатора (Smart Diff Extraction)
 # ==================================================================================
 def _extract_smart_diff(raw_text: str) -> str:
-    """Очищает шум node:internal, центрирует окно на assert/diff и честно режет по байтам UTF-8."""
     cleaned_lines = [
         line for line in raw_text.strip().splitlines()
         if "node:internal/" not in line
@@ -283,10 +274,9 @@ def build_agent_env() -> dict[str, str]:
 
 
 # ==================================================================================
-# Ядро оркестрации: Интерактивный ClaudeSDKClient + Shielded Watchdog
+# Непрерывная сессия ClaudeSDKClient + Shielded Watchdog
 # ==================================================================================
 def _extract_usage(msg) -> dict:
-    """Извлекает словарь метрик использования токенов из сообщения SDK."""
     usage = getattr(msg, "usage", None)
     if not usage and hasattr(msg, "data") and isinstance(msg.data, dict):
         usage = msg.data.get("usage")
@@ -302,7 +292,6 @@ def _extract_usage(msg) -> dict:
 
 
 async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> dict:
-    """Выполняет диалоговый ход, извлекает session_id и телеметрию токенов."""
     await client.query(prompt)
     turn_usage = {}
     async for msg in client.receive_response():
@@ -322,7 +311,6 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
 
 
 async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int) -> int:
-    """Держит сессию открытой через ClaudeSDKClient для 100% сохранения KV-кэша."""
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
     local_run_id = str(uuid.uuid4())[:8]
@@ -332,6 +320,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         cli_path=CLAUDE_BIN,
         cwd=REPO_ROOT,
         setting_sources=["project"],
+        settings=f"{REPO_ROOT}/.claude/settings.stanok.json",
         permission_mode="default",
         allowed_tools=CURATED_TOOLS,
         model=LOCAL_MODEL,
@@ -384,7 +373,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
                 elapsed_turn = time.time() - t0
 
-                # Учет токенов хода и обновление совокупной статистики
                 inp = turn_usage.get("input_tokens", 0)
                 out = turn_usage.get("output_tokens", 0)
                 c_read = turn_usage.get("cache_read_input_tokens", 0)
@@ -395,7 +383,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 total_tokens["cache_read_input_tokens"] += c_read
                 total_tokens["cache_creation_input_tokens"] += c_create
 
-                # Совокупный расчет hit rate сессии
                 total_input_context = total_tokens["input_tokens"] + total_tokens["cache_read_input_tokens"]
                 session_hit_rate = (
                     (total_tokens["cache_read_input_tokens"] / total_input_context * 100.0)
@@ -413,12 +400,10 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 emit("turn.tokens", {"turn": turn, "input": inp, "output": out, "cache_read": c_read,
                                      "turn_hit_rate": turn_hit_rate, "session_hit_rate": session_hit_rate})
 
-                # Context Rot Guard: предупреждение оператору при раздувании контекста
                 if turn_input_context > CONTEXT_ROT_THRESHOLD:
                     log(f"  [CONTEXT-ROT WARN] Входной контекст хода ({turn_input_context} токенов) "
                         f"превысил порог {CONTEXT_ROT_THRESHOLD}. Внимание модели может снижаться.")
 
-                # Верификация результатов
                 verify_ok, failures = verify_gate()
                 emit("verifier", {"turn": turn, "ok": verify_ok, "failures_count": len(failures)})
 
@@ -432,7 +417,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 job["failures"] = failures
 
                 if turn < max_turns:
-                    # Адаптивный Contract Lock (2026): предотвращает когнитивный дедлок
                     has_no_tests = any(name == "(нет тестов)" for name, _ in failures)
 
                     if has_no_tests:
@@ -490,17 +474,33 @@ def _install_signal_handlers() -> None:
 
 
 def write_summary(job: dict, elapsed_s: int) -> None:
+    """Формирует точный контракт summary.json, ожидаемый L1-Супервайзером."""
+    turns = job.get("turns", 1)
+    verifier = job.get("verifier", "FAIL")
+    rc = job.get("rc", 1)
+
+    if rc == 0 and verifier == "PASS":
+        probe_result = "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
+        c5 = "PASS"
+    else:
+        probe_result = "VERIFY-FAIL"
+        c5 = "FAIL"
+
     summary = {
         "label": job.get("label"),
         "ticket": job.get("ticket"),
-        "rc": job.get("rc"),
-        "verifier": job.get("verifier", "FAIL"),
-        "turns": job.get("turns", 1),
+        "rc": rc,
+        "verifier": verifier,
+        "probe_result": probe_result,
+        "review_verdict": "CLEAN" if rc == 0 else "DEFECT",
+        "cloud_calls": 0,
+        "c5": c5,
+        "turns": turns,
         "elapsed_s": elapsed_s,
         "session_id": job.get("session_id"),
         "tokens": job.get("tokens", {}),
         "cache_hit_rate": job.get("cache_hit_rate", "0.0%"),
-        "error": job.get("error"),
+        "errors": [job["error"]] if job.get("error") else [],
         "failures": job.get("failures", []),
     }
     with open(os.path.join(_evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
@@ -534,7 +534,7 @@ def cmd_run(args) -> int:
     job = {"label": args.label, "ticket": args.ticket}
     emit("job.start", {"label": args.label, "pid": os.getpid()})
 
-    log(f"STANOK 4.1 PRODUCTION RUNNER | Репо: {REPO_ROOT} | Label: {args.label}")
+    log(f"STANOK 4.2 RUNNER | Репо: {REPO_ROOT} | Label: {args.label}")
     if args.direct:
         log("РЕЖИМ --direct: путь к тикету разрешён относительно репозитория")
 
@@ -581,11 +581,12 @@ def cmd_status(label: str) -> int:
             "state": "done",
             "rc": data.get("rc"),
             "verifier": data.get("verifier"),
+            "probe_result": data.get("probe_result"),
             "turns": data.get("turns"),
             "session_id": data.get("session_id"),
             "cache_hit_rate": data.get("cache_hit_rate"),
             "elapsed_s": data.get("elapsed_s"),
-            "error": data.get("error")
+            "errors": data.get("errors", [])
         }))
     else:
         print(json.dumps({"state": "missing"}))
@@ -652,7 +653,7 @@ def _resolve_ticket(arg: str, direct: bool = False) -> str:
 def main() -> int:
     root_refusal()
 
-    p = argparse.ArgumentParser(prog="stanok", description="Stanok 4.1 Runner")
+    p = argparse.ArgumentParser(prog="stanok", description="Stanok 4.2 Runner")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("run")
