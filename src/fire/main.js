@@ -15,6 +15,18 @@ const { createDiag, DEFAULT_PATH } = require('./diag.js');
 
 const NON_TTY_FRAMES = 10;
 
+// TTY detection robust to Node versions where process.stdout.isTTY is a
+// lazy accessor FUNCTION (old Node: call it) or a plain BOOLEAN (Node >= 8
+// era builds: compare to true). Without this, a real PTY can be misrouted
+// into the non-TTY path (no diag log, no animation).
+function isTty(s) {
+  let t = s.isTTY;
+  if (typeof t === 'function') {
+    try { t = t(); } catch (e) { t = false; }
+  }
+  return t === true;
+}
+
 function renderStatic(stdout, frames) {
   const fire = createFire({ seed: Date.now() });
   for (let i = 0; i < frames; i++) {
@@ -24,7 +36,7 @@ function renderStatic(stdout, frames) {
 }
 
 function start() {
-  if (typeof process.stdout.isTTY !== 'function' || !process.stdout.isTTY()) {
+  if (!isTty(process.stdout)) {
     renderStatic(process.stdout, NON_TTY_FRAMES);
     process.exit(0);
     return;
