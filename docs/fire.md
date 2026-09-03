@@ -54,6 +54,25 @@ node src/fire/main.js
 терминал: курсор показывается (`\x1b[?25h`) и альтернативный экран
 закрывается (`\x1b[?1049l`).
 
+## Диагностика (ticket 039)
+
+При TTY-запуске все события одного запуска пишутся в мини-логгер
+`src/fire/diag.js` (`createDiag(path) → { log(msg), path, close() }`,
+appendFileSync, всё в try/catch — лог не роняет анимацию) в файл
+**`/tmp/fire-debug.log`**. Файл ОЧИЩАЕТСЯ при старте — в логе всегда один
+запуск; формат строк: `ISO-время msg`. Логируется:
+
+- `start pid=<pid> columns=<N> fpsMs=33` — старт TTY-пути;
+- `frame #<N>` — каждое 30-е кадр (жив ли цикл кадров);
+- `input len=<N> hex=<hex>` — КАЖДЫЙ чанк со stdin (что реально пришёл с клавиатуры);
+- `stop` — остановка UI;
+- `signal SIGINT` / `signal SIGTERM` — до process.exit;
+- `quit reason=<reason>` — клавишный выход (onQuit).
+
+Путь лога печатается в строке остановки на stderr:
+`fire: остановлено (<reason|SIGINT|SIGTERM>), лог: /tmp/fire-debug.log`.
+Non-TTY-путь (renderStatic) — без логирования.
+
 ## Параметры
 
 `createFire(opts)` / `attach(io, fire, opts)` (все необязательны):
@@ -192,4 +211,5 @@ node --test tests/fire/liveness.test.js # кванты живости: кирп�
 node --test tests/fire/glyphs.test.js  # глифы плотности пламени
 node --test tests/fire/lifecycle.test.js # цикл BURN→DIE→EMBER→REKINDLE (ticket 035)
 node --test tests/fire/ember.test.js     # без разрыва глифов, угли видны (ticket 036)
+node --test tests/fire/diag.test.js      # самодиагностика: diag.js + лог в ui/main (ticket 039)
 ```
