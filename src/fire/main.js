@@ -11,6 +11,7 @@
 
 const { createFire, render } = require('./fire.js');
 const ui = require('./ui.js');
+const { createDiag, DEFAULT_PATH } = require('./diag.js');
 
 const NON_TTY_FRAMES = 10;
 

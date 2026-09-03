@@ -35,13 +35,20 @@ function attach(io, fire, opts) {
   const options = opts || {};
   const onQuit = typeof options.onQuit === 'function' ? options.onQuit : () => {};
   const frameMs = options.fpsMs > 0 ? options.fpsMs : FPS;
+  // Ticket 039: optional self-diagnosis logger (src/fire/diag.js). Absent ->
+  // behavior is exactly as before.
+  const diag = options.diag && typeof options.diag.log === 'function' ? options.diag : null;
+  const dlog = (msg) => { if (diag) diag.log(msg); };
 
   let stopped = false;
   let restored = false;
   let timer = null;
+  let frameCount = 0;
 
   function onKey(chunk) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+    // Log EVERY stdin chunk (what the terminal actually sends).
+    dlog('input len=' + buf.length + ' hex=' + buf.toString('hex'));
     const reason = parseQuitReason(buf);
     if (reason !== null) {
       stop();
@@ -51,6 +58,8 @@ function attach(io, fire, opts) {
 
   function frame() {
     if (stopped) return;
+    frameCount++;
+    if (frameCount % 30 === 0) dlog('frame #' + frameCount); // liveness: every 30th frame
     try {
       fire.step();
       io.stdout.write(render(fire, io.columns));
@@ -70,6 +79,7 @@ function attach(io, fire, opts) {
   function stop() {
     if (stopped) return;
     stopped = true;
+    dlog('stop');
     if (timer) { clearTimeout(timer); timer = null; }
     try { io.stdin.removeListener('data', onKey); } catch (e) { /* best-effort */ }
     try { io.stdin.setRawMode(false); } catch (e) { /* best-effort */ }
