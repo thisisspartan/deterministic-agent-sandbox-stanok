@@ -32,10 +32,11 @@ function start() {
   const fire = createFire({ seed: Date.now() });
   const io = { stdin: process.stdin, stdout: process.stdout, columns: process.stdout.columns };
   const app = ui.attach(io, fire, {
-    onQuit: () => process.exit(0),
+    // stderr: visible after app.stop() leaves the alt screen.
+    onQuit: (reason) => { process.stderr.write('fire: остановлено (' + reason + ')\n'); process.exit(0); },
   });
-  process.on('SIGINT', () => { app.stop(); process.exit(130); });
-  process.on('SIGTERM', () => { app.stop(); process.exit(0); });
+  process.on('SIGINT', () => { app.stop(); process.stderr.write('fire: остановлено (SIGINT)\n'); process.exit(130); });
+  process.on('SIGTERM', () => { app.stop(); process.stderr.write('fire: остановлено (SIGTERM)\n'); process.exit(0); });
 }
 
 if (require.main === module) {

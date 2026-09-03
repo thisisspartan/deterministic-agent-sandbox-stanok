@@ -119,6 +119,73 @@ test('stop() without any key input still restores cursor and leaves alt screen',
   assert.ok(out.includes('\u001b[?25l') && out.includes('\u001b[?25h'), 'cursor hide/show');
 });
 
+// --- escape-sequence handling + quit reason (ticket 038) ----------------------
+
+test('U1: arrow-key CSI sequence [0x1b,0x5b,0x41] does NOT quit, frames keep rendering', async () => {
+  const io = makeIo();
+  let quits = 0;
+  let reason = null;
+  const h = attach(io, makeFire(), { onQuit: (r) => { quits++; reason = r; } });
+  const framesBefore = io._written.length;
+  io.write(Buffer.from([0x1b, 0x5b, 0x41])); // ESC [ A — up arrow
+  await sleep(200);
+  assert.strictEqual(quits, 0, 'arrow key must not quit');
+  assert.strictEqual(io.stdin._rawMode, true, 'still in raw mode / running');
+  assert.ok(io._written.length > framesBefore, 'frame loop continued (>=1 frame after arrow)');
+  h.stop();
+  assert.strictEqual(quits, 0, 'stop() must not fire onQuit');
+});
+
+test('U1b: F-key and bracketed-paste sequences do NOT quit', async () => {
+  const io = makeIo();
+  let quits = 0;
+  const h = attach(io, makeFire(), { onQuit: () => { quits++; } });
+  io.write(Buffer.from([0x1b, 0x5b, 0x31, 0x3b, 0x35, 0x7e])); // F5
+  io.write(Buffer.from([0x1b, 0x5b, 0x32, 0x30, 0x30, 0x62])); // bracketed paste start
+  await sleep(150);
+  assert.strictEqual(quits, 0, 'F-keys / bracketed paste must not quit');
+  assert.strictEqual(io.stdin._rawMode, true, 'still running');
+  h.stop();
+});
+
+test('U2: lone ESC [0x1b] quits with reason "esc"', async () => {
+  const io = makeIo();
+  let reason = null;
+  const h = attach(io, makeFire(), { onQuit: (r) => { reason = r; } });
+  io.write(Buffer.from([0x1b]));
+  await sleep(60);
+  assert.strictEqual(reason, 'esc', 'onQuit("esc")');
+  h.stop();
+});
+
+test('U3: q / Q / Ctrl+C quit with their reasons', async () => {
+  for (const [bytes, expected] of [
+    [[0x71], 'q'],
+    [[0x51], 'Q'],
+    [[0x03], 'ctrl-c'],
+  ]) {
+    const io = makeIo();
+    let reason = null;
+    const h = attach(io, makeFire(), { onQuit: (r) => { reason = r; } });
+    io.write(Buffer.from(bytes));
+    await sleep(60);
+    assert.strictEqual(reason, expected, `reason for ${JSON.stringify(bytes)}`);
+    h.stop();
+  }
+});
+
+test('U4: after key quit the terminal is restored (raw mode off, cursor + alt screen)', async () => {
+  const io = makeIo();
+  const h = attach(io, makeFire(), { onQuit: () => {} });
+  io.write(Buffer.from('q'));
+  await sleep(60);
+  assert.strictEqual(io.stdin._rawMode, false, 'setRawMode(false) called');
+  const out = io._written.join('');
+  assert.ok(out.includes('\u001b[?25h'), 'cursor restored');
+  assert.ok(out.includes('\u001b[?1049l'), 'alt screen left');
+  h.stop(); // idempotent
+});
+
 test('unknown keys do not quit', async () => {
   const io = makeIo();
   let quits = 0;

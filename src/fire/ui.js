@@ -2,12 +2,29 @@
 
 // Fire console UI (ticket 030): thin attach() layer over the pure fire.js
 // engine — raw-mode input, key parsing (q / Q / ESC / Ctrl+C -> quit), alt
-// screen + cursor hide on start, restore (cursor + alt screen) on stop ALWAYS
+// screen + cursor hide on start, restore (cursor + alt screen) on stop ALWAYS.
+// Quit keys (ticket 038): lone q / Q / Ctrl+C / ESC -> stop() + onQuit(reason);
+// escape SEQUENCES (arrows, F-keys, CSI, bracketed paste) are ignored.
 // (key quit, stop(), or error). A 30 FPS frame loop (configurable via
 // opts.fpsMs) steps the fire and writes one full frame per tick.
 
 const FPS = 33; // ms per frame (~30 FPS)
 const { render } = require('./fire.js');
+
+// Ticket 038: a chunk quits ONLY if it is a lone quit key; any escape
+// sequence (arrows, F-keys, CSI, bracketed paste) is ignored.
+function parseQuitReason(buf) {
+  if (buf.length === 1) {
+    const b = buf[0];
+    if (b === 0x03) return 'ctrl-c';
+    if (b === 0x71) return 'q';
+    if (b === 0x51) return 'Q';
+    if (b === 0x1b) return 'esc';
+    return null;
+  }
+  if (buf.includes(0x03)) return 'ctrl-c';
+  return null;
+}
 
 const ALT_ON = '\u001b[?1049h';
 const ALT_OFF = '\u001b[?1049l';
@@ -25,10 +42,10 @@ function attach(io, fire, opts) {
 
   function onKey(chunk) {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
-    if (buf.includes(0x03) || buf.includes(0x71) || buf.includes(0x51) || buf.includes(0x1b)) {
-      // q / Q / ESC / Ctrl+C -> clean stop then quit.
+    const reason = parseQuitReason(buf);
+    if (reason !== null) {
       stop();
-      onQuit();
+      onQuit(reason);
     }
   }
 
