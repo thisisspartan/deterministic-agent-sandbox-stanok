@@ -18,7 +18,32 @@ test('render: pure function, returns a string frame block (cursor home ... tail 
   assert.strictEqual(typeof f1, 'string');
   assert.strictEqual(f1, f2);
   assert.ok(f1.startsWith('\u001b[H'), 'frame starts with cursor home');
-  assert.ok(f1.includes('\u001b[2J'), 'frame ends with tail clear');
+  assert.ok(f1.endsWith('\u001b[J]'), 'frame ends with tail clear');
+});
+
+test('render: frame uses ESC[J tail clear, never the full-screen ESC[2J', () => {
+  const s = create({ seed: 3, W: 24, H: 12, D: 24 });
+  for (let i = 0; i < 10; i++) s.step();
+  const f1 = render(s, 40, 0);
+  assert.ok(!f1.includes('\u001b[2J'), 'frame must NOT contain the full-screen clear ESC[2J');
+  assert.ok(f1.endsWith('\u001b[J]'), 'frame must end with the tail clear ESC[J');
+});
+
+test('render: flame glyphs are drawn BEFORE the final ESC[J clear', () => {
+  const s = create({ seed: 7, W: 24, H: 12, D: 24 });
+  for (let i = 0; i < 20; i++) s.step();
+  const f = render(s, 40, 0);
+  assert.ok(f.endsWith('\u001b[J]'), 'frame must end with the tail clear ESC[J');
+  // Everything before the trailing \n ESC[J is the drawn frame.
+  const idx = f.lastIndexOf('\u001b[J');
+  assert.ok(idx > 0, 'tail clear present');
+  const drawn = stripAnsi(f.slice(0, idx));
+  const glyphs = new Set([...FLAME_GLYPHS].filter((g) => g !== ' '));
+  let sawFlame = false;
+  for (const ch of drawn) {
+    if (glyphs.has(ch)) { sawFlame = true; break; }
+  }
+  assert.ok(sawFlame, 'at least one non-space flame glyph must appear before the final clear');
 });
 
 test('render: frames at angle=0 and angle=PI/2 are different', () => {

@@ -146,7 +146,7 @@ function step(state) {
 
 const ESC = '\u001b';
 const CURSOR_HOME = ESC + '[H';
-const CLEAR_TAIL = ESC + '[2J';
+const CLEAR_TAIL = ESC + '[J';
 const DARK_BG = 234;           // dark background color for empty/cool cells
 const RESET = ESC + '[0m';
 
