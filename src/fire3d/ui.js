@@ -51,8 +51,19 @@ function attach(io, fire, opts) {
   // Accept either a raw stream (attach(process.stdin, ...)) or an io object
   // { stdin, stdout, columns } (tests, custom hosts).
   const term = io && typeof io.setRawMode === 'function'
-    ? { stdin: io, stdout: process.stdout, columns: process.stdout.columns }
+    ? { stdin: io, stdout: process.stdout, columns: process.stdout.columns,
+        rows: process.stdout.rows }
     : io;
+
+  // Ticket 044: terminal height and color capability are forwarded to
+  // render(). rows: opts.rows if given, else io.rows, else process.stdout.rows.
+  const rows = options.rows !== undefined && options.rows !== null
+    ? options.rows
+    : (term.rows !== undefined && term.rows !== null ? term.rows : process.stdout.rows);
+  const renderOpts = {
+    rows,
+    color256: options.color256 !== false, // default: 256-color palette
+  };
 
   let stopped = false;
   let restored = false;
@@ -71,7 +82,7 @@ function attach(io, fire, opts) {
   function stepFrame() {
     try {
       fire.step();
-      term.stdout.write(render(fire, term.columns, fire.angle));
+      term.stdout.write(render(fire, term.columns, fire.angle, renderOpts));
     } catch (e) {
       // Never let a render edge case crash the loop.
     }

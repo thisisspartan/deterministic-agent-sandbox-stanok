@@ -178,6 +178,24 @@ function colorIndex(t) {
   return null;
 }
 
+// Pure SGR color code for one cell (ticket 044). `color256 === true` (default):
+// the 256-color palette via colorIndex (dark bg 234 for h <= 0). `color256
+// === false`: 16-color fallback WITHOUT interpolation — nearest stop from
+// below: 90 (bright black, bg) / 31 (red) / 91 (bright red) / 33 (yellow) /
+// 97 (white). Terminals without 256-color support may mishandle ESC[38;5;Nm,
+// which is why the fallback exists.
+function colorCode(h, color256) {
+  if (color256 === false) {
+    if (h <= 0) return ESC + '[90m';
+    if (h < 0.3) return ESC + '[31m';
+    if (h < 0.5) return ESC + '[91m';
+    if (h < 0.8) return ESC + '[33m';
+    return ESC + '[97m';
+  }
+  const n = h > 0 ? colorIndex(h) : DARK_BG;
+  return ESC + '[38;5;' + n + 'm';
+}
+
 // Flame density glyphs: ramp from sparse (index 0 = space) to dense.
 // No brick glyphs (▓█▒) — the flame burns on the whole grid, no frame.
 const FLAME_GLYPHS = ' .,;:~*oO@';
@@ -195,9 +213,19 @@ function flameGlyphIndex(h) {
 // otherwise state.angle is used. Rotate voxels around the vertical y axis,
 // project (col from x' scaled to width, row from y with y=0 at the bottom),
 // max heat per screen cell, dark bg 234 for empty cells. Never touches io.
-function render(state, width, angle) {
+//
+// `opts` (may be undefined, ticket 044):
+//   - rows: terminal row count. rows_screen = min(H, max(2, rows-1)); the
+//     BOTTOM rows_screen rows are drawn (base y=0 always visible). Non-number
+//     / undefined rows => H (old behavior). When rows_screen == rows-1 the
+//     frame omits the trailing '\n' and the ESC[J tail clear (no scroll).
+//   - color256: false switches every cell to a plain 16-color SGR code
+//     (colorCode) for terminals without 256-color support; default true.
+function render(state, width, angle, opts) {
   const W = state.W, H = state.H, D = state.D;
   const heat = state.heat;
+  const options = opts || {};
+  const color256 = options.color256 !== false;
   const a = typeof angle === 'number' && Number.isFinite(angle) ? angle : state.angle;
   const cos = Math.cos(a);
   const sin = Math.sin(a);
@@ -207,8 +235,17 @@ function render(state, width, angle) {
   const extent = Math.max(W, D) - 1;
   const scale = cols > 1 ? (cols - 1) / extent : 0;
 
-  const maxH = new Float32Array(H * cols);
-  for (let y = 0; y < H; y++) {
+  // Terminal-height adaptation (ticket 044): when opts.rows is a valid
+  // number, draw only the BOTTOM rows_screen rows (y = rows_screen-1 … 0 —
+  // the flame base y=0 is always visible, the top is clipped). Undefined or
+  // non-number rows => rows_screen = H (current behavior).
+  const rowsOpt = typeof options.rows === 'number' && Number.isFinite(options.rows)
+    ? Math.floor(options.rows)
+    : null;
+  const rowsScreen = rowsOpt !== null ? Math.min(H, Math.max(2, rowsOpt - 1)) : H;
+
+  const maxH = new Float32Array(rowsScreen * cols);
+  for (let y = 0; y < rowsScreen; y++) {
     const off = y * W * D;
     const rowBase = y * cols;
     for (let x = 0; x < W; x++) {
@@ -226,17 +263,17 @@ function render(state, width, angle) {
       }
     }
   }
-  // Screen row: y=0 (base) is the bottom row, so emit y = H-1 … 0.
+  // Screen row: y=0 (base) is the bottom row, so emit y = rowsScreen-1 … 0.
   // Per-cell tokens (color by heat, glyph by density) are merged into runs:
   // one escape code per run of consecutive same-color cells (ticket 042).
   const lines = [];
-  for (let y = H - 1; y >= 0; y--) {
+  for (let y = rowsScreen - 1; y >= 0; y--) {
     const rowBase = y * cols;
     const parts = [];
     let open = null; // current color code, or null (no run open)
     for (let c = 0; c < cols; c++) {
       const h = maxH[rowBase + c];
-      const code = ESC + '[38;5;' + (h > 0 ? colorIndex(h) : DARK_BG) + 'm';
+      const code = colorCode(h, color256);
       if (code !== open) {
         if (open !== null) parts.push(RESET);
         open = code;
@@ -247,11 +284,19 @@ function render(state, width, angle) {
     if (open !== null) parts.push(RESET);
     lines.push(parts.join(''));
   }
-  return CURSOR_HOME + lines.join('\n') + '\n' + CLEAR_TAIL;
+  // When the frame fills the last screen row (rows_screen == rows - 1), a
+  // trailing '\n' would push the cursor past the bottom edge and scroll the
+  // screen EVERY frame — the "running picture" black-screen bug (ticket 044).
+  // In that case emit cursor home + lines only: the last row is fully covered
+  // by per-cell glyphs, no tail clear needed.
+  const fillsLastRow = rowsOpt !== null && rowsScreen === rowsOpt - 1;
+  return fillsLastRow
+    ? CURSOR_HOME + lines.join('\n')
+    : CURSOR_HOME + lines.join('\n') + '\n' + CLEAR_TAIL;
 }
 
 module.exports = {
-  create, step, render, colorIndex,
+  create, step, render, colorIndex, colorCode,
   mulberry32, flameGlyphIndex, FLAME_GLYPHS, FLAME_MIN, DARK_BG,
   DEFAULT_W, DEFAULT_H, DEFAULT_D, DEFAULT_SEED, DECAY_MIN, DECAY_MAX,
 };
