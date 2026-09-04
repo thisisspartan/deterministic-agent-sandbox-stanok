@@ -50,7 +50,7 @@ DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))
 CONTEXT_ROT_THRESHOLD = int(os.environ.get("STANOK_CONTEXT_ROT_TOKENS", "50000"))
 
 API_TIMEOUT_S = max(1.0, float(os.environ.get("STANOK_API_TIMEOUT_S", "600")))
-TURN_TIMEOUT_S = float(os.environ.get("STANOK_TURN_TIMEOUT_S", str(API_TIMEOUT_S + 120)))
+TURN_TIMEOUT_S = float(os.environ.get("STANOK_TURN_TIMEOUT_S", "1200"))
 
 if TURN_TIMEOUT_S <= API_TIMEOUT_S:
     TURN_TIMEOUT_S = API_TIMEOUT_S + max(15.0, API_TIMEOUT_S * 0.2)
