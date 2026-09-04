@@ -144,8 +144,8 @@ function step(state) {
 const ESC = '\u001b';
 const CURSOR_HOME = ESC + '[H';
 const CLEAR_TAIL = ESC + '[2J';
-const DARK_BG = 234;           // empty-cell background (heat <= 0)
-const BG_CODE = ESC + '[48;5;' + DARK_BG + 'm';
+const DARK_BG = 234;           // dark background color for empty/cool cells
+const BG_CODE = ESC + '[38;5;' + DARK_BG + 'm';
 const RESET = ESC + '[0m';
 
 // Flame density glyphs: ramp from sparse (index 0 = space) to dense.
