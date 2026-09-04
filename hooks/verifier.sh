@@ -39,10 +39,10 @@ esac
 TEST="$REPO_ROOT/tests/$MOD.test.js"
 [ -f "$TEST" ] || exit 0   # no matching test yet -> cannot verify -> silent
 
-# C1 test-lock: при ПЕРВОМ реальном прогоне теста (test существует) — ставим лок
-# .stanok-locks/<mod>.lock. Лок создаёт hook (shell-код в CLI-процессе), а НЕ модель
-# через tool-call -> PreToolUse path-guard (гейт модельных Write/Edit) его не видит.
-# mkdir -p — защита от отсутствующей директории на первом локе.
+# C1 test-lock: on the FIRST real run of the test (the test exists) — set the lock
+# .stanok-locks/<mod>.lock. The lock is created by the hook (shell code in the CLI process),
+# NOT by the model via a tool-call -> the PreToolUse path-guard (the gate for model Write/Edit) does not see it.
+# mkdir -p — protection against a missing directory on the first lock.
 mkdir -p "$REPO_ROOT/.stanok-locks"
 touch "$REPO_ROOT/.stanok-locks/$MOD.lock"
 

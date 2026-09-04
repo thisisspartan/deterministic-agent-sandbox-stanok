@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# bash-gate.sh — PreToolUse hook (Bash) для claude-станка.
-# Модель получает Bash ТОЛЬКО в одной форме: `bash scripts/run.sh ...`
-# (писочница: фиксированные подкоманды test/smoke/list, см. scripts/run.sh).
-# Всё остальное — deny. Прямой shell, операторы, другие бинари — запрещены.
-# Протокол как в path-guard.sh: stdin = JSON вызова; deny = permissionDecision.
+# bash-gate.sh — PreToolUse hook (Bash) for the claude machine.
+# The model gets Bash in exactly one form: `bash scripts/run.sh ...`
+# (sandbox: fixed subcommands test/smoke/list, see scripts/run.sh).
+# Everything else — deny. Direct shell, operators, other binaries — forbidden.
+# Protocol as in path-guard.sh: stdin = call JSON; deny = permissionDecision.
 set -euo pipefail
 
 deny() {
@@ -22,14 +22,14 @@ except Exception:
 
 [ -n "$CMD" ] || deny "no command / malformed input"
 
-# Shell-операторы и подстановки — сразу deny (ни пайпов, ни редиректов, ни $(...)).
+# Shell operators and substitutions — deny immediately (no pipes, no redirects, no $(...)).
 case "$CMD" in
   *"|"*|*";"*|*"&"*|*'$('*|*'`'*|*">"*|*"<"*|*$'\n'*) deny "shell operators/substitution not allowed" ;;
 esac
 
-# Разрешена ровно одна форма: [bash ](./)scripts/run.sh <args>
+# Exactly one form is allowed: [bash ](./)scripts/run.sh <args>
 if [[ "$CMD" =~ ^[[:space:]]*(bash[[:space:]]+)?(\./)?scripts/run\.sh[[:space:]]+.*$ ]]; then
-  exit 0   # allow — остальное валидирует сам run.sh
+  exit 0   # allow — run.sh itself validates the rest
 else
   deny "only 'bash scripts/run.sh <test|smoke|list> ...' is allowed"
 fi

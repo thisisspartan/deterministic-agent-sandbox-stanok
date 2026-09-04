@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# test-lock-dump.sh — P2-probe hook: ДАМП полного PreToolUse-инпута (без вердикта).
-# Запускается на копии ТОЛЬКО для подтверждения значений .agent_type (main Write vs
-# tester Write). Не участвует в боевом контуре.
-# REPO_ROOT выводится из расположения скрипта — хук переносимый.
+# test-lock-dump.sh — P2-probe hook: DUMP of the full PreToolUse input (no verdict).
+# Runs on a copy ONLY to confirm the .agent_type values (main Write vs
+# tester Write). Not part of the live circuit.
+# REPO_ROOT is derived from the script location — the hook is portable.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# agent-gate.sh — PreToolUse hook (Task|Agent). Жёсткий гейт спавна субагентов.
-# Разрешает ТОЛЬКО subagent_type в {reviewer, tester}; любой другой Agent -> deny.
-# stdout без вывода = allow. Лог-строка — свидетельство срабатывания hook на Agent.
-# REPO_ROOT выводится из расположения скрипта — хук переносимый.
+# agent-gate.sh — PreToolUse hook (Task|Agent). Hard gate on subagent spawning.
+# Allows ONLY subagent_type in {reviewer, tester}; any other Agent -> deny.
+# stdout with no output = allow. The log line is evidence of the hook firing on Agent.
+# REPO_ROOT is derived from the script location — the hook is portable.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +26,7 @@ case "$ST" in
     printf '{"systemMessage":"agent-gate: allow %s"}' "$ST"
     ;;
   *)
-    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"agent-gate: только reviewer/tester"}}'
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"agent-gate: reviewer/tester only"}}'
     ;;
 esac
 exit 0

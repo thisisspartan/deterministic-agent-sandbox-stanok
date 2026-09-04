@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# domain-allowlist.sh — PreToolUse hook (WebFetch). deny-by-default: статический
-# allowlist 9 доменов (как ALLOWED_WEBFETCH_HOSTS в stanok-sdk.py, без raw.*).
-# URL-хост вне списка -> deny (fail-closed). Без Telegram/approval.
-# WebFetch остаётся ВНЕ settings allow И ВНЕ deny (правило trusted-mode short-circuit)
-# — реальный гейт домена — этот hook; can_use_tool — ремень.
-# REPO_ROOT выводится из расположения скрипта — хук переносимый.
+# domain-allowlist.sh — PreToolUse hook (WebFetch). deny-by-default: a static
+# allowlist of 9 domains (as ALLOWED_WEBFETCH_HOSTS in stanok-sdk.py, without raw.*).
+# URL host not in the list -> deny (fail-closed). No Telegram/approval.
+# WebFetch stays OUTSIDE the settings allow AND outside deny (trusted-mode short-circuit rule)
+# — the real domain gate is this hook; can_use_tool is the belt.
+# REPO_ROOT is derived from the script location — the hook is portable.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,10 +35,10 @@ except Exception:
 ")"
 [ -n "$HOST" ] || exit 0
 
-# ПАТЧ 3 (SSRF/DNS-rebinding): резолв hostname -> IP ДО allowlist-решения.
-# deny, если ЛЮБОЙ из резолвнутых IP — private (RFC1918/ULA), loopback или
-# link-local — независимо от membership в allowlist (защита от DNS-rebinding
-# и подмены /etc/hosts на разрешённом домене). Fail-closed: любой bad IP -> deny.
+# PATCH 3 (SSRF/DNS-rebinding): resolve hostname -> IP BEFORE the allowlist decision.
+# deny if ANY of the resolved IPs is private (RFC1918/ULA), loopback, or
+# link-local — regardless of membership in the allowlist (protection against DNS-rebinding
+# and /etc/hosts substitution on an allowed domain). Fail-closed: any bad IP -> deny.
 IP_CHECK="$(printf '%s' "$HOST" | python3 -c "
 import ipaddress, socket, sys
 host = sys.stdin.read().strip()
@@ -62,7 +62,7 @@ if [ "${IP_CHECK%% *}" = "BAD" ]; then
     BAD_IPS="${IP_CHECK#BAD }"
     mkdir -p "$LOG_DIR"
     echo "$(date +%T) DENY SSRF host=$HOST ip=$BAD_IPS url=$URL" >> "$LOG"
-    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"domain-allowlist: SSRF-guard — %s резолвится в приватный/loopback/link-local адрес %s"}}' "$HOST" "$BAD_IPS"
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"domain-allowlist: SSRF-guard — %s resolves to a private/loopback/link-local address %s"}}' "$HOST" "$BAD_IPS"
     exit 0
 fi
 
@@ -73,5 +73,5 @@ fi
 
 mkdir -p "$LOG_DIR"
 echo "$(date +%T) DENY host=$HOST url=$URL" >> "$LOG"
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"domain-allowlist: %s вне разрешённых доменов"}}' "$HOST"
+printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"domain-allowlist: %s is outside the allowed domains"}}' "$HOST"
 exit 0

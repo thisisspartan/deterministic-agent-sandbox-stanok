@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# test-lock.sh — PreToolUse hook (Write|Edit). Роль-разделение coder/tester.
+# test-lock.sh — PreToolUse hook (Write|Edit). Role separation coder/tester.
 #
-# Если цель — tests/*.test.js И .stanok-locks/<mod>.lock уже существует И вызывающий
-# НЕ tester-субагент (дискриминатор — .agent_type в base-context PreToolUse) -> deny
-# (fail-closed). Лок ставит verifier.sh на ПЕРВОМ реальном прогоне теста.
+# If the target is tests/*.test.js AND .stanok-locks/<mod>.lock already exists AND the caller
+# is NOT the tester subagent (discriminator — .agent_type in the PreToolUse base-context) -> deny
+# (fail-closed). The lock is set by verifier.sh on the FIRST real run of the test.
 #
-# Смысл: main-агент (coder) не должен переписывать тест «чтоб прошёл» (Goodhart);
-# править залоченный тест может только tester-субагент (тоже локальная модель —
-# его «ослабить» закрывает verifier-гейт).
+# The point: the main agent (coder) must not rewrite the test "to make it pass" (Goodhart);
+# only the tester subagent may edit a locked test (also a local model —
+# "weakening" it is closed off by the verifier gate).
 #
-# Дискриминатор P2-подтверждён: main = 'mainThreadAgentType' (или пусто), tester = 'tester'.
-# REPO_ROOT выводится из расположения скрипта — хук переносимый.
+# Discriminator P2-confirmed: main = 'mainThreadAgentType' (or empty), tester = 'tester'.
+# REPO_ROOT is derived from the script location — the hook is portable.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +44,7 @@ except Exception:
     print('')
 ")"
 
-[ -n "$FP" ] || exit 0   # битый инпут — без вердикта (fail-closed не наш случай, путь-guard гейтит)
+[ -n "$FP" ] || exit 0   # broken input — no verdict (fail-closed is not our case, path-guard gates it)
 
 case "$FP" in
   /*) ;;
@@ -54,16 +54,16 @@ ABS="$(realpath -m "$FP")"
 
 case "$ABS" in
   "$REPO_ROOT/tests/"*.test.js) ;;
-  *) exit 0 ;;   # не тест — гейт не наша забота
+  *) exit 0 ;;   # not a test — the gate is not our concern
 esac
 
 MOD="$(basename "$ABS" .test.js)"
 
-# Лок есть И вызывающий НЕ tester (grep 'tester' в agent_type) -> deny.
+# The lock exists AND the caller is NOT the tester (grep 'tester' in agent_type) -> deny.
 if [ -f "$LOCK_DIR/$MOD.lock" ] && ! printf '%s' "$AT" | grep -q "tester"; then
   mkdir -p "$LOG_DIR"
   echo "$(date +%T) DENY mod=$MOD agent_type='$AT' agent_id='$AID' path=$ABS" >> "$LOG"
-  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"test-lock: тест %s залочен, править только tester (agent_type=%s)"}}' "$MOD" "$AT"
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"test-lock: test %s is locked, only the tester may edit it (agent_type=%s)"}}' "$MOD" "$AT"
 else
   printf '{"systemMessage":"test-lock: allow %s (agent_type=%s)"}' "$MOD" "$AT"
 fi

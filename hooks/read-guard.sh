@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# read-guard.sh — PreToolUse hook (Read|Grep|Glob) для claude-станка.
-# Запрещает чтение ВНЕ рабочих зон (src/, tests/, docs/, tickets/) внутри репо
-# и чтение ВНЕ репо вообще. Механический барьер: работает в любом permission
-# mode (включая bypassPermissions), где can_use_tool не вызывается.
-# Протокол (как path-guard.sh): stdin = JSON вызова; stdout = hookSpecificOutput
-# с permissionDecision ("deny" перекрывает bypass). Без вывода = allow.
+# read-guard.sh — PreToolUse hook (Read|Grep|Glob) for the claude machine.
+# Forbids reads OUTSIDE the working zones (src/, tests/, docs/, tickets/) inside the repo
+# and reads OUTSIDE the repo altogether. Mechanical barrier: works in any permission
+# mode (including bypassPermissions), where can_use_tool is not called.
+# Protocol (as in path-guard.sh): stdin = call JSON; stdout = hookSpecificOutput
+# with permissionDecision ("deny" overrides bypass). No output = allow.
 #
-# REPO_ROOT выводится из расположения скрипта (<repo>/hooks/read-guard.sh).
+# REPO_ROOT is derived from the script location (<repo>/hooks/read-guard.sh).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,20 +28,20 @@ except Exception:
     print('')
 ")"
 
-# Нет file_path/path (например Glob без path) — гейт НЕ пропускает.
+# No file_path/path (e.g. Glob without path) — the gate does NOT let it through.
 [ -n "$FP" ] || deny "no path in input"
 
-# Относительный путь -> абсолютный через REPO_ROOT (не полагаемся на CWD).
+# Relative path -> absolute via REPO_ROOT (do not rely on CWD).
 case "$FP" in
   /*) ;;
   *) FP="$REPO_ROOT/$FP" ;;
 esac
 
-# realpath -m: нормализация + разворачивание symlink (защита P-symlink).
+# realpath -m: normalization + symlink resolution (P-symlink protection).
 ABS="$(realpath -m "$FP")"
 
 case "$ABS" in
-  "$REPO_ROOT"/*) ;;   # внутри репо — дальше
+  "$REPO_ROOT"/*) ;;   # inside the repo — continue
   *) deny "outside repo: $ABS" ;;
 esac
 

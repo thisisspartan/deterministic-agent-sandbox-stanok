@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Корень репозитория станка
+# Root of the machine repo
 REPO_ROOT="${STANOK_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 if ! command -v bwrap &>/dev/null; then
-    echo "ERROR: установите bubblewrap (sudo apt install bubblewrap / pacman -S bubblewrap)" >&2
+    echo "ERROR: install bubblewrap (sudo apt install bubblewrap / pacman -S bubblewrap)" >&2
     exit 1
 fi
 
 LOG_DIR="${STANOK_LOG_DIR:-/tmp/stanok-logs}"
 mkdir -p "$LOG_DIR"
 
-# 1. Формируем PATH, явно включая каталоги npm-global и .local/bin
+# 1. Build PATH, explicitly including the npm-global and .local/bin directories
 RESOLVED_PATH="$PATH"
 for p in "$HOME/.npm-global/bin" "$HOME/.local/bin"; do
     if [ -d "$p" ] && [[ ":$RESOLVED_PATH:" != *":$p:"* ]]; then
@@ -20,7 +20,7 @@ for p in "$HOME/.npm-global/bin" "$HOME/.local/bin"; do
     fi
 done
 
-# 2. Находим бинарники claude и node на хосте
+# 2. Find the claude and node binaries on the host
 HOST_CLAUDE="$(command -v claude || which claude || true)"
 HOST_NODE="$(command -v node || which node || true)"
 
@@ -38,7 +38,7 @@ if [ -n "$HOST_NODE" ]; then
     fi
 fi
 
-# Базовые монтирования песочницы
+# Base sandbox mounts
 BWRAP_ARGS=(
   --ro-bind / /
   --dev /dev
@@ -48,14 +48,14 @@ BWRAP_ARGS=(
   --tmpfs "$HOME"
 )
 
-# 3. Пробрасываем все критичные каталоги пользователя (npm, node, local)
+# 3. Pass through all critical user directories (npm, node, local)
 for dir in ".npm-global" ".local" ".nvm" ".fnm" ".asdf" ".volta"; do
   if [ -d "$HOME/$dir" ]; then
     BWRAP_ARGS+=(--ro-bind "$HOME/$dir" "$HOME/$dir")
   fi
 done
 
-# Если claude или node лежат по реальному пути вне стандартных каталогов (разрешаем симлинки)
+# If claude or node live at a real path outside the standard directories (resolving symlinks)
 for bin_file in "$HOST_CLAUDE" "$HOST_NODE"; do
   if [ -n "$bin_file" ] && [ -e "$bin_file" ]; then
     REAL_TARGET="$(readlink -f "$bin_file" || true)"
@@ -68,25 +68,25 @@ for bin_file in "$HOST_CLAUDE" "$HOST_NODE"; do
   fi
 done
 
-# Пробрасываем git-конфиг
+# Pass through the git config
 if [ -f "$HOME/.gitconfig" ]; then
   BWRAP_ARGS+=(--ro-bind "$HOME/.gitconfig" "$HOME/.gitconfig")
 fi
 
-# Папка для сессий и настроек Claude Code (обязательно доступная для записи)
+# Folder for Claude Code sessions and settings (must be writable)
 mkdir -p "$HOME/.claude"
 BWRAP_ARGS+=(--bind "$HOME/.claude" "$HOME/.claude")
 if [ -f "$HOME/.claude.json" ]; then
   BWRAP_ARGS+=(--bind "$HOME/.claude.json" "$HOME/.claude.json")
 fi
 
-# 4. Пробрасываем тикеты супервайзера из родительского каталога СТРОГО в режиме Read-Only
+# 4. Pass through the supervisor's tickets from the parent directory in STRICT Read-Only mode
 PARENT_DIR="$(dirname "$REPO_ROOT")"
 if [ -d "$PARENT_DIR/tickets" ]; then
   BWRAP_ARGS+=(--ro-bind "$PARENT_DIR/tickets" "$PARENT_DIR/tickets")
 fi
 
-# 5. Монтируем рабочий репозиторий станка (чтение/запись)
+# 5. Mount the machine's working repo (read/write)
 BWRAP_ARGS=(
   "${BWRAP_ARGS[@]}"
   --bind "$REPO_ROOT" "$REPO_ROOT"

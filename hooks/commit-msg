@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# commit-msg: TASK-ID гейт (git-нативный, аналог grok commit-msg).
-# Отклоняет коммит без TASK-STANOK-CC-NNN в сообщении.
-# Модель НЕ коммитит (git-write запрещён); коммитит только root через stanok_commit.sh.
+# commit-msg: TASK-ID gate (git-native, grok commit-msg analog).
+# Rejects a commit without TASK-STANOK-CC-NNN in the message.
+# The model does NOT commit (git-write is forbidden); only root commits via stanok_commit.sh.
 #
-# KNOWN ISSUE (2026-08-24, решение оператора отложено):
-# symlink .git/hooks/commit-msg — self-loop:
+# KNOWN ISSUE (2026-08-24, operator decision deferred):
+# symlink .git/hooks/commit-msg is a self-loop:
 #   .git/hooks/commit-msg -> ../hooks/commit-msg
-# Относительно .git/hooks/ путь ../hooks/ = .git/hooks/, т.е. ссылка указывает
-# на саму себя; git не может её прочитать ("Too many levels of symbolic links"),
-# хук НИКОГДА не срабатывает. TASK-ID гейт фактически ОТКЛЮЧЁН: коммиты без
-# TASK-STANOK-CC-NNN проходят. Вероятно, целевой путь должен быть
-# ../../hooks/commit-msg (корень репо). Не чинить до решения оператора;
-# до него не полагаться на этот гейт.
+# Relative to .git/hooks/, the path ../hooks/ = .git/hooks/, i.e. the link points
+# at itself; git cannot read it ("Too many levels of symbolic links"),
+# the hook NEVER fires. The TASK-ID gate is effectively DISABLED: commits without
+# TASK-STANOK-CC-NNN pass. The target path is probably supposed to be
+# ../../hooks/commit-msg (repo root). Do not fix until the operator decides;
+# until then, do not rely on this gate.
 MSG_FILE="$1"
 if ! grep -Eq 'TASK-STANOK-CC-[0-9]+' "$MSG_FILE"; then
   echo "COMMIT REJECTED: commit message must contain TASK-STANOK-CC-NNN" >&2

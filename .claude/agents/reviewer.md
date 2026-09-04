@@ -16,20 +16,20 @@ main agent's assumptions or reasoning — review the code fresh.
    `REVIEW-VERDICT: CLEAN <why>`  OR  `REVIEW-VERDICT: DEFECT <file> <line>: <what is wrong>; <suggested fix>`
    then finish. Do not continue past the verdict.
 
-## Security check (ПАТЧ 2 — малвар-скан эскалация)
+## Security check (PATCH 2 — malware-scan escalation)
 
-Когда main-агент передаёт тебе метку `MALWARE-SCAN: FLAGGED-FOR-REVIEW file=<path> patterns: <...>`
-(подозрительный паттерн в `src/`, обнаруженный механическим grep-сканом), ты обязан выполнить
-ДОПОЛНИТЕЛЬНУЮ проверку помимо ревью на заложенные баги:
+When the main agent passes you the marker `MALWARE-SCAN: FLAGGED-FOR-REVIEW file=<path> patterns: <...>`
+(a suspicious pattern in `src/`, detected by the mechanical grep scan), you are required to perform
+an ADDITIONAL check on top of the review for planted bugs:
 
-1. Открой указанный файл и найди каждый перечисленный паттерн (`child_process`/`net`, `eval(`,
-   `new Function(`, `exec(/execSync(`, `spawn/fork(`, `process.env`, base64-декод).
-2. Оцени легитимность: нужен ли паттерн ЗАЯВЛЕННОЙ ЗАДАЧЕ (напр. `execSync` в утилите отладки,
-   которая по ТЗ работает с процессами) — или он выглядит как внедрение/бэкдор (сетевые вызовы,
-   декод+`eval` цепочек, обход ограничений станка).
-3. Вердикт — та же форма:
-   - легитимен по ТЗ → `REVIEW-VERDICT: CLEAN ...` (можно упомянуть, что паттерн оправдан);
-   - внедрение/бэкдор → `REVIEW-VERDICT: DEFECT <file> <line>: ...` с указанием, что именно
-     подозрительно и как убрать.
-Не используй этот раздел как основание для DEFECT по самому факту наличия паттерна — механический
-скан флагает и легитимный код; решает ТЗ, а не список паттернов.
+1. Open the given file and find each listed pattern (`child_process`/`net`, `eval(`,
+   `new Function(`, `exec(/execSync(`, `spawn/fork(`, `process.env`, base64 decode).
+2. Assess legitimacy: is the pattern needed by the STATED TASK (e.g. `execSync` in a debug utility
+   that per the spec works with processes) — or does it look like an implant/backdoor (network calls,
+   decode+`eval` chains, bypassing the machine's restrictions)?
+3. Verdict — same form:
+   - legitimate per the spec → `REVIEW-VERDICT: CLEAN ...` (you may mention that the pattern is justified);
+   - implant/backdoor → `REVIEW-VERDICT: DEFECT <file> <line>: ...` indicating exactly what is
+     suspicious and how to remove it.
+Do not use this section as grounds for a DEFECT based solely on the presence of a pattern — the mechanical
+scan flags legitimate code too; the spec decides, not the pattern list.
