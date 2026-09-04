@@ -63,17 +63,20 @@ fi
 #    эквивалент старого rc=25: Runner сам Python, «пропавший python3» больше невозможен).
 LAUNCH="$REPO_ROOT/launch.sh"
 
-# 1) label-guard (rc=15)
-if STANOK_PY="$(command -v python3)" "$LAUNCH" run x.md -- --background >/dev/null 2>&1; then
-  FAIL=$((FAIL+1)); echo "FAIL runner label-guard: label '--background' не отклонён, ожидали rc=15"
+# 1) label-guard (rc=15): label, начинающийся с '--', -> rc=15 ДО ticket-resolution.
+# Тикет СУЩЕСТВУЕТ (mktemp), чтобы при отсутствии label-guard не замаскировался rc=13.
+TMPT_LG="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT_LG"
+if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 \
+     "$LAUNCH" run "$TMPT_LG" -- --background >/dev/null 2>&1; then
+  FAIL=$((FAIL+1)); echo "FAIL runner label-guard: label '--background' должен дать rc=15"
 else
   RC=$?
-  if [ "$RC" -eq 15 ]; then
-    OK=$((OK+1)); echo "ok   runner label-guard ('--label' как evidence-label -> rc=15)"
-  else
-    FAIL=$((FAIL+1)); echo "FAIL runner label-guard: ожидали rc=15, получили rc=$RC"
-  fi
+  case "$RC" in
+    15) OK=$((OK+1)); echo "ok   runner label-guard ('--background' -> rc=15)";;
+    *)  FAIL=$((FAIL+1)); echo "FAIL runner label-guard: ожидали rc=15, получили rc=$RC";;
+  esac
 fi
+rm -f "$TMPT_LG"
 
 # 2) fail-fast на мёртвом сервере (rc=20)
 TMPT="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT"

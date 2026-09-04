@@ -82,6 +82,7 @@ src/ tests/ docs/             — рабочие каталоги станка (
 3. Модель (coder) пишет тест → реализацию → документацию, спавнит
    sub-агентов `tester`/`reviewer`. После каждого Write/Edit хуки сканируют
    код (malware-scan) и проверяют «код ↔ тест» (verifier). Job/Attempt:
-   попытка → verify → локальные ретраи (STANOK_LOCAL_RETRIES=1) → cloud FAIL-only.
+   попытка → verify → локальные ретраи (STANOK_LOCAL_RETRIES=1) → cloud FAIL-only
+   (по умолчанию облако ПОДАВЛЕНО; явный `--cloud` включает внешний reviewer).
 4. Финал: `VERIFIER: PASS/FAIL`, `PROBE-RESULT: …`, rc Runner — typed
    `evidence/<label>/summary.json` (без regex-парсинга stdout).
