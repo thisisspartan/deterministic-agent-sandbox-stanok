@@ -7,10 +7,14 @@
 //
 // Input parsing:
 //   - lone q / Q / ESC(0x1b) / Ctrl+C(0x03)          -> stop() + onQuit(reason);
-//   - CSI "\u001b[D" (arrow LEFT)                    -> fire.angle -= ROT_STEP;
-//   - CSI "\u001b[C" (arrow RIGHT)                  -> fire.angle += ROT_STEP;
-//   - any other CSI sequence (F-keys, paste, ...)   -> ignored.
-// Holding an arrow key produces terminal auto-repeat CSI chunks — smooth
+//   - CSI "\u001b[D" (arrow LEFT, normal mode)       -> fire.angle -= ROT_STEP;
+//   - CSI "\u001b[C" (arrow RIGHT, normal mode)      -> fire.angle += ROT_STEP;
+//   - SS3 "\u001bOD" (arrow LEFT, application mode,  -> fire.angle -= ROT_STEP;
+//     DECCKM on)                                       (ticket 045);
+//   - SS3 "\u001bOC" (arrow RIGHT, application mode)  -> fire.angle += ROT_STEP;
+//   - "\u001bOA" / "\u001bOB" (up/down) and any other -> ignored.
+//     CSI / SS3 sequence (F-keys, paste, ...)
+// Holding an arrow key produces terminal auto-repeat chunks — smooth
 // continuous rotation around the vertical axis.
 
 const { render } = require('./fire3d.js');
@@ -23,24 +27,29 @@ const ALT_ON = '\u001b[?1049h';
 const ALT_OFF = '\u001b[?1049l';
 const CURSOR_HIDE = '\u001b[?25l';
 const CURSOR_SHOW = '\u001b[?25h';
+const CURSOR_HOME = '\u001b[H';
+const CLEAR_TAIL = '\u001b[J';
 
-// Returns a quit reason string or null. Arrow CSI keys mutate fire.angle.
+// Returns a quit reason string or null. Arrow keys mutate fire.angle.
+// Arrows are accepted in BOTH terminal cursor-key modes: CSI (normal)
+// "\u001b[C" / "\u001b[D" and SS3 (application, DECCKM on) "\u001bOC" /
+// "\u001bOD" (ticket 045). Up/down (A/B) and any other sequence are ignored.
 function parseInput(buf, fire) {
   if (buf.length === 1) {
     const b = buf[0];
     if (b === 0x03) return 'ctrl-c';
     if (b === 0x71) return 'q';
     if (b === 0x51) return 'Q';
-    if (b === 0x1b) return 'esc';
+    if (b === 0x1b) return 'esc'; // lone ESC (ESC O ... is NOT a lone ESC)
     return null;
   }
   if (buf.includes(0x03)) return 'ctrl-c';
-  if (buf[0] === 0x1b && buf.length >= 3 && buf[1] === 0x5b) {
-    // CSI: ESC [ <final byte>
-    if (buf[2] === 0x44) { fire.angle -= ROT_STEP; return null; } // \u001b[D  ←
-    if (buf[2] === 0x43) { fire.angle += ROT_STEP; return null; } // \u001b[C  →
+  if (buf[0] === 0x1b && buf.length >= 3 && (buf[1] === 0x5b || buf[1] === 0x4f)) {
+    // ESC [ <final> (CSI, normal mode) or ESC O <final> (SS3, application mode)
+    if (buf[2] === 0x44) { fire.angle -= ROT_STEP; return null; } // ←
+    if (buf[2] === 0x43) { fire.angle += ROT_STEP; return null; } // →
   }
-  return null; // other escape sequences (F-keys, bracketed paste, ...) — ignored
+  return null; // other escape sequences (F-keys, ↑/↓, bracketed paste, ...) — ignored
 }
 
 function attach(io, fire, opts) {
@@ -111,6 +120,29 @@ function attach(io, fire, opts) {
     }
   }
 
+  // Ticket 045: the frame-area clear written on stop(). Same geometry as
+  // render(): cols = min(W, floor(columns)); rows_screen = min(H, max(2,
+  // rows-1)) when rows is a valid number, else H. CURSOR_HOME + rows_screen
+  // lines of `cols` spaces, joined '\n', then '\n' + CLEAR_TAIL — except when
+  // the frame fills the last screen row (rows_screen == rows-1), where the
+  // trailing '\n' is omitted (as in the compact frame). Guarantees a clean
+  // screen even on terminals without alt-screen support.
+  function frameClear() {
+    const W = typeof fire.W === 'number' && fire.W > 0 ? fire.W : 48;
+    const H = typeof fire.H === 'number' && fire.H > 0 ? fire.H : 24;
+    const cols = typeof term.columns === 'number' && term.columns > 0
+      ? Math.min(W, Math.floor(term.columns))
+      : W;
+    const rowsOpt = typeof rows === 'number' && Number.isFinite(rows)
+      ? Math.floor(rows)
+      : null;
+    const rowsScreen = rowsOpt !== null ? Math.min(H, Math.max(2, rowsOpt - 1)) : H;
+    const line = ' '.repeat(cols);
+    let clear = CURSOR_HOME + Array(rowsScreen).fill(line).join('\n');
+    if (!(rowsOpt !== null && rowsScreen === rowsOpt - 1)) clear += '\n' + CLEAR_TAIL;
+    return clear;
+  }
+
   function stop() {
     if (stopped) return;
     stopped = true;
@@ -119,8 +151,9 @@ function attach(io, fire, opts) {
     try { term.stdin.setRawMode(false); } catch (e) { /* best-effort */ }
     if (!restored) {
       restored = true;
-      // Always restore the terminal: show cursor, leave alt screen.
-      try { term.stdout.write(CURSOR_SHOW + ALT_OFF); } catch (e) { /* best-effort */ }
+      // Always restore the terminal: clear the last frame area (works even
+      // without the alt screen), show cursor, leave alt screen.
+      try { term.stdout.write(frameClear() + CURSOR_SHOW + ALT_OFF); } catch (e) { /* best-effort */ }
     }
   }
 
