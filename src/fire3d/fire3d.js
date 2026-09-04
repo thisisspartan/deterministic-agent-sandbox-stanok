@@ -11,7 +11,10 @@
 // z' = x·sin + z·cos, coordinates relative to the slice center), projects
 // onto the screen (col from x' scaled to `width`, row from y — y=0 is the
 // bottom row) and takes the max-heat voxel per screen cell; an empty cell
-// is the dark background 234. A frame is one string block: cursor home,
+// is the dark background 234, a heated cell is colored by the 256-color
+// flame palette (same stops as src/fire/fire.js colorIndex). Rows are built
+// as per-cell tokens and emitted with same-color runs merged. A frame is
+// one string block: cursor home,
 // rows, tail clear. There is no fireplace frame — the flame burns on the
 // whole grid.
 //
@@ -145,8 +148,35 @@ const ESC = '\u001b';
 const CURSOR_HOME = ESC + '[H';
 const CLEAR_TAIL = ESC + '[2J';
 const DARK_BG = 234;           // dark background color for empty/cool cells
-const BG_CODE = ESC + '[38;5;' + DARK_BG + 'm';
 const RESET = ESC + '[0m';
+
+// --- palette (ticket 042, mirrors src/fire/fire.js colorIndex) --------------
+
+// Heat [0..1] -> xterm-256 color index: null for empty (heat <= 0), then
+// dark red -> red -> orange -> yellow -> white hot core. Same stops as the
+// 2D fire: 160 dark red, 196 red, 202/214 orange, 226 yellow, 231 white.
+const STOPS = [
+  [0.0, 0],
+  [0.05, 160],
+  [0.3, 196],
+  [0.5, 202],
+  [0.7, 214],
+  [0.9, 226],
+  [1.0, 231],
+];
+
+function colorIndex(t) {
+  if (!(t > 0)) return null;
+  if (t >= STOPS[STOPS.length - 1][0]) return STOPS[STOPS.length - 1][1];
+  for (let i = 1; i < STOPS.length; i++) {
+    if (t <= STOPS[i][0]) {
+      const [t0, c0] = STOPS[i - 1];
+      const [t1, c1] = STOPS[i];
+      return Math.round(c0 + (c1 - c0) * ((t - t0) / (t1 - t0)));
+    }
+  }
+  return null;
+}
 
 // Flame density glyphs: ramp from sparse (index 0 = space) to dense.
 // No brick glyphs (▓█▒) — the flame burns on the whole grid, no frame.
@@ -197,20 +227,31 @@ function render(state, width, angle) {
     }
   }
   // Screen row: y=0 (base) is the bottom row, so emit y = H-1 … 0.
+  // Per-cell tokens (color by heat, glyph by density) are merged into runs:
+  // one escape code per run of consecutive same-color cells (ticket 042).
   const lines = [];
   for (let y = H - 1; y >= 0; y--) {
     const rowBase = y * cols;
-    let s = '';
+    const parts = [];
+    let open = null; // current color code, or null (no run open)
     for (let c = 0; c < cols; c++) {
-      s += FLAME_GLYPHS[flameGlyphIndex(maxH[rowBase + c])];
+      const h = maxH[rowBase + c];
+      const code = ESC + '[38;5;' + (h > 0 ? colorIndex(h) : DARK_BG) + 'm';
+      if (code !== open) {
+        if (open !== null) parts.push(RESET);
+        open = code;
+        parts.push(open);
+      }
+      parts.push(FLAME_GLYPHS[flameGlyphIndex(h)]);
     }
-    lines.push(BG_CODE + s + RESET);
+    if (open !== null) parts.push(RESET);
+    lines.push(parts.join(''));
   }
   return CURSOR_HOME + lines.join('\n') + '\n' + CLEAR_TAIL;
 }
 
 module.exports = {
-  create, step, render,
+  create, step, render, colorIndex,
   mulberry32, flameGlyphIndex, FLAME_GLYPHS, FLAME_MIN, DARK_BG,
   DEFAULT_W, DEFAULT_H, DEFAULT_D, DEFAULT_SEED, DECAY_MIN, DECAY_MAX,
 };

@@ -63,7 +63,6 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$BACKGROUND" -eq 1 ]; then
-    export STANOK_BACKGROUND=1
     LAUNCH_LOG="$LOG_DIR/${LABEL}.launch.log"
     EVIDENCE_DIR="$PROJECT_ROOT/evidence/${LABEL}"
     MARKER_PATH="$EVIDENCE_DIR/.running"

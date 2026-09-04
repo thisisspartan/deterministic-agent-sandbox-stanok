@@ -87,7 +87,8 @@ if [ -d "$PARENT_DIR/tickets" ]; then
 fi
 
 # 5. Монтируем рабочий репозиторий станка (чтение/запись)
-BWRAP_ARGS+=(
+BWRAP_ARGS=(
+  "${BWRAP_ARGS[@]}"
   --bind "$REPO_ROOT" "$REPO_ROOT"
   --chdir "$REPO_ROOT"
   --setenv PATH "$RESOLVED_PATH"
@@ -97,11 +98,7 @@ BWRAP_ARGS+=(
   --setenv STANOK_HOST_PID "$$"
   --unshare-pid
   --unshare-uts
+  --die-with-parent
 )
-
-# В фоновом режиме процесс переживает родительскую оболочку launch.sh
-if [ "${STANOK_BACKGROUND:-0}" != "1" ]; then
-  BWRAP_ARGS+=(--die-with-parent)
-fi
 
 exec bwrap "${BWRAP_ARGS[@]}" "$@"
