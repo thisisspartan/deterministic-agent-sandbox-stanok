@@ -198,30 +198,26 @@ def preflight_server() -> bool:
 
 
 def reset_repo() -> int:
+    # SEC-01: .git is read-only inside the bwrap sandbox — NO git writes here.
+    # The tree must already be clean (host-side fail-closed gate in launch.sh,
+    # rc=22). This is a read-only verification + workspace prep.
     try:
-        r = subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=REPO_ROOT,
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            subprocess.run(["git", "clean", "-fdq"], cwd=REPO_ROOT, check=True, capture_output=True)
-        else:
-            # SEC-01: .git is read-only inside the bwrap sandbox — the host-side
-            # reset (launch.sh) already ran. Verify the tree is clean (read-only).
-            if "Read-only file system" not in (r.stderr or ""):
-                log(f"ERROR: repo reset failed: {(r.stderr or '').strip() or r}")
-                return 14
-            st = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
-                                capture_output=True, text=True)
-            if st.returncode != 0 or st.stdout.strip():
-                log("ERROR: tree dirty and .git read-only (host-side reset did not run) (rc=14)")
-                return 14
+        st = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
+                            capture_output=True, text=True)
+        if st.returncode != 0:
+            log(f"ERROR: git status failed: {(st.stderr or '').strip()}")
+            return 14
+        if st.stdout.strip():
+            log("ERROR: tree dirty (host-side gate did not run) (rc=14)")
+            return 14
     except OSError as e:
-        log(f"ERROR: repo reset failed: {e}")
+        log(f"ERROR: repo check failed: {e}")
         return 14
     try:
         for d in ("src", "tests", "docs"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
         # SEC-02: wipe stale TDD state (.red/.lock). .stanok-locks is gitignored,
-        # so git clean -fdq does NOT touch it — stale state would corrupt the
+        # so it survives any host-side git clean — stale state would corrupt the
         # verifier state machine of the next run.
         locks_dir = os.path.join(REPO_ROOT, ".stanok-locks")
         if os.path.isdir(locks_dir):
@@ -231,7 +227,7 @@ def reset_repo() -> int:
                     os.unlink(p)
         return 0
     except OSError as e:
-        log(f"ERROR: repo reset failed: {e}")
+        log(f"ERROR: repo prep failed: {e}")
         return 14
 
 

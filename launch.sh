@@ -100,10 +100,14 @@ if [ -n "$RETRIES" ]; then
     PY_FLAGS+=(--local-retries "$RETRIES")
 fi
 
-# SEC-01: .git is mounted read-only inside the bwrap sandbox — the git plumbing
-# (reset --hard / clean -fdq) must run on the host, before entering the sandbox.
-git -C "$PROJECT_ROOT" reset --hard HEAD
-git -C "$PROJECT_ROOT" clean -fdq
+# SEC-01: .git is mounted read-only inside the bwrap sandbox — no git writes are
+# possible there. FAIL-CLOSED (rc=22): the tree must be clean BEFORE launch;
+# the supervisor commits machine artifacts / operator state before each run.
+# Never reset/clean here — that would silently destroy uncommitted work.
+if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]; then
+    echo "ERROR: dirty tree in $PROJECT_ROOT (rc=22) — commit or clean before launch" >&2
+    exit 22
+fi
 
 if [ "$BACKGROUND" -eq 1 ]; then
     LAUNCH_LOG="$LOG_DIR/${LABEL}.launch.log"
