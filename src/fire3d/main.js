@@ -56,9 +56,24 @@ function isTty(s) {
   return t === true;
 }
 
+// Ticket CC-048: parse the --seed N flag from a process.argv-like array.
+// Returns the seed as a number, or undefined when the flag is absent.
+// Throws RangeError for a missing/invalid value (not an integer >= 0).
+// Pure: no output, no side effects.
+function parseSeed(argv) {
+  const args = argv || [];
+  const i = args.indexOf('--seed');
+  if (i === -1) return undefined;
+  const value = args[i + 1];
+  if (value === undefined || !/^\d+$/.test(value)) {
+    throw new RangeError('invalid --seed value: ' + String(value));
+  }
+  return parseInt(value, 10);
+}
+
 function renderStatic(stdout, frames, opts) {
-  const fire = create({ seed: Date.now() });
   const o = opts || {};
+  const fire = create({ seed: o.seed !== undefined ? o.seed : Date.now() });
   for (let i = 0; i < frames; i++) {
     fire.step();
     stdout.write(render(fire, stdout.columns, fire.angle, o) + '\n');
@@ -69,7 +84,8 @@ function renderStatic(stdout, frames, opts) {
 // stdout and exit(0) — works in TTY and non-TTY, so a user can visually check
 // the output in their own terminal.
 function renderOneFrame(stdout, opts) {
-  const fire = create({ seed: Date.now() });
+  const o = opts || {};
+  const fire = create({ seed: o.seed !== undefined ? o.seed : Date.now() });
   for (let i = 0; i < FRAME_SELF_TEST_STEPS; i++) fire.step();
   stdout.write(render(fire, stdout.columns, fire.angle, opts || {}));
 }
@@ -88,18 +104,22 @@ function writeCapabilityBanner(fire, color256) {
 function start() {
   try {
     const opts = termOpts();
+    // Ticket CC-048: one parseSeed call — the seed (or undefined) is applied
+    // to every path; without --seed the old Date.now() behavior stays.
+    const seed = parseSeed(process.argv);
+    const seedOpts = seed !== undefined ? { seed } : {};
     if (process.argv.includes('--frame')) {
-      renderOneFrame(process.stdout, opts);
+      renderOneFrame(process.stdout, { ...opts, ...seedOpts });
       process.exit(0);
       return;
     }
     if (!isTty(process.stdout)) {
-      renderStatic(process.stdout, NON_TTY_FRAMES, opts);
+      renderStatic(process.stdout, NON_TTY_FRAMES, { ...opts, ...seedOpts });
       process.exit(0);
       return;
     }
 
-    const fire = create({ seed: Date.now() });
+    const fire = create({ seed: seed !== undefined ? seed : Date.now() });
     writeCapabilityBanner(fire, opts.color256);
     const io = { stdin: process.stdin, stdout: process.stdout, columns: process.stdout.columns };
     const app = ui.attach(io, fire, {
@@ -127,4 +147,4 @@ if (require.main === module) {
   start();
 }
 
-module.exports = { start, renderStatic, renderOneFrame, detectColor256, termOpts, NON_TTY_FRAMES };
+module.exports = { start, renderStatic, renderOneFrame, detectColor256, termOpts, parseSeed, NON_TTY_FRAMES };
