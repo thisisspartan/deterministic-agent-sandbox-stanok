@@ -90,8 +90,9 @@ fi
 #    writable carve-outs for the work areas (src/, tests/, docs/, evidence/,
 #    .stanok-locks/, .stanok-logs/).
 #    .git is READ-ONLY (SEC-01): the model cannot commit, plant hooks, or rewrite
-#    git state from inside the sandbox. The launcher's git plumbing
-#    (reset --hard / clean -fdq) runs on the host, OUTSIDE the sandbox.
+#    git state from inside the sandbox. The git plumbing (reset --hard /
+#    clean -fdq) runs on the host in launch.sh, BEFORE entering the sandbox;
+#    the in-sandbox reset_repo() only verifies cleanliness (read-only).
 #    The carve-out directories must exist on the host before bwrap runs
 #    (bwrap fails on a missing bind source).
 mkdir -p "$REPO_ROOT/src" "$REPO_ROOT/tests" "$REPO_ROOT/docs" \

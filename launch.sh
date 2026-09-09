@@ -100,6 +100,11 @@ if [ -n "$RETRIES" ]; then
     PY_FLAGS+=(--local-retries "$RETRIES")
 fi
 
+# SEC-01: .git is mounted read-only inside the bwrap sandbox — the git plumbing
+# (reset --hard / clean -fdq) must run on the host, before entering the sandbox.
+git -C "$PROJECT_ROOT" reset --hard HEAD
+git -C "$PROJECT_ROOT" clean -fdq
+
 if [ "$BACKGROUND" -eq 1 ]; then
     LAUNCH_LOG="$LOG_DIR/${LABEL}.launch.log"
     EVIDENCE_DIR="$PROJECT_ROOT/evidence/${LABEL}"

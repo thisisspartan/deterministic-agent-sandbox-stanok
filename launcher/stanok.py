@@ -199,8 +199,25 @@ def preflight_server() -> bool:
 
 def reset_repo() -> int:
     try:
-        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=REPO_ROOT, check=True, capture_output=True)
-        subprocess.run(["git", "clean", "-fdq"], cwd=REPO_ROOT, check=True, capture_output=True)
+        r = subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=REPO_ROOT,
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            subprocess.run(["git", "clean", "-fdq"], cwd=REPO_ROOT, check=True, capture_output=True)
+        else:
+            # SEC-01: .git is read-only inside the bwrap sandbox — the host-side
+            # reset (launch.sh) already ran. Verify the tree is clean (read-only).
+            if "Read-only file system" not in (r.stderr or ""):
+                log(f"ERROR: repo reset failed: {(r.stderr or '').strip() or r}")
+                return 14
+            st = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
+                                capture_output=True, text=True)
+            if st.returncode != 0 or st.stdout.strip():
+                log("ERROR: tree dirty and .git read-only (host-side reset did not run) (rc=14)")
+                return 14
+    except OSError as e:
+        log(f"ERROR: repo reset failed: {e}")
+        return 14
+    try:
         for d in ("src", "tests", "docs"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
         # SEC-02: wipe stale TDD state (.red/.lock). .stanok-locks is gitignored,
@@ -213,7 +230,7 @@ def reset_repo() -> int:
                 if os.path.isfile(p):
                     os.unlink(p)
         return 0
-    except subprocess.CalledProcessError as e:
+    except OSError as e:
         log(f"ERROR: repo reset failed: {e}")
         return 14
 
