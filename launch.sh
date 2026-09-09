@@ -8,8 +8,8 @@ cd "$PROJECT_ROOT"
 
 PY="${STANOK_PY:-$DIR/.venv/bin/python}"
 if [ ! -x "$PY" ]; then
-    echo "ERROR: python не найден: $PY" >&2
-    echo "  Разверни окружение: $DIR/setup.sh  (создаёт .venv с claude-agent-sdk)" >&2
+    echo "ERROR: python not found: $PY" >&2
+    echo "  Set up the environment: $DIR/setup.sh  (creates .venv with claude-agent-sdk)" >&2
     exit 99
 fi
 
@@ -18,14 +18,14 @@ SANDBOX="$DIR/sandbox-run.sh"
 LOG_DIR="${STANOK_LOG_DIR:-/tmp/stanok-logs}"
 mkdir -p "$LOG_DIR"
 
-# Передаем найденный claude, если он есть на хосте
+# Pass the found claude, if it exists on the host
 if command -v claude &>/dev/null; then
     export STANOK_CLAUDE_BIN="$(command -v claude)"
 fi
 
 cmd="${1:-}"
 
-# Команды статуса, остановки и логов
+# Status, stop, and log commands
 if [ "$cmd" = "status" ] || [ "$cmd" = "stop" ] || [ "$cmd" = "watch" ]; then
     exec "$PY" "$STANOK_PY" "$@"
 fi
@@ -35,7 +35,7 @@ if [ "$cmd" = "run" ]; then
 fi
 
 if [ "$#" -lt 2 ]; then
-    echo "Использование: $0 [run] <ticket> <label> [--background] [--local-retries N] [--direct] [-- extra...]" >&2
+    echo "Usage: $0 [run] <ticket> <label> [--background] [--local-retries N] [--direct] [-- extra...]" >&2
     echo "              $0 status <label>" >&2
     echo "              $0 stop <label>" >&2
     echo "              $0 watch <label> [--follow]" >&2
@@ -51,8 +51,8 @@ RETRIES=""
 EXTRA_ARGS=()
 LABEL=""
 
-# Сепаратор `--`: всё после него уходит в Python как есть (label + extra-args),
-# bash больше не сканирует свои флаги.
+# `--` separator: everything after it goes to Python as-is (label + extra-args),
+# bash stops scanning its own flags.
 if [ "${1:-}" = "--" ]; then
     shift
     LABEL="${1:-}"
@@ -91,7 +91,7 @@ else
     done
 fi
 
-# Флаги Python идут ДО `--`: после сепаратора argparse считает всё позиционным.
+# Python flags go BEFORE `--`: after the separator argparse treats everything as positional.
 PY_FLAGS=()
 if [ "$DIRECT" -eq 1 ]; then
     PY_FLAGS+=(--direct)
@@ -117,11 +117,11 @@ if [ "$BACKGROUND" -eq 1 ]; then
     START_TS=$(date +%s)
     echo "$START_TS $BG_PID" > "$MARKER_PATH"
 
-    echo "Станок запущен в фоне (PID $BG_PID). Лог: $LAUNCH_LOG"
+    echo "Machine launched in the background (PID $BG_PID). Log: $LAUNCH_LOG"
     exit 0
 fi
 
-# Синхронный режим
+# Synchronous mode
 if [ -x "$SANDBOX" ] && [ "${STANOK_NO_SANDBOX:-0}" != "1" ]; then
     exec "$SANDBOX" "$PY" "$STANOK_PY" run "$TICKET" "${PY_FLAGS[@]}" -- "$LABEL" "${EXTRA_ARGS[@]}"
 else

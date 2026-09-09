@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Анализ нативного транскрипта прогона: output_tokens, thinking, M1/M2.
+"""Analysis of the native run transcript: output_tokens, thinking, M1/M2.
 
-Использование: analyze-evidence.py <transcript.jsonl>
+Usage: analyze-evidence.py <transcript.jsonl>
 
-Транскрипт — оригинальный ~/.claude/projects/<slug>/<session-id>.jsonl
-(не probe-*.jsonl: там output_tokens обнулён артефактом сериализации).
-Дедуп ответов по message.id.
+The transcript is the original ~/.claude/projects/<slug>/<session-id>.jsonl
+(not probe-*.jsonl: there output_tokens is zeroed out by a serialization artifact).
+Responses are deduplicated by message.id.
 
-M1 — Read/Glob/Grep, задевающие live-файлы (launch.log, probe-*.jsonl,
-     evidence.jsonl, launcher.stdout.log) — self-reference loop.
-M2 — identity-эпизоды в thinking («my own session/log» и т.п.).
+M1 — Read/Glob/Grep touching live files (launch.log, probe-*.jsonl,
+     evidence.jsonl, launcher.stdout.log) — a self-reference loop.
+M2 — identity episodes in thinking ("my own session/log" etc.).
 """
 import json
 import re
@@ -74,7 +74,7 @@ def main():
     over8 = [v for v in outs if v > 8192]
     over12 = [v for v in outs if v > 12288]
 
-    # M2: identity-эпизоды в thinking
+    # M2: identity episodes in thinking
     IDENTITY = re.compile(
         r"my own (session|log|transcript|thinking|probe|evidence)|"
         r"own session['\"]?s? (log|transcript)|"
@@ -87,7 +87,7 @@ def main():
         for m in IDENTITY.finditer(t):
             s = max(0, m.start() - 150)
             identity.append((mid, t[s:m.end() + 150].replace("\n", " ")))
-            break  # один блок = один эпизод
+            break  # one block = one episode
 
     result = {
         "transcript": path,

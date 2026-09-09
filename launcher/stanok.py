@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Stanok 4.2 Production — Context-Engineered Runner на локальной модели.
+"""Stanok 4.2 Production — Context-Engineered Runner on a local model.
 
-Полная интеграция с L1-Супервайзером:
-  1. Single Continuous Session (ClaudeSDKClient): ретраи внутри ОДНОЙ сессии (99% KV-кэш).
-  2. Строгий контракт summary.json (probe_result, c5, review_verdict, errors) для L1.
-  3. Adaptive Contract Lock: адаптация под создание тестов с нуля и запрет ослабления ассертов.
-  4. Cumulative Token & Cache Telemetry: точный расчет session_hit_rate.
-  5. Shielded Turn Watchdog: таймаут хода через asyncio.shield() без потери session_id.
-  6. Smart Diff Extraction: приоритизированный поиск assert/diff с UTF-8 срезом.
-  7. Process Reaper: единая process group с гарантированным завершением всех потомков.
+Full integration with the L1 Supervisor:
+  1. Single Continuous Session (ClaudeSDKClient): retries inside ONE session (99% KV cache).
+  2. Strict summary.json contract (probe_result, c5, review_verdict, errors) for L1.
+  3. Adaptive Contract Lock: adaptation for creating tests from scratch and a ban on weakening assertions.
+  4. Cumulative Token & Cache Telemetry: exact session_hit_rate calculation.
+  5. Shielded Turn Watchdog: turn timeout via asyncio.shield() without losing session_id.
+  6. Smart Diff Extraction: prioritized assert/diff search with a UTF-8 slice.
+  7. Process Reaper: a single process group with guaranteed termination of all children.
 """
 
 import argparse
@@ -30,18 +30,18 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- Константы контура -------------------------------------------------------------
+# --- Circuit constants -------------------------------------------------------------
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
-# Если STANOK_REPO не задан, поднимаемся на 1 уровень выше (stanok/launcher -> stanok)
+# If STANOK_REPO is not set, we go up one level (stanok/launcher -> stanok)
 DEFAULT_REPO = os.path.abspath(os.path.join(LAUNCHER_DIR, ".."))
 REPO_ROOT = os.path.abspath(os.environ.get("STANOK_REPO", DEFAULT_REPO))
 LOG_DIR = os.environ.get("STANOK_LOG_DIR", "/tmp/stanok-logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 LOCAL_MODEL = os.environ.get("STANOK_MODEL", "Qwen3.8-27B-MTP")
-SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://192.168.8.131:8080")
-LOCAL_PROXY = os.environ.get("STANOK_PROXY", "http://192.168.8.131:8118")
-NO_PROXY = os.environ.get("STANOK_NO_PROXY", "192.168.8.131,localhost,127.0.0.1")
+SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://127.0.0.1:8080")
+LOCAL_PROXY = os.environ.get("STANOK_PROXY", "http://127.0.0.1:8118")
+NO_PROXY = os.environ.get("STANOK_NO_PROXY", "127.0.0.1,localhost,127.0.0.1")
 CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "claude")
 
 MAX_TEST_LINES = 60
@@ -69,7 +69,7 @@ _INTERRUPTED_RC = 0
 
 
 # ==================================================================================
-# Логирование и события
+# Logging and events
 # ==================================================================================
 def log(msg: str = "") -> None:
     print(msg, flush=True)
@@ -126,17 +126,17 @@ def label_paths(label: str) -> tuple[str, str]:
 
 
 # ==================================================================================
-# Санитарный контроль и гейты
+# Sanitary control and gates
 # ==================================================================================
 def validate_label(label: str) -> str | None:
     if not _LABEL_RE.match(label) or ".." in label or label.startswith("--"):
-        return f"label {label!r} содержит недопустимые символы"
+        return f"label {label!r} contains invalid characters"
     return None
 
 
 def root_refusal() -> None:
     if os.geteuid() == 0:
-        log("ABORT: запуск от root запрещён")
+        log("ABORT: running as root is forbidden")
         sys.exit(1)
 
 
@@ -151,16 +151,50 @@ def dirty_tree_gate() -> bool:
     return False
 
 
+def _required_context_window() -> int | None:
+    """Required context window: env STANOK_REQUIRED_WINDOW overrides
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW from .claude/settings.stanok.json."""
+    env_val = os.environ.get("STANOK_REQUIRED_WINDOW")
+    if env_val:
+        try:
+            return int(env_val)
+        except ValueError:
+            log(f"WARN: STANOK_REQUIRED_WINDOW={env_val!r} is not an integer; ignoring")
+    try:
+        with open(os.path.join(REPO_ROOT, ".claude", "settings.stanok.json"), encoding="utf-8") as f:
+            val = json.load(f).get("env", {}).get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+        if val is not None:
+            return int(val)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def preflight_server() -> bool:
     if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
         return True
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(urllib.request.Request(f"{SERVER_URL}/props"), timeout=5):
-            return True
+        with opener.open(urllib.request.Request(f"{SERVER_URL}/props"), timeout=5) as resp:
+            props = json.loads(resp.read().decode("utf-8", errors="replace"))
     except Exception as e:
-        log(f"СЕРВЕР НЕДОСТУПЕН ({SERVER_URL}: {type(e).__name__}) (rc=20)")
+        log(f"SERVER UNAVAILABLE ({SERVER_URL}: {type(e).__name__}) (rc=20)")
         return False
+
+    required = _required_context_window()
+    if required is None:
+        log("PREFLIGHT: server reachable, no required window configured — OK")
+        return True
+
+    n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
+    if not isinstance(n_ctx, int) or n_ctx <= 0:
+        log(f"PREFLIGHT: unparseable n_ctx in /props (fail-closed) (rc=20)")
+        return False
+    if n_ctx < required:
+        log(f"PREFLIGHT: server n_ctx={n_ctx} < required window {required} (rc=20)")
+        return False
+    log(f"PREFLIGHT: server n_ctx={n_ctx} >= required window {required} — OK")
+    return True
 
 
 def reset_repo() -> int:
@@ -171,17 +205,17 @@ def reset_repo() -> int:
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
         return 0
     except subprocess.CalledProcessError as e:
-        log(f"ERROR: сброс репозитория не удался: {e}")
+        log(f"ERROR: repo reset failed: {e}")
         return 14
 
 
 # ==================================================================================
-# Умная компрессия ошибок верификатора (Smart Diff Extraction)
+# Smart compression of verifier errors (Smart Diff Extraction)
 # ==================================================================================
 def _extract_smart_diff(raw_text: str) -> str:
     cleaned_lines = [
         line for line in raw_text.strip().splitlines()
-        if "node:internal/" not in line
+        if "node:internal/" not in line and "node_modules/" not in line
     ]
     if not cleaned_lines:
         cleaned_lines = raw_text.strip().splitlines()
@@ -203,15 +237,15 @@ def _extract_smart_diff(raw_text: str) -> str:
             if end - start < MAX_TEST_LINES:
                 start = max(0, end - MAX_TEST_LINES)
             window = cleaned_lines[start:end]
-            hdr = [f"... [пропущено {start} строк выше] ..."] if start > 0 else []
-            ftr = [f"... [пропущено {len(cleaned_lines) - end} строк ниже] ..."] if end < len(cleaned_lines) else []
+            hdr = [f"... [{start} lines skipped above] ..."] if start > 0 else []
+            ftr = [f"... [{len(cleaned_lines) - end} lines skipped below] ..."] if end < len(cleaned_lines) else []
             res = "\n".join(hdr + window + ftr)
         else:
-            res = "\n".join(cleaned_lines[:15] + [f"\n... [пропущено строк: {len(cleaned_lines) - MAX_TEST_LINES}] ...\n"] + cleaned_lines[-45:])
+            res = "\n".join(cleaned_lines[:15] + [f"\n... [lines skipped: {len(cleaned_lines) - MAX_TEST_LINES}] ...\n"] + cleaned_lines[-45:])
 
     b_res = res.encode("utf-8")
     if len(b_res) > MAX_TEST_BYTES:
-        res = b_res[:MAX_TEST_BYTES].decode("utf-8", errors="ignore") + "\n... [вывод обрезан по лимиту байт] ..."
+        res = b_res[:MAX_TEST_BYTES].decode("utf-8", errors="ignore") + "\n... [output truncated at the byte limit] ..."
     return res
 
 
@@ -224,7 +258,7 @@ def _run_one_test(test_file: str, tests_dir: str) -> tuple[str, str] | None:
             raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
             return (rel, _extract_smart_diff(raw_err))
     except subprocess.TimeoutExpired:
-        return (rel, "TIMEOUT: выполнение теста превысило 60 секунд")
+        return (rel, "TIMEOUT: test execution exceeded 60 seconds")
     except Exception as e:
         return (rel, f"EXEC_ERROR: {e}")
     return None
@@ -234,7 +268,7 @@ def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
     tests_dir = os.path.join(REPO_ROOT, "tests")
     tests = sorted(glob.glob(os.path.join(tests_dir, "**", "*.test.js"), recursive=True))
     if not tests:
-        return (False, [("(нет тестов)", "В каталоге tests/ отсутствуют *.test.js файлы")])
+        return (False, [("(no tests)", "No *.test.js files in the tests/ directory")])
 
     failures: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
@@ -247,8 +281,20 @@ def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
     return (len(failures) == 0, failures)
 
 
+def _pending_malware_flags() -> list[str]:
+    """Pending flags armed by hooks/malware-scan.sh (PostToolUse, src/ only).
+
+    The hook auto-clears a flag when a rescan of the same file is clean, so a
+    flag that survives to the end of a turn means the model planted suspicious
+    code and did not remove it. The Runner NEVER deletes the flags itself —
+    they are evidence.
+    """
+    ev = os.environ.get("STANOK_EVIDENCE", os.path.join(REPO_ROOT, "evidence"))
+    return sorted(glob.glob(os.path.join(ev, "malware-scan", "pending-*.flag")))
+
+
 # ==================================================================================
-# Окружение инференса (Prefix Invariance)
+# Inference environment (Prefix Invariance)
 # ==================================================================================
 def build_agent_env() -> dict[str, str]:
     return {
@@ -277,7 +323,7 @@ def build_agent_env() -> dict[str, str]:
 
 
 # ==================================================================================
-# Непрерывная сессия ClaudeSDKClient + Shielded Watchdog
+# Continuous ClaudeSDKClient session + Shielded Watchdog
 # ==================================================================================
 def _extract_usage(msg) -> dict:
     usage = getattr(msg, "usage", None)
@@ -332,7 +378,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
     max_turns = 1 + max_retries
     current_prompt = ticket_prompt
-    log(f"СЕССИЯ СТАРТ (run_id: {local_run_id}) | Лимит ходов: {max_turns} | model={LOCAL_MODEL}")
+    log(f"SESSION START (run_id: {local_run_id}) | Turn limit: {max_turns} | model={LOCAL_MODEL}")
     emit("session.start", {"run_id": local_run_id, "max_turns": max_turns})
 
     total_tokens = {
@@ -347,7 +393,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
     with open(stream_out_path, "a", encoding="utf-8") as stream_f:
         async with ClaudeSDKClient(options=options) as client:
             for turn in range(1, max_turns + 1):
-                log(f"\n>>> Ход {turn}/{max_turns} {'(Исправление ошибок в src/)' if turn > 1 else '(Начало тикета)'} <<<")
+                log(f"\n>>> Turn {turn}/{max_turns} {'(Fixing errors in src/)' if turn > 1 else '(Ticket start)'} <<<")
                 emit("turn.start", {"turn": turn})
 
                 t0 = time.time()
@@ -358,11 +404,11 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 try:
                     turn_usage = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
                 except asyncio.TimeoutError:
-                    log(f"ТАЙМАУТ: ход {turn} превысил {TURN_TIMEOUT_S:.0f}с (silent stall) -> interrupt")
+                    log(f"TIMEOUT: turn {turn} exceeded {TURN_TIMEOUT_S:.0f}s (silent stall) -> interrupt")
                     try:
                         await client.interrupt()
                     except Exception as e:
-                        log(f"WARN: client.interrupt() завершился с ошибкой: {e}")
+                        log(f"WARN: client.interrupt() finished with an error: {e}")
 
                     try:
                         await asyncio.wait_for(turn_task, timeout=5.0)
@@ -397,41 +443,64 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 turn_input_context = inp + c_read
                 turn_hit_rate = (c_read / turn_input_context * 100.0) if turn_input_context > 0 else 0.0
 
-                log(f"Ход {turn} завершён за {elapsed_turn:.1f}с | "
-                    f"Токены хода: in={inp}, out={out}, cache_hit={c_read} ({turn_hit_rate:.1f}%) | "
-                    f"Сессия cache_hit: {session_hit_rate:.1f}%")
+                log(f"Turn {turn} finished in {elapsed_turn:.1f}s | "
+                    f"Turn tokens: in={inp}, out={out}, cache_hit={c_read} ({turn_hit_rate:.1f}%) | "
+                    f"Session cache_hit: {session_hit_rate:.1f}%")
                 emit("turn.tokens", {"turn": turn, "input": inp, "output": out, "cache_read": c_read,
                                      "turn_hit_rate": turn_hit_rate, "session_hit_rate": session_hit_rate})
 
+                job.setdefault("turn_telemetry", []).append({
+                    "turn": turn,
+                    "elapsed_s": round(elapsed_turn, 1),
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "cache_read_input_tokens": c_read,
+                    "cache_creation_input_tokens": c_create,
+                    "turn_hit_rate": round(turn_hit_rate, 1),
+                })
+
                 if turn_input_context > CONTEXT_ROT_THRESHOLD:
-                    log(f"  [CONTEXT-ROT WARN] Входной контекст хода ({turn_input_context} токенов) "
-                        f"превысил порог {CONTEXT_ROT_THRESHOLD}. Внимание модели может снижаться.")
+                    log(f"  [CONTEXT-ROT WARN] Turn input context ({turn_input_context} tokens) "
+                        f"exceeded the threshold {CONTEXT_ROT_THRESHOLD}. Model attention may degrade.")
+
+                # MALWARE GATE (fail-fast): a pending flag from malware-scan.sh forces
+                # rc=1 even on 100% green tests, and no further retry turns are burned
+                # on malicious code. Checked before verify_gate — no test time is spent.
+                pending = _pending_malware_flags()
+                if pending:
+                    names = ", ".join(os.path.basename(p) for p in pending)
+                    log(f"MALWARE: pending flag(s): {names} -> rc=1 (local retries skipped)")
+                    job["malware_detected"] = True
+                    job["error"] = f"MALWARE: pending flag(s) in evidence/malware-scan: {names}"
+                    job["verifier"] = "FAIL"
+                    job["turns"] = turn
+                    return 1
 
                 verify_ok, failures = verify_gate()
                 emit("verifier", {"turn": turn, "ok": verify_ok, "failures_count": len(failures)})
 
                 if verify_ok:
-                    log("ВЕРИФИКАТОР: PASS — Все тесты успешно пройдены!")
+                    log("VERIFIER: PASS — All tests passed successfully!")
                     job["verifier"] = "PASS"
                     job["turns"] = turn
                     return 0
 
-                log(f"ВЕРИФИКАТОР: FAIL — Упало тестов: {len(failures)}")
+                log(f"VERIFIER: FAIL — Failed tests: {len(failures)}")
                 job["failures"] = failures
 
                 if turn < max_turns:
-                    has_no_tests = any(name == "(нет тестов)" for name, _ in failures)
+                    has_no_tests = any(name == "(no tests)" for name, _ in failures)
 
                     if has_no_tests:
                         rules = (
-                            "1. В каталоге tests/ отсутствуют файлы тестов! Создай эталонные *.test.js строго по спецификации тикета.\n"
-                            "2. Затем реализуй соответствующий рабочий код модулей в каталоге src/."
+                            "1. There are no test files in the tests/ directory! Create the reference *.test.js strictly per the ticket specification.\n"
+                            "2. Then implement the corresponding working module code in the src/ directory."
                         )
                     else:
                         rules = (
-                            "1. Тесты в tests/ являются эталонной спецификацией тикета. Категорически ЗАПРЕЩЕНО удалять, менять или ослаблять ассерты в tests/.\n"
-                            "2. Исправления вносятся ИСКЛЮЧИТЕЛЬНО в реализацию модулей в каталоге src/.\n"
-                            "3. Изучи diff и стек выше, локализуй ошибку в src/ и устрани коренную причину бага."
+                            "1. The tests in tests/ are the reference specification of the ticket. It is CATEGORICALLY FORBIDDEN to delete, modify, or weaken assertions in tests/.\n"
+                            "2. Fixes are made EXCLUSIVELY in the module implementations in the src/ directory.\n"
+                            "3. Study the diff and stack above, localize the error in src/ and eliminate the root cause of the bug."
                         )
 
                     fail_xml_blocks = "\n".join([
@@ -449,7 +518,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                         f"</verification_result>"
                     )
                 else:
-                    log("Лимит ретраев исчерпан (Context Inertia Guard). Завершение.")
+                    log("Retry limit exhausted (Context Inertia Guard). Finishing.")
 
     job["verifier"] = "FAIL"
     job["turns"] = max_turns
@@ -457,13 +526,13 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
 
 # ==================================================================================
-# Процессы, сигналы и артефакты
+# Processes, signals, and artifacts
 # ==================================================================================
 def _install_signal_handlers() -> None:
     def handler(signum, _frame):
         global _INTERRUPTED_RC
         _INTERRUPTED_RC = 128 + signum
-        log(f"\nСИГНАЛ {signum}: Прерывание прогона. Остановка дочерних процессов...")
+        log(f"\nSIGNAL {signum}: Run interrupted. Stopping child processes...")
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
@@ -477,7 +546,7 @@ def _install_signal_handlers() -> None:
 
 
 def write_summary(job: dict, elapsed_s: int) -> None:
-    """Формирует точный контракт summary.json, ожидаемый L1-Супервайзером."""
+    """Builds the exact summary.json contract expected by the L1 Supervisor."""
     turns = job.get("turns", 1)
     verifier = job.get("verifier", "FAIL")
     rc = job.get("rc", 1)
@@ -491,6 +560,17 @@ def write_summary(job: dict, elapsed_s: int) -> None:
 
     if job.get("probe_result"):
         probe_result = job["probe_result"]
+
+    per_turn = job.get("turn_telemetry", [])
+    inference_telemetry = {
+        "per_turn": per_turn,
+        "aggregate": {
+            "turns": len(per_turn),
+            "total_turn_elapsed_s": round(sum(t.get("elapsed_s", 0) for t in per_turn), 1),
+            "tokens": job.get("tokens", {}),
+            "cache_hit_rate": job.get("cache_hit_rate", "0.0%"),
+        },
+    }
 
     summary = {
         "label": job.get("label"),
@@ -506,8 +586,10 @@ def write_summary(job: dict, elapsed_s: int) -> None:
         "session_id": job.get("session_id"),
         "tokens": job.get("tokens", {}),
         "cache_hit_rate": job.get("cache_hit_rate", "0.0%"),
+        "inference_telemetry": inference_telemetry,
         "errors": [job["error"]] if job.get("error") else [],
         "failures": job.get("failures", []),
+        "malware_detected": bool(job.get("malware_detected")),
     }
     with open(os.path.join(_evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -546,7 +628,7 @@ def cmd_run(args) -> int:
     start_ts = int(time.time())
     recorded_pid = os.getpid()
 
-    # Сохраняем хостовый PID, если он уже был выставлен launch.sh
+    # Preserve the host PID if it was already set by launch.sh
     if os.path.exists(_marker_path):
         try:
             parts = open(_marker_path, "r", encoding="utf-8").read().split()
@@ -569,13 +651,13 @@ def cmd_run(args) -> int:
     job = {"label": args.label, "ticket": args.ticket}
     emit("job.start", {"label": args.label, "pid": recorded_pid})
 
-    log(f"STANOK 4.2 RUNNER | Репо: {REPO_ROOT} | Label: {args.label}")
+    log(f"STANOK 4.2 RUNNER | Repo: {REPO_ROOT} | Label: {args.label}")
     if args.direct:
-        log("РЕЖИМ --direct: путь к тикету разрешён относительно репозитория")
+        log("--direct MODE: the ticket path is resolved relative to the repository")
 
     if not preflight_server():
         job["rc"] = 20
-        job["error"] = f"Сервер недоступен ({SERVER_URL})"
+        job["error"] = f"Server unavailable ({SERVER_URL})"
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
@@ -584,7 +666,7 @@ def cmd_run(args) -> int:
 
     if reset_repo() != 0:
         job["rc"] = 14
-        job["error"] = "Ошибка git reset/clean"
+        job["error"] = "git reset/clean error"
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
@@ -611,12 +693,12 @@ def cmd_run(args) -> int:
             except OSError:
                 pass
 
-    log(f"ПРОГОН ЗАВЕРШЕН: rc={rc}")
+    log(f"RUN FINISHED: rc={rc}")
     return rc
 
 
 # ==================================================================================
-# Утилиты управления (status, stop, watch)
+# Control utilities (status, stop, watch)
 # ==================================================================================
 def cmd_status(label: str) -> int:
     evidence_dir, _ = label_paths(label)
@@ -663,13 +745,13 @@ def cmd_stop(label: str) -> int:
     evidence_dir, _ = label_paths(label)
     marker = os.path.join(evidence_dir, ".running")
     if not os.path.exists(marker):
-        log(f"Прогон {label} не запущен")
+        log(f"Run {label} is not started")
         return 1
     try:
         parts = open(marker, encoding="utf-8").read().split()
         pid = int(parts[1]) if len(parts) >= 2 else 0
     except (ValueError, OSError):
-        log(f"Не удалось прочитать PID из маркера {marker}")
+        log(f"Failed to read the PID from the marker {marker}")
         return 1
 
     if pid > 0:
@@ -680,7 +762,7 @@ def cmd_stop(label: str) -> int:
                 os.kill(pid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
-    log(f"Сигнал остановки отправлен для {label} (PID {pid})")
+    log(f"Stop signal sent for {label} (PID {pid})")
     return 0
 
 
@@ -705,7 +787,7 @@ def cmd_watch(label: str, follow: bool) -> int:
 
 
 # ==================================================================================
-# Точка входа CLI
+# CLI entry point
 # ==================================================================================
 def _resolve_ticket(arg: str, direct: bool = False) -> str:
     if direct:
@@ -790,21 +872,21 @@ def main() -> int:
             return rc
 
         if validate_label(args.label):
-            return early_abort(15, f"ERROR: Недопустимый label {args.label}")
+            return early_abort(15, f"ERROR: Invalid label {args.label}")
 
-        # ROLE-LEAK (rc=24): родительский CLAUDE.md выше репо автозагрузился бы
-        # в сессию станка (cwd = REPO_ROOT) -> ролевой утёк. Fail-closed до
-        # reset/lock/preflight, без побочных эффектов.
+        # ROLE-LEAK (rc=24): a parent CLAUDE.md above the repo would be auto-loaded
+        # into the machine session (cwd = REPO_ROOT) -> role leak. Fail-closed before
+        # reset/lock/preflight, no side effects.
         parent_claude = os.path.join(os.path.dirname(REPO_ROOT), "CLAUDE.md")
         if os.path.isfile(parent_claude):
-            return early_abort(24, f"ERROR: ROLE-LEAK: родительский CLAUDE.md выше репо: {parent_claude}")
+            return early_abort(24, f"ERROR: ROLE-LEAK: parent CLAUDE.md above the repo: {parent_claude}")
 
         args.ticket_path = _resolve_ticket(args.ticket, direct=args.direct)
         if not os.path.isfile(args.ticket_path):
-            return early_abort(13, f"ERROR: Тикет не найден: {args.ticket_path}")
+            return early_abort(13, f"ERROR: Ticket not found: {args.ticket_path}")
 
         if dirty_tree_gate():
-            return early_abort(22, "ERROR: репозиторий станка содержит незакоммиченные изменения (rc=22)")
+            return early_abort(22, "ERROR: the machine repo contains uncommitted changes (rc=22)")
 
         if args.background:
             launch_log = os.path.join(LOG_DIR, f"{args.label}.launch.log")
@@ -815,7 +897,7 @@ def main() -> int:
             with open(launch_log, "ab") as fd:
                 subprocess.Popen(cmd, stdout=fd, stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL, start_new_session=True)
-            print(f"Станок запущен в фоне. Лог: {launch_log}")
+            print(f"Machine launched in the background. Log: {launch_log}")
             return 0
 
         lock_path = os.path.join(LOG_DIR, f"stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock")
@@ -823,7 +905,7 @@ def main() -> int:
         try:
             fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            return early_abort(21, f"LOCK: Репозиторий уже занят другим прогоном ({lock_path})")
+            return early_abort(21, f"LOCK: the repo is already busy with another run ({lock_path})")
 
         return cmd_run(args)
 

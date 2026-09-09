@@ -23,7 +23,7 @@ INPUT=$(cat)
 FP=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
 [ -z "$FP" ] && exit 0
 
-# Relative file_path is anchored to REPO_ROOT (CWD-independence, like path-guard).
+# Relative file_path is anchored to REPO_ROOT (CWD-independence).
 if [[ "$FP" != /* ]]; then FP="$REPO_ROOT/$FP"; fi
 ABS="$(realpath -m "$FP")"
 
@@ -39,12 +39,15 @@ esac
 TEST="$REPO_ROOT/tests/$MOD.test.js"
 [ -f "$TEST" ] || exit 0   # no matching test yet -> cannot verify -> silent
 
-# C1 test-lock: при ПЕРВОМ реальном прогоне теста (test существует) — ставим лок
-# .stanok-locks/<mod>.lock. Лок создаёт hook (shell-код в CLI-процессе), а НЕ модель
-# через tool-call -> PreToolUse path-guard (гейт модельных Write/Edit) его не видит.
-# mkdir -p — защита от отсутствующей директории на первом локе.
-mkdir -p "$REPO_ROOT/.stanok-locks"
-touch "$REPO_ROOT/.stanok-locks/$MOD.lock"
+# C1 test-lock: on the FIRST real run of the test (the test exists) — set the lock
+# .stanok-locks/<mod>.lock. The lock is created by the hook (shell code in the CLI process),
+# NOT by the model via a tool-call -> the PreToolUse test-lock gate does not see it.
+# Goodhart guard: only lock tests that are non-empty and contain real assertions
+# (assert / test( / TAP "ok N") — a trivial stub run must not lock the file.
+if [ -s "$TEST" ] && grep -qE 'assert|test\(|ok [0-9]' "$TEST"; then
+  mkdir -p "$REPO_ROOT/.stanok-locks"
+  touch "$REPO_ROOT/.stanok-locks/$MOD.lock"
+fi
 
 OUT="$(cd "$REPO_ROOT" && node "$TEST" 2>&1)"
 RC=$?

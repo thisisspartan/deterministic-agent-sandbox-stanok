@@ -1,6 +1,5 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://192.168.8.131:8080",
     "ANTHROPIC_AUTH_TOKEN": "local-dummy",
     "ANTHROPIC_API_KEY": "",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen3.8-27B-MTP",
@@ -29,8 +28,7 @@
       "Edit",
       "Grep",
       "Glob",
-      "Bash",
-      "Agent"
+      "Bash"
     ],
     "deny": [
       "WebSearch",
@@ -51,6 +49,19 @@
       "TaskOutput",
       "TaskStop",
       "TaskUpdate"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Read|Grep|Glob", "hooks": [{ "type": "command", "command": "bash hooks/read-guard.sh" }] },
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash hooks/bash-gate.sh" }] },
+      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "bash hooks/test-lock.sh" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Write|Edit", "hooks": [
+          { "type": "command", "command": "bash hooks/verifier.sh" },
+          { "type": "command", "command": "bash hooks/malware-scan.sh" }
+      ] }
     ]
   }
 }

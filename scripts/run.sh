@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# run.sh — ЕДИНСТВЕННАЯ команда, доступная модели станка (Bash через bash-gate).
-# Модель НЕ собирает shell-команды: подкоманды фиксированы, пути валидирует
-# скрипт. Никаких shell-операторов, ни сети, ни git.
+# run.sh — the ONLY command available to the machine's model (Bash via bash-gate).
+# The model does NOT assemble shell commands: the subcommands are fixed, the script
+# validates the paths. No shell operators, no network, no git.
 #
-#   bash scripts/run.sh test <tests/*.test.js>...   — прогон тестов (single-file, по одному)
-#   bash scripts/run.sh smoke <src/*.js>            — smoke-запуск (stdin=/dev/null, timeout 10s)
-#   bash scripts/run.sh list                        — список тестовых файлов
+#   bash scripts/run.sh test <tests/*.test.js>...   — run the tests (single-file, one at a time)
+#   bash scripts/run.sh smoke <src/*.js>            — smoke run (stdin=/dev/null, timeout 10s)
+#   bash scripts/run.sh list                        — list the test files
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
