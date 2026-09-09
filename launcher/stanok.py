@@ -203,6 +203,15 @@ def reset_repo() -> int:
         subprocess.run(["git", "clean", "-fdq"], cwd=REPO_ROOT, check=True, capture_output=True)
         for d in ("src", "tests", "docs"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
+        # SEC-02: wipe stale TDD state (.red/.lock). .stanok-locks is gitignored,
+        # so git clean -fdq does NOT touch it — stale state would corrupt the
+        # verifier state machine of the next run.
+        locks_dir = os.path.join(REPO_ROOT, ".stanok-locks")
+        if os.path.isdir(locks_dir):
+            for name in os.listdir(locks_dir):
+                p = os.path.join(locks_dir, name)
+                if os.path.isfile(p):
+                    os.unlink(p)
         return 0
     except subprocess.CalledProcessError as e:
         log(f"ERROR: repo reset failed: {e}")
@@ -279,6 +288,39 @@ def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
                 failures.append(res)
     failures.sort(key=lambda x: x[0])
     return (len(failures) == 0, failures)
+
+
+def tdd_gate() -> list[str]:
+    """SEC-02 final gate (fail-closed), runs after a green verify_gate.
+
+    Every test file touched this session (git status M/A/?? under tests/) must
+    have a .stanok-locks/<key>.lock (key = path with '/' -> '_'), i.e. it went
+    through the TDD red->green cycle. Any lingering .red file means the cycle
+    was not completed. Returns the list of violations (empty = pass).
+    """
+    violations: list[str] = []
+    locks_dir = os.path.join(REPO_ROOT, ".stanok-locks")
+    try:
+        st = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
+                            check=True, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as e:
+        return [f"git status failed: {e}"]
+    for line in st.splitlines():
+        if len(line) < 4:
+            continue
+        x, y, path = line[0], line[1], line[3:]
+        if x not in ("?", "M", "A") and y != "M":
+            continue
+        if not (path.startswith("tests/") and path.endswith(".test.js")):
+            continue
+        key = path.replace("/", "_")
+        if not os.path.isfile(os.path.join(locks_dir, key + ".lock")):
+            violations.append(f"test {path} touched without TDD lock ({key}.lock)")
+    if os.path.isdir(locks_dir):
+        for name in sorted(os.listdir(locks_dir)):
+            if name.endswith(".red"):
+                violations.append(f"lingering red state: {name}")
+    return violations
 
 
 def _pending_malware_flags() -> list[str]:
@@ -480,6 +522,16 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 emit("verifier", {"turn": turn, "ok": verify_ok, "failures_count": len(failures)})
 
                 if verify_ok:
+                    # SEC-02 final gate: green tests are not enough — every test
+                    # touched this session must have completed the TDD cycle (.lock).
+                    violations = tdd_gate()
+                    if violations:
+                        log("TDD GATE: FAIL — " + "; ".join(violations))
+                        job["verifier"] = "FAIL"
+                        job["probe_result"] = "VERIFY-FAIL"
+                        job["error"] = "TDD GATE: " + "; ".join(violations)
+                        job["turns"] = turn
+                        return 1
                     log("VERIFIER: PASS — All tests passed successfully!")
                     job["verifier"] = "PASS"
                     job["turns"] = turn

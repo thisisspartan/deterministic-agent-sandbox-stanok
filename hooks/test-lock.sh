@@ -27,17 +27,31 @@ case "$FP" in
 esac
 ABS="$(realpath -m "$FP")"
 
+# SEC-01: the model must not write TDD state files directly — .stanok-locks is
+# managed exclusively by verifier.sh (hook shell code, invisible to this gate).
+case "$ABS" in
+  "$REPO_ROOT/.stanok-locks/"*)
+    mkdir -p "$LOG_DIR"
+    echo "$(date +%T) DENY locks path=$ABS" >> "$LOG"
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"test-lock: the model cannot write to .stanok-locks (TDD state is managed by verifier.sh only)"}}\n'
+    exit 0
+    ;;
+esac
+
 case "$ABS" in
   "$REPO_ROOT/tests/"*.test.js) ;;
   *) exit 0 ;;   # not a test — the gate is not our concern
 esac
 
-MOD="$(basename "$ABS" .test.js)"
+# SEC-02: key = test path relative to REPO_ROOT with '/' -> '_' (no basename
+# collisions across subdirectories: tests/fire/ui.test.js -> tests_fire_ui.test.js).
+REL="${ABS#"$REPO_ROOT"/}"
+KEY="${REL//\//_}"
 
 # The lock exists -> deny (any caller; roles are gone).
-if [ -f "$LOCK_DIR/$MOD.lock" ]; then
+if [ -f "$LOCK_DIR/$KEY.lock" ]; then
   mkdir -p "$LOG_DIR"
-  echo "$(date +%T) DENY mod=$MOD path=$ABS" >> "$LOG"
-  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"test-lock: test %s is locked after the first successful run"}}\n' "$MOD"
+  echo "$(date +%T) DENY key=$KEY path=$ABS" >> "$LOG"
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"test-lock: test %s is locked after the TDD red->green cycle"}}\n' "$KEY"
 fi
 exit 0

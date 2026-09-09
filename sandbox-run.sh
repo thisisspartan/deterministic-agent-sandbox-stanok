@@ -88,11 +88,10 @@ fi
 
 # 5. Mount the machine's working repo: READ-ONLY by default, with explicit
 #    writable carve-outs for the work areas (src/, tests/, docs/, evidence/,
-#    .stanok-locks/, .stanok-logs/) and .git (git plumbing).
-#    Escape protection:
-#      * .git/hooks is a private tmpfs — the commit-msg gate cannot be
-#        tampered with (or read) from inside the sandbox;
-#      * .git/config is read-only — no git identity/remote changes from inside.
+#    .stanok-locks/, .stanok-logs/).
+#    .git is READ-ONLY (SEC-01): the model cannot commit, plant hooks, or rewrite
+#    git state from inside the sandbox. The launcher's git plumbing
+#    (reset --hard / clean -fdq) runs on the host, OUTSIDE the sandbox.
 #    The carve-out directories must exist on the host before bwrap runs
 #    (bwrap fails on a missing bind source).
 mkdir -p "$REPO_ROOT/src" "$REPO_ROOT/tests" "$REPO_ROOT/docs" \
@@ -108,8 +107,7 @@ BWRAP_ARGS=(
   --bind "$REPO_ROOT/evidence" "$REPO_ROOT/evidence"
   --bind "$REPO_ROOT/.stanok-locks" "$REPO_ROOT/.stanok-locks"
   --bind "$REPO_ROOT/.stanok-logs" "$REPO_ROOT/.stanok-logs"
-  --bind "$REPO_ROOT/.git" "$REPO_ROOT/.git"
-  --tmpfs "$REPO_ROOT/.git/hooks"
+  --ro-bind "$REPO_ROOT/.git" "$REPO_ROOT/.git"
   --ro-bind "$REPO_ROOT/.git/config" "$REPO_ROOT/.git/config"
   --chdir "$REPO_ROOT"
   --setenv PATH "$RESOLVED_PATH"
