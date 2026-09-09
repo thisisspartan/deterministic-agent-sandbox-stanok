@@ -51,6 +51,8 @@ fi
 # --- Инварианты Runner (launcher/stanok.py; регресс-защита, фидбек «старших братьев») ---
 # Все проверки идут через STANOK_PY=системный python3: SDK/telegram импортируются
 # лениво, гейты — чистый stdlib, поэтому инварианты работают и без развёрнутого .venv.
+# STANOK_NO_SANDBOX=1: тесты проверяют RUNNER, не sandbox; bwrap монтирует
+# приватный /tmp (--tmpfs /tmp), и тикеты mktemp /tmp/... внутри не видны (rc=13).
 # 1) label-guard: label, начинающийся с '--', -> rc=15 ДО flags/ROLE-LEAK/lock
 #    (защита от evidence/--background при забытом label). argparse скушает '--background'
 #    как флаг сам (rc=2), поэтому проверяем достижимый путь: явный '--'.
@@ -66,7 +68,7 @@ LAUNCH="$REPO_ROOT/launch.sh"
 # 1) label-guard (rc=15): label, начинающийся с '--', -> rc=15 ДО ticket-resolution.
 # Тикет СУЩЕСТВУЕТ (mktemp), чтобы при отсутствии label-guard не замаскировался rc=13.
 TMPT_LG="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT_LG"
-if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 \
+if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 STANOK_NO_SANDBOX=1 \
      "$LAUNCH" run "$TMPT_LG" -- --background >/dev/null 2>&1; then
   FAIL=$((FAIL+1)); echo "FAIL runner label-guard: label '--background' должен дать rc=15"
 else
@@ -81,7 +83,7 @@ rm -f "$TMPT_LG"
 # 2) fail-fast на мёртвом сервере (rc=20)
 TMPT="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT"
 DR="doctor-dead-$$-${RANDOM}"
-if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 \
+if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 STANOK_NO_SANDBOX=1 \
      "$LAUNCH" run "$TMPT" "$DR" >/dev/null 2>&1; then
   FAIL=$((FAIL+1)); echo "FAIL runner fail-fast: мёртвый сервер должен дать rc=20, а прогон прошёл"
 else
@@ -99,7 +101,7 @@ rm -rf "$REPO_ROOT/evidence/$DR" "/tmp/stanok-logs/$DR" "$TMPT"
 DIRTY="$REPO_ROOT/.doctor-dirty-marker"
 printf 'marker\n' > "$DIRTY"
 TMPT3="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT3"
-if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 \
+if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 STANOK_NO_SANDBOX=1 \
      "$LAUNCH" run "$TMPT3" doctor-dirty-$$ >/dev/null 2>&1; then
   FAIL=$((FAIL+1)); echo "FAIL runner dirty-tree: грязное дерево должно дать rc=22, а прогон прошёл"
 else
@@ -118,6 +120,7 @@ mkdir -p "$TMPROOT/repo"
 touch "$TMPROOT/CLAUDE.md"                       # «родительский» CLAUDE.md = утечка роли
 TMPT2="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nзаглушка\n' > "$TMPT2"
 if STANOK_PY="$(command -v python3)" STANOK_REPO="$TMPROOT/repo" \
+     STANOK_SERVER_URL=http://127.0.0.1:59999 STANOK_NO_SANDBOX=1 \
      "$LAUNCH" run "$TMPT2" doctor-roleleak-$$ >/dev/null 2>&1; then
   FAIL=$((FAIL+1)); echo "FAIL runner role-leak: родительский CLAUDE.md должен дать rc=24, а прогон прошёл"
 else

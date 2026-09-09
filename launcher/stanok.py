@@ -792,6 +792,13 @@ def main() -> int:
         if validate_label(args.label):
             return early_abort(15, f"ERROR: Недопустимый label {args.label}")
 
+        # ROLE-LEAK (rc=24): родительский CLAUDE.md выше репо автозагрузился бы
+        # в сессию станка (cwd = REPO_ROOT) -> ролевой утёк. Fail-closed до
+        # reset/lock/preflight, без побочных эффектов.
+        parent_claude = os.path.join(os.path.dirname(REPO_ROOT), "CLAUDE.md")
+        if os.path.isfile(parent_claude):
+            return early_abort(24, f"ERROR: ROLE-LEAK: родительский CLAUDE.md выше репо: {parent_claude}")
+
         args.ticket_path = _resolve_ticket(args.ticket, direct=args.direct)
         if not os.path.isfile(args.ticket_path):
             return early_abort(13, f"ERROR: Тикет не найден: {args.ticket_path}")
