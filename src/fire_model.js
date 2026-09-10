@@ -5,14 +5,15 @@
  * No I/O, no terminal, no side effects beyond mutating its own grid.
  */
 
-/** Self-contained deterministic PRNG (mulberry32). Returns floats in [0, 1). */
-function mulberry32(seed) {
-  let a = seed >>> 0;
+/** Self-contained deterministic PRNG (xorshift32). Returns floats in [0, 1). */
+function xorshift32(seed) {
+  // xorshift requires non-zero state; map seed 0 to a fixed non-zero constant.
+  let s = (seed >>> 0) || 0x1234567;
   return function () {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    s ^= s << 13;
+    s ^= s >>> 17;
+    s ^= s << 5;
+    return (s >>> 0) / 4294967296;
   };
 }
 
@@ -53,7 +54,7 @@ function createFireModel(w, h, opts) {
     seed = opts.seed;
   }
 
-  const rand = mulberry32(seed);
+  const rand = xorshift32(seed);
   const DX = [-1, 0, 1];
 
   /** grid[y][x]: y = 0 is the TOP row, y = h - 1 is the BOTTOM row (heat source). */

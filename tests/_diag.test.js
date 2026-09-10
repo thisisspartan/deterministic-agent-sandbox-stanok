@@ -113,3 +113,60 @@ test('scan PRNG candidates', () => {
     // also margin over the last 20 snapshots for robustness
   }
 });
+
+// Multi-seed failure-rate scan: how often does strict row-average monotonicity
+// break for a given PRNG? A healthy PRNG should fail rarely (and seed 42 never).
+test('multi-seed monotonicity failure rate', () => {
+  const makes = { mulberry32, xorshift32, lcg32, splitmix32, sfc32: sfc32FromSeed };
+  for (const [name, make] of Object.entries(makes)) {
+    let fails = 0;
+    let minMargin = Infinity;
+    const N = 300;
+    for (let seed = 0; seed < N; seed++) {
+      const { worst } = simulate(make(seed), 80, 24, 200);
+      if (worst > 0) fails++;
+      minMargin = Math.min(minMargin, -worst);
+    }
+    console.log(name, 'fails', fails + '/' + N, 'minMargin=', minMargin.toFixed(3));
+  }
+});
+
+// Seeds used by the real tests: stochasticity (1, 2, 5 on 40x16), determinism (1234).
+test('real-test seeds with xorshift32', () => {
+  function gridAfter(make, w, h, steps, seed) {
+    const grid = [];
+    for (let y = 0; y < h; y++) grid.push(new Array(w).fill(0));
+    const rand = make(seed);
+    const maxHeat = 255, decay = 0.08;
+    const DX = [-1, 0, 1];
+    for (let s = 0; s < steps; s++) {
+      const next = [];
+      for (let y = 0; y < h; y++) next.push(new Array(w).fill(0));
+      for (let x = 0; x < w; x++) next[h - 1][x] = maxHeat * (0.7 + 0.3 * rand());
+      for (let y = h - 2; y >= 0; y--) {
+        const belowRow = grid[y + 1];
+        for (let x = 0; x < w; x++) {
+          const dx = DX[Math.floor(rand() * 3)];
+          let nx = x + dx;
+          if (nx < 0) nx = 0;
+          else if (nx > w - 1) nx = w - 1;
+          let v = belowRow[nx] - decay * rand() * maxHeat;
+          if (v < 0) v = 0;
+          else if (v > maxHeat) v = maxHeat;
+          next[y][x] = v;
+        }
+      }
+      for (let y = 0; y < h; y++) grid[y] = next[y];
+    }
+    return grid;
+  }
+  const g1 = JSON.stringify(gridAfter(xorshift32, 40, 16, 10, 1));
+  const g2 = JSON.stringify(gridAfter(xorshift32, 40, 16, 10, 2));
+  console.log('seeds 1 vs 2 differ:', g1 !== g2);
+  const c1 = JSON.stringify(gridAfter(xorshift32, 32, 12, 50, 1234));
+  const c2 = JSON.stringify(gridAfter(xorshift32, 32, 12, 50, 1234));
+  console.log('seed 1234 deterministic:', c1 === c2);
+  // consecutive steps differ
+  const grid = gridAfter(xorshift32, 40, 16, 1, 5);
+  console.log('seed 5 step1 bottom sample:', grid[15].slice(0, 4).map((v) => v.toFixed(2)).join(','));
+});
