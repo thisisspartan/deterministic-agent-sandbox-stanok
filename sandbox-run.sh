@@ -98,6 +98,26 @@ fi
 #    (bwrap fails on a missing bind source).
 mkdir -p "$REPO_ROOT/src" "$REPO_ROOT/tests" "$REPO_ROOT/docs" \
          "$REPO_ROOT/evidence" "$REPO_ROOT/.stanok-logs"
+
+#    The native (inner) sandbox ro-binds over a fixed set of repo paths —
+#    settings files, dotfiles, dangerous dirs. For a path that does NOT exist it
+#    must CREATE the mountpoint, which bwrap cannot do on our read-only repo bind
+#    ("Can't create file ...: Read-only file system"). Pre-create them so the
+#    inner runtime binds in place. Create-if-MISSING only: an existing file is
+#    never truncated. The files are .gitignore'd so they don't trip the
+#    dirty-tree gate (rc=22).
+for f in .gitconfig .gitmodules .bashrc .bash_profile .zshrc .zprofile .profile .ripgreprc; do
+    [ -e "$REPO_ROOT/$f" ] || : > "$REPO_ROOT/$f"
+done
+# JSON targets must hold valid JSON ('{}'), not be empty: an empty file is a
+# parse error and "silently disables ALL settings from that file".
+for f in .mcp.json .claude/settings.json .claude/settings.local.json; do
+    [ -e "$REPO_ROOT/$f" ] || printf '{}\n' > "$REPO_ROOT/$f"
+done
+# Empty dirs are invisible to git — no .gitignore entry needed.
+mkdir -p "$REPO_ROOT/.vscode" "$REPO_ROOT/.idea" \
+         "$REPO_ROOT/.claude/skills" "$REPO_ROOT/.claude/commands" "$REPO_ROOT/.claude/agents"
+
 BWRAP_ARGS=(
   "${BWRAP_ARGS[@]}"
   --ro-bind "$REPO_ROOT" "$REPO_ROOT"
