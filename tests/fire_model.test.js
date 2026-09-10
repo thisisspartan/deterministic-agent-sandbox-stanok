@@ -285,3 +285,115 @@ test('throws TypeError for invalid w or h', () => {
     );
   }
 });
+
+test('heatInertia=true is deterministic: same seed + opts give identical grids after 50 steps', () => {
+  const a = createFireModel(24, 16, { seed: 555, inertia: 0.5, turbulence: 0, heatInertia: true });
+  const b = createFireModel(24, 16, { seed: 555, inertia: 0.5, turbulence: 0, heatInertia: true });
+  for (let i = 0; i < 50; i++) {
+    a.step();
+    b.step();
+  }
+  assert.deepStrictEqual(a.grid, b.grid);
+});
+
+test('heatInertia=true range invariant: all values stay in [0, maxHeat] after 100 steps', () => {
+  const m = createFireModel(24, 16, { seed: 31, inertia: 0.5, turbulence: 0.5, heatInertia: true });
+  for (let i = 0; i < 100; i++) m.step();
+  assertInRange(m);
+});
+
+test('heatInertia=true makes the top (cold) rows livelier than uniform inertia', () => {
+  // Top-third mean per-step delta: mean over the top floor(h/3) rows of the
+  // mean absolute per-cell change between consecutive frames, after warmup.
+  function topThirdDelta(model, warmup, frames) {
+    for (let i = 0; i < warmup; i++) model.step();
+    const W = model.w, H = model.h;
+    const top = Math.floor(H / 3);
+    let total = 0, count = 0;
+    let prev = model.grid.map((r) => r.slice());
+    for (let i = 0; i < frames; i++) {
+      model.step();
+      const cur = model.grid;
+      for (let y = 0; y < top; y++) {
+        for (let x = 0; x < W; x++) {
+          total += Math.abs(cur[y][x] - prev[y][x]);
+          count++;
+        }
+      }
+      prev = cur.map((r) => r.slice());
+    }
+    return total / count;
+  }
+  const a = createFireModel(40, 24, { seed: 123, inertia: 0.5, turbulence: 0, heatInertia: false });
+  const b = createFireModel(40, 24, { seed: 123, inertia: 0.5, turbulence: 0, heatInertia: true });
+  const dA = topThirdDelta(a, 200, 50);
+  const dB = topThirdDelta(b, 200, 50);
+  assert.ok(dB > dA, `topDelta(B)=${dB} should be > topDelta(A)=${dA}`);
+});
+
+test('heatInertia=false is bit-identical to the current uniform-inertia step', () => {
+  const W = 5, H = 5, MAX = 255, SEED = 1, DECAY = 0.08, INERTIA = 0.5;
+
+  function refXorshift32(seed) {
+    let s = (seed >>> 0) || 0x1234567;
+    return function () {
+      s ^= s << 13;
+      s ^= s >>> 17;
+      s ^= s << 5;
+      return (s >>> 0) / 4294967296;
+    };
+  }
+
+  const rand = refXorshift32(SEED);
+  const DX = [-1, 0, 1];
+  const ref = [];
+  for (let y = 0; y < H; y++) {
+    const row = new Array(W);
+    for (let x = 0; x < W; x++) row[x] = 0;
+    ref.push(row);
+  }
+
+  // One step of the CURRENT uniform-inertia algorithm (double-buffered, old-state reads).
+  {
+    const next = [];
+    for (let y = 0; y < H; y++) {
+      const row = new Array(W);
+      for (let x = 0; x < W; x++) row[x] = 0;
+      next.push(row);
+    }
+    for (let x = 0; x < W; x++) next[H - 1][x] = MAX * (0.7 + 0.3 * rand());
+    for (let y = H - 2; y >= 0; y--) {
+      const belowRow = ref[y + 1];
+      for (let x = 0; x < W; x++) {
+        const dx = DX[Math.floor(rand() * 3)];
+        let nx = x + dx;
+        if (nx < 0) nx = 0;
+        else if (nx > W - 1) nx = W - 1;
+        const below = belowRow[nx];
+        let v = below - DECAY * rand() * MAX;
+        if (INERTIA > 0) {
+          v = INERTIA * ref[y][x] + (1 - INERTIA) * v; // ref[y][x] is the OLD value
+        }
+        if (v < 0) v = 0;
+        else if (v > MAX) v = MAX;
+        next[y][x] = v;
+      }
+    }
+    for (let y = 0; y < H; y++) ref[y] = next[y];
+  }
+
+  const m = createFireModel(W, H, { seed: SEED, inertia: INERTIA, turbulence: 0, heatInertia: false });
+  m.step();
+  assert.deepStrictEqual(m.grid, ref);
+});
+
+test('invalid heatInertia throws TypeError', () => {
+  const bad = [{ heatInertia: 1 }, { heatInertia: 'x' }, { heatInertia: null }];
+  for (const o of bad) {
+    assert.throws(
+      () => createFireModel(10, 10, o),
+      TypeError,
+      `opts ${JSON.stringify(o)} should throw TypeError`
+    );
+  }
+});

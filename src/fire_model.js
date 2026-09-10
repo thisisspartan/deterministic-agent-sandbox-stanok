@@ -54,6 +54,11 @@ function createFireModel(w, h, opts) {
     throw new TypeError('turbulence must be a number in [0, 1]');
   }
 
+  const heatInertia = opts.heatInertia === undefined ? false : opts.heatInertia;
+  if (typeof heatInertia !== 'boolean') {
+    throw new TypeError('heatInertia must be a boolean');
+  }
+
   let seed;
   if (opts.seed === undefined) {
     seed = (Math.random() * 0x100000000) >>> 0;
@@ -127,7 +132,9 @@ function createFireModel(w, h, opts) {
           v += turbulence * (field[cy][cx] - 0.5) * 0.5 * maxHeat;
         }
         if (inertia > 0) {
-          v = inertia * grid[y][x] + (1 - inertia) * v; // grid[y][x] is the OLD value
+          const old = grid[y][x];                       // OLD value (double-buffered read)
+          const eff = heatInertia ? inertia * (old / maxHeat) : inertia;
+          v = eff * old + (1 - eff) * v;
         }
         if (v < 0) v = 0;
         else if (v > maxHeat) v = maxHeat;

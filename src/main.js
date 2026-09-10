@@ -76,10 +76,11 @@ function isTTY() {
  * @param {number} [opts.seed]     forwarded to the heat model (determinism in tests)
  * @param {number}  [opts.inertia=0.5]     forwarded to the heat model (temporal smoothing)
  * @param {number}  [opts.turbulence=0.5]  forwarded to the heat model (plume turbulence)
+ * @param {boolean} [opts.heatInertia=true] forwarded to the heat model (heat-scaled inertia: lively tips)
  * @param {boolean} [opts.density=true]    forwarded to renderFrame (glyph-density soft edges)
  * @param {function} [opts.write]  write(string) used to emit frames
  *                                (default: process.stdout.write)
- * @returns {{w:number, h:number, fps:number, maxHeat:number, inertia:number, turbulence:number, density:boolean, start:function, stop:function}}
+ * @returns {{w:number, h:number, fps:number, maxHeat:number, inertia:number, turbulence:number, density:boolean, heatInertia:boolean, start:function, stop:function}}
  */
 function createApp(opts) {
   if (!(opts !== undefined && opts !== null && typeof opts === 'object' && !Array.isArray(opts))) {
@@ -98,9 +99,10 @@ function createApp(opts) {
   // be overridden by the caller. They are validated by the model/renderer.
   const inertia = opts.inertia === undefined ? 0.5 : opts.inertia;
   const turbulence = opts.turbulence === undefined ? 0.5 : opts.turbulence;
+  const heatInertia = opts.heatInertia === undefined ? true : opts.heatInertia;
   const density = opts.density === undefined ? true : opts.density;
 
-  const modelOpts = { inertia, turbulence };
+  const modelOpts = { inertia, turbulence, heatInertia };
   if (opts.maxHeat !== undefined) modelOpts.maxHeat = opts.maxHeat;
   if (opts.seed !== undefined) modelOpts.seed = opts.seed;
 
@@ -155,7 +157,7 @@ function createApp(opts) {
     }
   }
 
-  return { w, h, fps, maxHeat: model.maxHeat, inertia, turbulence, density, start, stop };
+  return { w, h, fps, maxHeat: model.maxHeat, inertia, turbulence, density, heatInertia, start, stop };
 }
 
 /**

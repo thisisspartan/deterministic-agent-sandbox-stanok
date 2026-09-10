@@ -10,7 +10,7 @@ like rising fire.
 
 | Module | Responsibility |
 | --- | --- |
-| `src/fire_model.js` | Pure heat math. `createFireModel(w, h, { maxHeat, decay, seed, inertia, turbulence })` returns `{ w, h, maxHeat, grid, step }`; `grid[y][x]` is in `[0, maxHeat]` (row `h-1` is the bottom, the heat source). Deterministic per seed (xorshift32). No I/O. |
+| `src/fire_model.js` | Pure heat math. `createFireModel(w, h, { maxHeat, decay, seed, inertia, turbulence, heatInertia })` returns `{ w, h, maxHeat, grid, step }`; `grid[y][x]` is in `[0, maxHeat]` (row `h-1` is the bottom, the heat source). Deterministic per seed (xorshift32). No I/O. |
 | `src/fire_render.js` | Pure heat → ANSI mapping. `renderFrame(grid, { maxHeat, palette, density })` returns `h` row strings: `palette: 'ansi256'` (256-color `█` ramp, black→red→orange→white) or `palette: 'symbols'` (` ░▒▓█`, no escapes). |
 | `src/main.js` | The terminal front-end: reads the terminal size, runs the fps-paced animation loop (`setInterval`, no busy-loop), handles terminal hygiene and SIGINT, and routes its output straight to the real stdout (fd 1). CommonJS, no dependencies. |
 
@@ -27,6 +27,26 @@ bit-identical to the legacy algorithm (same PRNG call order, same values).
   only updated (and consumed from the PRNG stream) when `turbulence > 0`.
 
 Both are validated up front and throw `TypeError` if out of range.
+
+### Heat-scaled inertia (`heatInertia`)
+
+`heatInertia` is an opt-in **boolean** (default `false`) that makes the
+`inertia` smoothing **heat-dependent** instead of uniform, so the flame tips
+stay lively.
+- `false` (default): the **uniform** inertia blend, unchanged — the model is
+  bit-identical to before (same PRNG call order, same values).
+- `true`: the effective inertia is **scaled by the cell's own heat**:
+  `eff = inertia * old / maxHeat` (where `old` is the cell's previous value),
+  and the cell is blended with `eff*old + (1-eff)*v`. Cold cells
+  (`old ≈ 0`) get almost no smoothing → high-frequency flicker at the tips;
+  hot cells (`old ≈ maxHeat`) keep the full `inertia` smoothing → a smooth core.
+  `eff` always stays in `[0, inertia) ⊂ [0, 1)`, so the result is a convex
+  combination of values already in `[0, maxHeat]` and the existing clamp still
+  holds. The PRNG call order is unchanged, so determinism per seed+opts is
+  preserved.
+
+If `heatInertia` is provided it must be a boolean; any other value throws
+`TypeError` (`'heatInertia must be a boolean'`).
 
 ### Renderer option (`density`)
 
@@ -50,13 +70,17 @@ feathered edges). Each option is overridable by the caller:
 
 - `inertia` — default `0.5`, forwarded to the heat model as `modelOpts.inertia`.
 - `turbulence` — default `0.5`, forwarded to the heat model as `modelOpts.turbulence`.
+- `heatInertia` — default `true`, forwarded to the heat model as
+  `modelOpts.heatInertia`. The default app renders the more realistic,
+  lively-tips fire (heat-scaled inertia); override with `false` for uniform
+  inertia. It only affects the heat model, never the renderer.
 - `density` — default `true`, forwarded to the renderer as
   `renderFrame(model.grid, { ..., density })`. It only affects `ansi256` (TTY)
   mode; in headless `symbols` mode the renderer ignores it (which is fine and expected).
 
-The three values are also exposed on the object returned by `createApp` (alongside
+These values are also exposed on the object returned by `createApp` (alongside
 `w, h, fps, maxHeat, start, stop`), so the defaults/overrides are observable:
-`{ w, h, fps, maxHeat, inertia, turbulence, density, start, stop }`.
+`{ w, h, fps, maxHeat, inertia, turbulence, density, heatInertia, start, stop }`.
 
 ## Run
 
@@ -87,4 +111,4 @@ When `process.stdout` is not a TTY (sandbox, piped output):
 
 - `getTerminalSize()` never throws — it uses `process.stdout.columns/rows` when they are positive integers, otherwise the **80 × 24** fallback.
 - **No terminal escapes** are emitted (no alt screen, cursor, or home positioning); frames are still produced at `fps` via the injectable `write(string)` function (default `process.stdout.write`), rendered with the escape-free `symbols` palette.
-- This holds even under the new realistic defaults (`inertia=0.5`, `turbulence=0.5`, `density=true`): headless mode still uses the escape-free `symbols` palette, and the renderer ignores `density` in `symbols` mode, so frames never contain terminal escapes.
+- This holds even under the new realistic defaults (`inertia=0.5`, `turbulence=0.5`, `heatInertia=true`, `density=true`): headless mode still uses the escape-free `symbols` palette, and the renderer ignores `density` in `symbols` mode (and `heatInertia` only affects the model, not the renderer), so frames never contain terminal escapes.

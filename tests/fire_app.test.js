@@ -134,6 +134,39 @@ test('frames are headless-clean: injected write receives plain rows, no terminal
   }
 });
 
+test('heatInertia defaults to true', () => {
+  const { createApp } = loadMain();
+  const app = createApp({ write: () => {} });
+  assert.equal(app.heatInertia, true, 'heatInertia must default to true');
+});
+
+test('heatInertia override is honored', () => {
+  const { createApp } = loadMain();
+  const off = createApp({ heatInertia: false, write: () => {} });
+  assert.equal(off.heatInertia, false, 'heatInertia must honor the override of false');
+  const on = createApp({ heatInertia: true, write: () => {} });
+  assert.equal(on.heatInertia, true, 'heatInertia must honor the override of true');
+});
+
+test('headless frames stay clean under the new default (heatInertia=true)', async () => {
+  const { createApp } = loadMain();
+  const h = 10;
+  const frames = [];
+  const app = createApp({ w: 20, h, fps: 60, seed: 5, write: (s) => frames.push(String(s)) });
+  assert.equal(app.heatInertia, true, 'the default app must have heatInertia=true');
+  app.start();
+  await sleep(200);
+  app.stop();
+  assert.ok(frames.length >= 1, `expected at least 1 frame, got ${frames.length}`);
+  for (let i = 0; i < frames.length; i++) {
+    const rows = frames[i].split('\n');
+    assert.equal(rows.length, h,
+      `frame ${i} must split into exactly ${h} rows, got ${rows.length}`);
+    assert.ok(!frames[i].includes('\u001b['),
+      `frame ${i} must not contain terminal escapes under the heatInertia=true default`);
+  }
+});
+
 test('realistic defaults: inertia=0.5, turbulence=0.5, density=true', () => {
   const { createApp } = loadMain();
   const app = createApp({ write: () => {} });
