@@ -2,9 +2,9 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$DIR"
-export STANOK_REPO="${STANOK_REPO:-$PROJECT_ROOT}"
-cd "$PROJECT_ROOT"
+STANOK_ROOT="$DIR"
+export STANOK_REPO="${STANOK_REPO:-$STANOK_ROOT}"
+cd "$STANOK_ROOT"
 
 PY="${STANOK_PY:-$DIR/.venv/bin/python}"
 if [ ! -x "$PY" ]; then
@@ -104,14 +104,14 @@ fi
 # possible there. FAIL-CLOSED (rc=22): the tree must be clean BEFORE launch;
 # the supervisor commits machine artifacts / operator state before each run.
 # Never reset/clean here — that would silently destroy uncommitted work.
-if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]; then
-    echo "ERROR: dirty tree in $PROJECT_ROOT (rc=22) — commit or clean before launch" >&2
+if [ -n "$(git -C "$STANOK_ROOT" status --porcelain)" ]; then
+    echo "ERROR: dirty tree in $STANOK_ROOT (rc=22) — commit or clean before launch" >&2
     exit 22
 fi
 
 if [ "$BACKGROUND" -eq 1 ]; then
     LAUNCH_LOG="$LOG_DIR/${LABEL}.launch.log"
-    EVIDENCE_DIR="$PROJECT_ROOT/evidence/${LABEL}"
+    EVIDENCE_DIR="$STANOK_ROOT/evidence/${LABEL}"
     MARKER_PATH="$EVIDENCE_DIR/.running"
 
     mkdir -p "$EVIDENCE_DIR"

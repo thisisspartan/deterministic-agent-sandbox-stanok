@@ -64,7 +64,15 @@ RED_F="$LOCK_DIR/$KEY.red"
 LOCK_F="$LOCK_DIR/$KEY.lock"
 
 hash_of() { sha256sum "$1" | awk '{print $1}'; }
-stored_hash() { [ -f "$1" ] && awk '{print $1}' "$1" 2>/dev/null || true; }
+stored_hash() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        awk '{print $1}' "$file" || {
+            echo "[verifier] ERROR: unreadable or corrupted lock file: $file" >&2
+            return 1
+        }
+    fi
+}
 emit() {
   jq -n --arg r "$1" '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:$r}}'
 }
@@ -92,7 +100,7 @@ CUR_HASH="$(hash_of "$TEST")"
 
 if [ -f "$LOCK_F" ]; then
   # ---- Phase C: locked (frozen after the TDD cycle) ----
-  STORED="$(stored_hash "$LOCK_F")"
+  STORED="$(stored_hash "$LOCK_F")" || { emit "VERIFY: FAIL (LOCK-CORRUPT: cannot read $LOCK_F)"; exit 1; }
   if [ -n "$STORED" ] && [ "$STORED" != "$CUR_HASH" ]; then
     emit "VERIFY: FAIL (TAMPERING: test $REL changed after lock)"
     exit 1
@@ -106,7 +114,7 @@ if [ -f "$LOCK_F" ]; then
 elif [ -f "$RED_F" ]; then
   # ---- Phase B: red confirmed, waiting for green ----
   if [ "$RC" -eq 0 ]; then
-    STORED="$(stored_hash "$RED_F")"
+    STORED="$(stored_hash "$RED_F")" || { emit "VERIFY: FAIL (RED-CORRUPT: cannot read $RED_F)"; exit 1; }
     if [ -n "$STORED" ] && [ "$STORED" = "$CUR_HASH" ]; then
       mv "$RED_F" "$LOCK_F"
       emit "VERIFY: PASS (TDD verified: red->green, test file unchanged)"

@@ -859,9 +859,9 @@ def _resolve_ticket(arg: str, direct: bool = False) -> str:
         candidates = [os.path.join(REPO_ROOT, arg), os.path.abspath(arg)]
     else:
         candidates = [
-            os.path.join(REPO_ROOT, arg),
-            os.path.join(os.path.dirname(REPO_ROOT), arg),
-            os.path.abspath(arg)
+            os.path.join(os.path.dirname(REPO_ROOT), arg),  # project root (highest priority)
+            os.path.join(REPO_ROOT, arg),                    # machine root
+            os.path.abspath(arg)                             # as given
         ]
     for c in candidates:
         if os.path.isfile(c):

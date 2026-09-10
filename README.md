@@ -49,8 +49,8 @@ launcher/stanok.py            — THE single Runner (CLI run/status/stop/watch,
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 sandbox-run.sh                — bwrap sandbox: repo mounted read-only with writable
                                 carve-outs (src/, tests/, docs/, evidence/,
-                                .stanok-locks/, .stanok-logs/, .git/);
-                                .git/hooks is a private tmpfs, .git/config read-only
+                                .stanok-locks/, .stanok-logs/);
+                                .git is mounted strictly read-only (--ro-bind)
 hooks/                        — deterministic gates: read-guard, bash-gate,
                                 test-lock, verifier, malware-scan, doctor,
                                 commit-msg

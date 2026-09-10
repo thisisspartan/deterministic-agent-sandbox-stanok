@@ -110,7 +110,6 @@ BWRAP_ARGS=(
   --bind "$REPO_ROOT/.stanok-locks" "$REPO_ROOT/.stanok-locks"
   --bind "$REPO_ROOT/.stanok-logs" "$REPO_ROOT/.stanok-logs"
   --ro-bind "$REPO_ROOT/.git" "$REPO_ROOT/.git"
-  --ro-bind "$REPO_ROOT/.git/config" "$REPO_ROOT/.git/config"
   --chdir "$REPO_ROOT"
   --setenv PATH "$RESOLVED_PATH"
   --setenv HOME "$HOME"
