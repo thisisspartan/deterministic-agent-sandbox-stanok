@@ -10,9 +10,23 @@ like rising fire.
 
 | Module | Responsibility |
 | --- | --- |
-| `src/fire_model.js` | Pure heat math. `createFireModel(w, h, { maxHeat, decay, seed })` returns `{ w, h, maxHeat, grid, step }`; `grid[y][x]` is in `[0, maxHeat]` (row `h-1` is the bottom, the heat source). Deterministic per seed (xorshift32). No I/O. |
+| `src/fire_model.js` | Pure heat math. `createFireModel(w, h, { maxHeat, decay, seed, inertia, turbulence })` returns `{ w, h, maxHeat, grid, step }`; `grid[y][x]` is in `[0, maxHeat]` (row `h-1` is the bottom, the heat source). Deterministic per seed (xorshift32). No I/O. |
 | `src/fire_render.js` | Pure heat → ANSI mapping. `renderFrame(grid, { maxHeat, palette })` returns `h` row strings: `palette: 'ansi256'` (256-color `█` ramp, black→red→orange→white) or `palette: 'symbols'` (` ░▒▓█`, no escapes). |
 | `src/main.js` | The terminal front-end: reads the terminal size, runs the fps-paced animation loop (`setInterval`, no busy-loop), handles terminal hygiene and SIGINT, and routes its output straight to the real stdout (fd 1). CommonJS, no dependencies. |
+
+### Realism options (`inertia`, `turbulence`)
+
+Two opt-in realism knobs, both defaulting to `0`; with both `0` the output is
+bit-identical to the legacy algorithm (same PRNG call order, same values).
+- `inertia` — number in `[0, 1)`, default `0`. Blends each cell's own previous
+  value into its new value (`v = inertia*old + (1-inertia)*v`), adding temporal
+  smoothing so the flame forms coherent rising tongues instead of grainy noise.
+- `turbulence` — number in `[0, 1]`, default `0`. Drives a coarse
+  `ceil(h/4) × ceil(w/4)` noise field that drifts slowly in time and is smooth
+  in space, nudging heat up/down by row so heat rises in plumes. The field is
+  only updated (and consumed from the PRNG stream) when `turbulence > 0`.
+
+Both are validated up front and throw `TypeError` if out of range.
 
 ## Run
 

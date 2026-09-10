@@ -130,6 +130,143 @@ test('boundaries: 3x3, 200x60 and 1x1 grids step without error and stay in range
   assertInRange(m3);
 });
 
+test('legacy identity (default opts): 1 step matches inline reference implementation', () => {
+  const W = 5, H = 5, MAX = 255, SEED = 1, DECAY = 0.08;
+
+  function refXorshift32(seed) {
+    let s = (seed >>> 0) || 0x1234567;
+    return function () {
+      s ^= s << 13;
+      s ^= s >>> 17;
+      s ^= s << 5;
+      return (s >>> 0) / 4294967296;
+    };
+  }
+
+  const rand = refXorshift32(SEED);
+  const DX = [-1, 0, 1];
+  const ref = [];
+  for (let y = 0; y < H; y++) {
+    const row = new Array(W);
+    for (let x = 0; x < W; x++) row[x] = 0;
+    ref.push(row);
+  }
+
+  // One step of the legacy algorithm (double-buffered, old-state reads).
+  {
+    const next = [];
+    for (let y = 0; y < H; y++) {
+      const row = new Array(W);
+      for (let x = 0; x < W; x++) row[x] = 0;
+      next.push(row);
+    }
+    for (let x = 0; x < W; x++) next[H - 1][x] = MAX * (0.7 + 0.3 * rand());
+    for (let y = H - 2; y >= 0; y--) {
+      const belowRow = ref[y + 1];
+      for (let x = 0; x < W; x++) {
+        const dx = DX[Math.floor(rand() * 3)];
+        let nx = x + dx;
+        if (nx < 0) nx = 0;
+        else if (nx > W - 1) nx = W - 1;
+        const below = belowRow[nx];
+        let v = below - DECAY * rand() * MAX;
+        if (v < 0) v = 0;
+        else if (v > MAX) v = MAX;
+        next[y][x] = v;
+      }
+    }
+    for (let y = 0; y < H; y++) ref[y] = next[y];
+  }
+
+  const m = createFireModel(W, H, { seed: SEED });
+  m.step();
+  assert.deepStrictEqual(m.grid, ref);
+});
+
+test('determinism with new opts: same seed + opts give identical grids after 50 steps', () => {
+  const a = createFireModel(24, 16, { seed: 2024, inertia: 0.5, turbulence: 0.5 });
+  const b = createFireModel(24, 16, { seed: 2024, inertia: 0.5, turbulence: 0.5 });
+  for (let i = 0; i < 50; i++) {
+    a.step();
+    b.step();
+  }
+  assert.deepStrictEqual(a.grid, b.grid);
+});
+
+test('range with new opts: all values stay in [0, maxHeat] after 100 steps', () => {
+  const m = createFireModel(24, 16, { seed: 31, inertia: 0.5, turbulence: 0.5 });
+  for (let i = 0; i < 100; i++) m.step();
+  assertInRange(m);
+});
+
+test('inertia smooths frame-to-frame change', () => {
+  function meanDelta(model, warmup, frames) {
+    for (let i = 0; i < warmup; i++) model.step();
+    const W = model.w, H = model.h;
+    let total = 0, count = 0;
+    let prev = model.grid.map((r) => r.slice());
+    for (let i = 0; i < frames; i++) {
+      model.step();
+      const cur = model.grid;
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          total += Math.abs(cur[y][x] - prev[y][x]);
+          count++;
+        }
+      }
+      prev = cur.map((r) => r.slice());
+    }
+    return total / count;
+  }
+  const a = createFireModel(40, 24, { seed: 123, inertia: 0, turbulence: 0 });
+  const b = createFireModel(40, 24, { seed: 123, inertia: 0.5, turbulence: 0 });
+  const dA = meanDelta(a, 200, 50);
+  const dB = meanDelta(b, 200, 50);
+  assert.ok(dB < dA, `meanDelta(B)=${dB} should be < meanDelta(A)=${dA}`);
+});
+
+test('turbulence extends the flame upward', () => {
+  function topThirdMax(model) {
+    const { grid, w, h } = model;
+    const top = Math.floor(h / 3);
+    let max = 0;
+    for (let y = 0; y < top; y++) {
+      for (let x = 0; x < w; x++) {
+        if (grid[y][x] > max) max = grid[y][x];
+      }
+    }
+    return max;
+  }
+  const a = createFireModel(40, 24, { seed: 77, turbulence: 0, inertia: 0 });
+  const b = createFireModel(40, 24, { seed: 77, turbulence: 0.5, inertia: 0 });
+  for (let i = 0; i < 200; i++) {
+    a.step();
+    b.step();
+  }
+  const mA = topThirdMax(a);
+  const mB = topThirdMax(b);
+  assert.ok(mB > mA, `topThirdMax(B)=${mB} should be > topThirdMax(A)=${mA}`);
+  assert.ok(mB > 0, `topThirdMax(B)=${mB} should be > 0`);
+});
+
+test('invalid inertia/turbulence opts throw TypeError', () => {
+  const bad = [
+    { inertia: 1.0 },
+    { inertia: -0.1 },
+    { inertia: 'x' },
+    { turbulence: 1.5 },
+    { turbulence: -0.1 },
+    { turbulence: null },
+  ];
+  for (const o of bad) {
+    assert.throws(
+      () => createFireModel(10, 10, o),
+      TypeError,
+      `opts ${JSON.stringify(o)} should throw TypeError`
+    );
+  }
+});
+
 test('throws TypeError for invalid w or h', () => {
   const bad = [
     [0, 24],

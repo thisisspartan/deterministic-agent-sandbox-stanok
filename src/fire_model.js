@@ -44,6 +44,16 @@ function createFireModel(w, h, opts) {
     throw new TypeError('decay must be a number in (0, 1]');
   }
 
+  const inertia = opts.inertia === undefined ? 0 : opts.inertia;
+  if (typeof inertia !== 'number' || !Number.isFinite(inertia) || inertia < 0 || inertia >= 1) {
+    throw new TypeError('inertia must be a number in [0, 1)');
+  }
+
+  const turbulence = opts.turbulence === undefined ? 0 : opts.turbulence;
+  if (typeof turbulence !== 'number' || !Number.isFinite(turbulence) || turbulence < 0 || turbulence > 1) {
+    throw new TypeError('turbulence must be a number in [0, 1]');
+  }
+
   let seed;
   if (opts.seed === undefined) {
     seed = (Math.random() * 0x100000000) >>> 0;
@@ -57,6 +67,16 @@ function createFireModel(w, h, opts) {
   const rand = xorshift32(seed);
   const DX = [-1, 0, 1];
 
+  // Coarse, slowly time-evolving turbulence field (only consumed when turbulence > 0).
+  const tw = Math.max(1, Math.ceil(w / 4));
+  const th = Math.max(1, Math.ceil(h / 4));
+  const field = [];
+  for (let cy = 0; cy < th; cy++) {
+    const row = new Array(tw);
+    for (let cx = 0; cx < tw; cx++) row[cx] = 0.5;
+    field.push(row);
+  }
+
   /** grid[y][x]: y = 0 is the TOP row, y = h - 1 is the BOTTOM row (heat source). */
   const grid = [];
   for (let y = 0; y < h; y++) {
@@ -67,15 +87,31 @@ function createFireModel(w, h, opts) {
 
   /** Advance the simulation by one frame (double-buffered: reads old state only). */
   function step() {
+    // 1. Turbulence field update — ONLY when turbulence > 0.
+    //    Consumes tw*th rand() calls; skipped entirely at turbulence === 0 so the
+    //    legacy PRNG call order is preserved.
+    if (turbulence > 0) {
+      for (let cy = 0; cy < th; cy++) {
+        for (let cx = 0; cx < tw; cx++) {
+          let f = field[cy][cx] + (rand() - 0.5) * 0.1;
+          if (f < 0) f = 0;
+          else if (f > 1) f = 1;
+          field[cy][cx] = f;
+        }
+      }
+    }
+
     const next = [];
     for (let y = 0; y < h; y++) next.push(new Array(w));
 
-    // 1. Bottom row: stochastic heat in [0.7 * maxHeat, maxHeat].
+    // 2. Bottom row: stochastic heat in [0.7 * maxHeat, maxHeat].
     for (let x = 0; x < w; x++) {
       next[h - 1][x] = maxHeat * (0.7 + 0.3 * rand());
     }
 
-    // 2. All other rows: value from (a neighbor of) the row below, minus random decay.
+    // 3. All other rows: value from (a neighbor of) the row below, minus random decay,
+    //    optionally nudged by the turbulence field and blended with the cell's own
+    //    previous value (inertia).
     for (let y = h - 2; y >= 0; y = y - 1) {
       const belowRow = grid[y + 1]; // old state
       for (let x = 0; x < w; x++) {
@@ -85,13 +121,21 @@ function createFireModel(w, h, opts) {
         else if (nx > w - 1) nx = w - 1;
         const below = belowRow[nx];
         let v = below - decay * rand() * maxHeat;
+        if (turbulence > 0) {
+          const cx = Math.min(tw - 1, Math.floor((x * tw) / w));
+          const cy = Math.min(th - 1, Math.floor((y * th) / h));
+          v += turbulence * (field[cy][cx] - 0.5) * 0.5 * maxHeat;
+        }
+        if (inertia > 0) {
+          v = inertia * grid[y][x] + (1 - inertia) * v; // grid[y][x] is the OLD value
+        }
         if (v < 0) v = 0;
         else if (v > maxHeat) v = maxHeat;
         next[y][x] = v;
       }
     }
 
-    // 3. Commit the new state (all values already clamped to [0, maxHeat]).
+    // 4. Commit the new state (all values already clamped to [0, maxHeat]).
     for (let y = 0; y < h; y++) {
       grid[y] = next[y];
     }
