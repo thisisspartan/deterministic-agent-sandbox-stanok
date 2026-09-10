@@ -44,7 +44,11 @@ case "$cmd" in
     rc=0
     for f in "$@"; do
       echo "=== $f ==="
-      timeout 60 node "$f" < /dev/null || rc=$?
+      # The ONE canonical test invocation for the whole machine (D3): the
+      # deterministic runner flags live here only — no other component invokes
+      # node on a test. --test-force-exit makes a leaked handle exit 0 instead
+      # of hanging to rc=124.
+      timeout 60 node --test --test-force-exit "$f" < /dev/null || rc=$?
     done
     exit "$rc"
     ;;

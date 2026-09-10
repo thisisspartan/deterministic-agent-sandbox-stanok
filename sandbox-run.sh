@@ -88,16 +88,16 @@ fi
 
 # 5. Mount the machine's working repo: READ-ONLY by default, with explicit
 #    writable carve-outs for the work areas (src/, tests/, docs/, evidence/,
-#    .stanok-locks/, .stanok-logs/).
+#    .stanok-logs/).
 #    .git is READ-ONLY (SEC-01): the model cannot commit, plant hooks, or rewrite
 #    git state from inside the sandbox. No git writes happen anywhere: launch.sh
 #    fail-closed gates a dirty tree on the host (rc=22) BEFORE entering the
 #    sandbox, and the in-sandbox reset_repo() only verifies cleanliness
-#    (read-only) + wipes .stanok-locks.
+#    (read-only) + unfreezes tests/ for the new run.
 #    The carve-out directories must exist on the host before bwrap runs
 #    (bwrap fails on a missing bind source).
 mkdir -p "$REPO_ROOT/src" "$REPO_ROOT/tests" "$REPO_ROOT/docs" \
-         "$REPO_ROOT/evidence" "$REPO_ROOT/.stanok-locks" "$REPO_ROOT/.stanok-logs"
+         "$REPO_ROOT/evidence" "$REPO_ROOT/.stanok-logs"
 BWRAP_ARGS=(
   "${BWRAP_ARGS[@]}"
   --ro-bind "$REPO_ROOT" "$REPO_ROOT"
@@ -107,7 +107,6 @@ BWRAP_ARGS=(
   --bind "$REPO_ROOT/tests" "$REPO_ROOT/tests"
   --bind "$REPO_ROOT/docs" "$REPO_ROOT/docs"
   --bind "$REPO_ROOT/evidence" "$REPO_ROOT/evidence"
-  --bind "$REPO_ROOT/.stanok-locks" "$REPO_ROOT/.stanok-locks"
   --bind "$REPO_ROOT/.stanok-logs" "$REPO_ROOT/.stanok-logs"
   --ro-bind "$REPO_ROOT/.git" "$REPO_ROOT/.git"
   --chdir "$REPO_ROOT"

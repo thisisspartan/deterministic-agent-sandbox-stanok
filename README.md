@@ -49,10 +49,10 @@ launcher/stanok.py            — THE single Runner (CLI run/status/stop/watch,
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 sandbox-run.sh                — bwrap sandbox: repo mounted read-only with writable
                                 carve-outs (src/, tests/, docs/, evidence/,
-                                .stanok-locks/, .stanok-logs/);
+                                .stanok-logs/);
                                 .git is mounted strictly read-only (--ro-bind)
 hooks/                        — deterministic gates: read-guard, bash-gate,
-                                test-lock, verifier, malware-scan, doctor,
+                                verifier, malware-scan, doctor,
                                 commit-msg
 .claude/settings.stanok.json  — the machine sandbox (allow/deny, hooks)
 CLAUDE.md                     — the machine role (auto-loaded inside the repo)
@@ -89,10 +89,10 @@ src/ tests/ docs/             — the machine working directories (empty at star
    by bash-gate; subagents (Agent/Task) are denied.
 3. Monolithic TDD in a single session: the model writes the test first
    (red), then the implementation (green), then docs. After every Write/Edit:
-   verifier.sh runs the matching test and reports PASS/FAIL; test-lock.sh
-   locks a test after its first real run (Goodhart guard: only non-empty
-   tests with real assertions lock) — a locked test cannot be rewritten
-   to make it pass. malware-scan.sh DENIES suspicious `src/`/`tests/` writes
+   verifier.sh runs the matching test through `scripts/run.sh` and, on RED,
+   freezes that test file read-only (`chmod a-w`) — an OS fact, not a hash:
+   the spec cannot be weakened. The Runner unfreezes `tests/` at the start of
+   every run. malware-scan.sh DENIES suspicious `src/`/`tests/` writes
    BEFORE they land on disk (PreToolUse, shift-left).
 4. On verifier FAIL the Runner appends an in-session retry turn
    (`--local-retries`, default 2) with the failure block.

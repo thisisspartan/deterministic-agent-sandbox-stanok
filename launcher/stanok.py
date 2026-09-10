@@ -18,7 +18,6 @@ import argparse
 import asyncio
 import dataclasses
 import fcntl
-import glob
 import hashlib
 import json
 import os
@@ -219,15 +218,11 @@ def reset_repo() -> int:
     try:
         for d in ("src", "tests", "docs"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
-        # SEC-02: wipe stale TDD state (.red/.lock). .stanok-locks is gitignored,
-        # so it survives any host-side git clean — stale state would corrupt the
-        # verifier state machine of the next run.
-        locks_dir = os.path.join(REPO_ROOT, ".stanok-locks")
-        if os.path.isdir(locks_dir):
-            for name in os.listdir(locks_dir):
-                p = os.path.join(locks_dir, name)
-                if os.path.isfile(p):
-                    os.unlink(p)
+        # D2: the previous run may have frozen test files (chmod a-w, set by
+        # hooks/verifier.sh on RED). Unfreeze before this run's test-writing
+        # phase — the freeze is per-run, not permanent.
+        subprocess.run(["chmod", "-R", "u+w", os.path.join(REPO_ROOT, "tests")],
+                       capture_output=True)
         return 0
     except OSError as e:
         log(f"ERROR: repo prep failed: {e}")
@@ -274,72 +269,50 @@ def _extract_smart_diff(raw_text: str) -> str:
     return res
 
 
-def _run_one_test(test_file: str, tests_dir: str) -> tuple[str, str] | None:
-    rel = os.path.relpath(test_file, tests_dir)
+def _run_one_test(rel: str) -> tuple[str, str] | None:
+    """Run one test through the project's declared entrypoint (D3).
+
+    The machine does not own the test invocation: it calls scripts/run.sh,
+    exactly as the model's Bash tool does. Any runner flags (node/--test/...)
+    live inside run.sh, so all call sites agree by construction.
+    """
     try:
-        p = subprocess.run(["node", "--test", "--test-force-exit", test_file],
-                           cwd=REPO_ROOT, capture_output=True, text=True, timeout=60)
+        p = subprocess.run(["bash", "scripts/run.sh", "test", rel],
+                           cwd=REPO_ROOT, capture_output=True, text=True, timeout=90)
         if p.returncode != 0:
             raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
             return (rel, _extract_smart_diff(raw_err))
     except subprocess.TimeoutExpired:
-        return (rel, "TIMEOUT: test execution exceeded 60 seconds")
+        return (rel, "TIMEOUT: test execution exceeded the runner limit")
     except Exception as e:
         return (rel, f"EXEC_ERROR: {e}")
     return None
 
 
 def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
-    tests_dir = os.path.join(REPO_ROOT, "tests")
-    tests = sorted(glob.glob(os.path.join(tests_dir, "**", "*.test.js"), recursive=True))
+    """Verdict = run every test the project's runner declares (D3).
+
+    Discovery goes through the project entrypoint too (run.sh list), so the
+    machine no longer hardcodes the *.test.js convention.
+    """
+    try:
+        lp = subprocess.run(["bash", "scripts/run.sh", "list"],
+                            cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        return (False, [("(no tests)", f"run.sh list failed: {e}")])
+    tests = [ln.strip() for ln in (lp.stdout or "").splitlines() if ln.strip()]
     if not tests:
-        return (False, [("(no tests)", "No *.test.js files in the tests/ directory")])
+        return (False, [("(no tests)", "The project runner declares no tests")])
 
     failures: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
-        futures = {ex.submit(_run_one_test, t, tests_dir): t for t in tests}
+        futures = {ex.submit(_run_one_test, t): t for t in tests}
         for fut in as_completed(futures):
             res = fut.result()
             if res is not None:
                 failures.append(res)
     failures.sort(key=lambda x: x[0])
     return (len(failures) == 0, failures)
-
-
-def tdd_gate() -> list[str]:
-    """SEC-02 final gate (fail-closed), runs after a green verify_gate.
-
-    Every test file touched this session (git status M/A/?? under tests/) must
-    have a .stanok-locks/<key>.lock (key = path with '/' -> '_'), i.e. it went
-    through the TDD red->green cycle. Any lingering .red file means the cycle
-    was not completed. Returns the list of violations (empty = pass).
-    """
-    violations: list[str] = []
-    locks_dir = os.path.join(REPO_ROOT, ".stanok-locks")
-    try:
-        st = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
-                            check=True, capture_output=True, text=True).stdout
-    except subprocess.CalledProcessError as e:
-        return [f"git status failed: {e}"]
-    for line in st.splitlines():
-        if len(line) < 4:
-            continue
-        x, y, path = line[0], line[1], line[3:].strip()
-        if " -> " in path:
-            path = path.split(" -> ")[-1].strip()
-        path = path.strip('"')
-        if x not in ("?", "M", "A", "R") and y != "M":
-            continue
-        if not (path.startswith("tests/") and path.endswith(".test.js")):
-            continue
-        key = path.replace("/", "_")
-        if not os.path.isfile(os.path.join(locks_dir, key + ".lock")):
-            violations.append(f"test {path} touched without TDD lock ({key}.lock)")
-    if os.path.isdir(locks_dir):
-        for name in sorted(os.listdir(locks_dir)):
-            if name.endswith(".red"):
-                violations.append(f"lingering red state: {name}")
-    return violations
 
 
 # ==================================================================================
@@ -519,16 +492,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 emit("verifier", {"turn": turn, "ok": verify_ok, "failures_count": len(failures)})
 
                 if verify_ok:
-                    # SEC-02 final gate: green tests are not enough — every test
-                    # touched this session must have completed the TDD cycle (.lock).
-                    violations = tdd_gate()
-                    if violations:
-                        log("TDD GATE: FAIL — " + "; ".join(violations))
-                        job["verifier"] = "FAIL"
-                        job["probe_result"] = "VERIFY-FAIL"
-                        job["error"] = "TDD GATE: " + "; ".join(violations)
-                        job["turns"] = turn
-                        return 1
                     log("VERIFIER: PASS — All tests passed successfully!")
                     job["verifier"] = "PASS"
                     job["turns"] = turn
