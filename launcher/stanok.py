@@ -6,7 +6,10 @@ Full integration with the L1 Supervisor:
   2. Strict summary.json contract (probe_result, c5, review_verdict, errors) for L1.
   3. Adaptive Contract Lock: adaptation for creating tests from scratch and a ban on weakening assertions.
   4. Cumulative Token & Cache Telemetry: exact session_hit_rate calculation.
-  5. Shielded Turn Watchdog: turn timeout via asyncio.shield() without losing session_id.
+  5. Shielded Turn Watchdog: the turn timeout (default 1200s) is a terminal DoS
+     circuit breaker — asyncio.shield() keeps the turn task alive past wait_for,
+     so client.interrupt() runs cleanly and summary.json is written with the
+     TURN-TIMEOUT code (rc=1) without the process dying on CancelledError.
   6. Smart Diff Extraction: prioritized assert/diff search with a UTF-8 slice.
   7. Process Reaper: a single process group with guaranteed termination of all children.
 """
@@ -41,7 +44,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 LOCAL_MODEL = os.environ.get("STANOK_MODEL", "Qwen3.8-27B-MTP")
 SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://127.0.0.1:8080")
 LOCAL_PROXY = os.environ.get("STANOK_PROXY", "http://127.0.0.1:8118")
-NO_PROXY = os.environ.get("STANOK_NO_PROXY", "127.0.0.1,localhost,127.0.0.1")
+NO_PROXY = os.environ.get("STANOK_NO_PROXY", "127.0.0.1,localhost")
 CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "claude")
 
 MAX_TEST_LINES = 60
@@ -321,8 +324,11 @@ def tdd_gate() -> list[str]:
     for line in st.splitlines():
         if len(line) < 4:
             continue
-        x, y, path = line[0], line[1], line[3:]
-        if x not in ("?", "M", "A") and y != "M":
+        x, y, path = line[0], line[1], line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ")[-1].strip()
+        path = path.strip('"')
+        if x not in ("?", "M", "A", "R") and y != "M":
             continue
         if not (path.startswith("tests/") and path.endswith(".test.js")):
             continue
@@ -487,15 +493,18 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 total_tokens["cache_read_input_tokens"] += c_read
                 total_tokens["cache_creation_input_tokens"] += c_create
 
-                total_input_context = total_tokens["input_tokens"] + total_tokens["cache_read_input_tokens"]
-                session_hit_rate = (
-                    (total_tokens["cache_read_input_tokens"] / total_input_context * 100.0)
-                    if total_input_context > 0 else 0.0
+                total_input_context = (
+                    total_tokens["input_tokens"]
+                    + total_tokens["cache_read_input_tokens"]
+                    + total_tokens.get("cache_creation_input_tokens", 0)
                 )
+                session_hit_rate = (
+                    total_tokens["cache_read_input_tokens"] / total_input_context * 100.0
+                ) if total_input_context > 0 else 0.0
                 job["tokens"] = total_tokens
                 job["cache_hit_rate"] = f"{session_hit_rate:.1f}%"
 
-                turn_input_context = inp + c_read
+                turn_input_context = inp + c_read + c_create
                 turn_hit_rate = (c_read / turn_input_context * 100.0) if turn_input_context > 0 else 0.0
 
                 log(f"Turn {turn} finished in {elapsed_turn:.1f}s | "

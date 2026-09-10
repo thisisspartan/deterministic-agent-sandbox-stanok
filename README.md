@@ -77,9 +77,9 @@ src/ tests/ docs/             — the machine working directories (empty at star
 
 ## How it works (briefly)
 
-1. `launch.sh run` (shim → Runner) passes the fail-closed gates: ticket
-   (rc=13), label-guard (rc=15), ROLE-LEAK (rc=24), lock (rc=21),
-   dirty-tree (rc=22, uncommitted changes — start forbidden),
+1. `launch.sh run` (shim → Runner) passes the fail-closed gates in this order:
+   label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->
+   dirty-tree (rc=22, uncommitted changes — start forbidden) -> lock (rc=21) ->
    pre-flight `/props` of the server (rc=20; fail-closed also when the
    server `n_ctx` is below the required window). The dirty-tree gate is
    fail-closed: no destructive reset/clean — the operator commits before launch.
