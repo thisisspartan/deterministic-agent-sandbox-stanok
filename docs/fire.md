@@ -11,7 +11,7 @@ like rising fire.
 | Module | Responsibility |
 | --- | --- |
 | `src/fire_model.js` | Pure heat math. `createFireModel(w, h, { maxHeat, decay, seed, inertia, turbulence })` returns `{ w, h, maxHeat, grid, step }`; `grid[y][x]` is in `[0, maxHeat]` (row `h-1` is the bottom, the heat source). Deterministic per seed (xorshift32). No I/O. |
-| `src/fire_render.js` | Pure heat → ANSI mapping. `renderFrame(grid, { maxHeat, palette })` returns `h` row strings: `palette: 'ansi256'` (256-color `█` ramp, black→red→orange→white) or `palette: 'symbols'` (` ░▒▓█`, no escapes). |
+| `src/fire_render.js` | Pure heat → ANSI mapping. `renderFrame(grid, { maxHeat, palette, density })` returns `h` row strings: `palette: 'ansi256'` (256-color `█` ramp, black→red→orange→white) or `palette: 'symbols'` (` ░▒▓█`, no escapes). |
 | `src/main.js` | The terminal front-end: reads the terminal size, runs the fps-paced animation loop (`setInterval`, no busy-loop), handles terminal hygiene and SIGINT, and routes its output straight to the real stdout (fd 1). CommonJS, no dependencies. |
 
 ### Realism options (`inertia`, `turbulence`)
@@ -27,6 +27,20 @@ bit-identical to the legacy algorithm (same PRNG call order, same values).
   only updated (and consumed from the PRNG stream) when `turbulence > 0`.
 
 Both are validated up front and throw `TypeError` if out of range.
+
+### Renderer option (`density`)
+
+`renderFrame` takes one opt-in boolean `density` (default `false`). With it absent
+or `false`, output is bit-identical to the legacy renderer (every hot `ansi256`
+cell is a solid `█`, only the color varies). When `density` is `true` and
+`palette === 'ansi256'`, brightness is also encoded in the GLYPH DENSITY (in
+addition to the color): each hot cell emits `\033[38;5;<n>m` + `SYMBOLS[level]` +
+`\033[0m` where `level = min(3, floor(pos/255*4))` (the same mapping `symbols`
+mode uses), so cold hot-cells render as dim `░`/`▒` and the core as a bright `█`
+— soft, feathered edges around a bright core. `density` is ignored for
+`palette: 'symbols'` (which already uses glyph density). If `density` is provided
+it must be a boolean, else `renderFrame` throws `TypeError`. `t <= 0` is always a
+space.
 
 ## Run
 

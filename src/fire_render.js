@@ -111,6 +111,14 @@ function renderFrame(grid, opts) {
     throw new TypeError('palette must be "ansi256" or "symbols"');
   }
 
+  // Opt-in: encode brightness into GLYPH DENSITY (in addition to color) so the
+  // flame gets soft, feathered edges around a bright, dense core. Only applied
+  // in 'ansi256' mode; ignored for 'symbols' (which already uses glyph density).
+  const density = opts.density === undefined ? false : opts.density;
+  if (typeof density !== 'boolean') {
+    throw new TypeError('density must be a boolean');
+  }
+
   const rows = [];
   for (let y = 0; y < grid.length; y++) {
     const row = grid[y];
@@ -120,8 +128,18 @@ function renderFrame(grid, opts) {
       if (t <= 0) {
         line += ' ';
       } else if (palette === 'ansi256') {
-        const n = PALETTE[tempToPos(t, maxHeat)];
-        line += '\u001b[38;5;' + n + 'm' + '█' + RESET;
+        const pos = tempToPos(t, maxHeat);
+        const n = PALETTE[pos];
+        // Default keeps the legacy solid █ (bit-identical). When density is
+        // enabled, the glyph density tracks the same level symbols mode uses:
+        // cold hot-cells dim ░/▒, hot cells bright █.
+        let glyph = '█';
+        if (density) {
+          let level = Math.floor((pos / 255) * 4);
+          if (level > 3) level = 3;
+          glyph = SYMBOLS[level];
+        }
+        line += '\u001b[38;5;' + n + 'm' + glyph + RESET;
       } else {
         const pos = tempToPos(t, maxHeat);
         let level = Math.floor((pos / 255) * 4);

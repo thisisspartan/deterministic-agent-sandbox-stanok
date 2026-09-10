@@ -126,3 +126,90 @@ test('throws TypeError when grid is not an array of arrays of numbers', () => {
     );
   }
 });
+
+// --- density (opt-in glyph-density soft edges; ansi256 only, default off) ---
+test('density=true (ansi256) maps heat to glyph density: cold cell ░, hot cell █, one color escape each', () => {
+  const maxHeat = 255;
+  // 2 rows x 1 col: cold cell (t=10), hot cell (t=250).
+  const grid = [[10], [250]];
+  const frame = renderFrame(grid, { maxHeat, palette: 'ansi256', density: true });
+  assert.equal(frame.length, 2);
+  // Cold hot-cell renders as level 0 (░), hot cell as level 3 (█).
+  assert.equal(visible(frame[0]), '░', 'cold cell should be a dim ░ glyph');
+  assert.equal(visible(frame[1]), '█', 'hot cell should be a bright █ glyph');
+  // Each row still carries exactly one 256-color escape.
+  assert.equal(ansiIndices(frame[0]).length, 1, 'cold row should contain one color escape');
+  assert.equal(ansiIndices(frame[1]).length, 1, 'hot row should contain one color escape');
+  // ...and each color index is a valid ANSI-256 value.
+  assert.ok(ansiIndices(frame[0])[0] >= 0 && ansiIndices(frame[0])[0] <= 255, 'cold index in ANSI-256 range');
+  assert.ok(ansiIndices(frame[1])[0] >= 0 && ansiIndices(frame[1])[0] <= 255, 'hot index in ANSI-256 range');
+});
+
+test('density=true (ansi256) keeps color monotonic: hotter cell has a strictly greater ANSI index', () => {
+  const maxHeat = 255;
+  const grid = [[maxHeat * 0.3], [maxHeat * 0.8]];
+  const frame = renderFrame(grid, { maxHeat, palette: 'ansi256', density: true });
+  assert.equal(frame.length, 2);
+  const [i1] = ansiIndices(frame[0]);
+  const [i2] = ansiIndices(frame[1]);
+  assert.ok(Number.isInteger(i1) && Number.isInteger(i2), 'each hot row must contain one color escape');
+  assert.ok(i2 > i1, `hotter cell index ${i2} should be > colder cell index ${i1}`);
+});
+
+test('density=false (default) ansi256 uses █ for every hot cell (legacy behavior pinned)', () => {
+  const maxHeat = 255;
+  const grid = [[0, 5, 128, 250]];
+  const frame = renderFrame(grid, { maxHeat });
+  assert.equal(frame.length, 1);
+  const v = visible(frame[0]);
+  assert.equal(v.length, 4, 'row should have 4 visible chars');
+  for (let x = 0; x < grid[0].length; x++) {
+    if (grid[0][x] <= 0) {
+      assert.equal(v[x], ' ', 'cold cell should be a space');
+    } else {
+      assert.equal(v[x], '█', 'every hot cell should be a solid █ regardless of heat');
+    }
+  }
+});
+
+test('density=true: row length is still w visible chars (ANSI stripped) for a non-trivial grid', () => {
+  const maxHeat = 255;
+  const grid = [
+    [10, 60, 120, 200, 255],
+    [0, 40, 90, 180, 250],
+    [255, 255, 128, 64, 32],
+  ];
+  const frame = renderFrame(grid, { maxHeat, palette: 'ansi256', density: true });
+  assert.equal(frame.length, 3);
+  for (let y = 0; y < 3; y++) {
+    assert.equal(visible(frame[y]).length, 5, `row ${y} should have 5 visible chars`);
+  }
+});
+
+test('density=true with palette symbols is unchanged: no ANSI, glyphs only from " ░▒▓█"', () => {
+  const maxHeat = 255;
+  const grid = [
+    [10, 60, 120, 200, 255],
+    [0, 40, 90, 180, 250],
+    [255, 255, 128, 64, 32],
+  ];
+  const frame = renderFrame(grid, { maxHeat, palette: 'symbols', density: true });
+  assert.equal(frame.length, 3);
+  const allowed = /^[ ░▒▓█]*$/;
+  for (let y = 0; y < 3; y++) {
+    assert.ok(!frame[y].includes('\u001b'), `row ${y} must contain no ANSI escapes`);
+    assert.ok(allowed.test(frame[y]), `row ${y} contains a character outside " ░▒▓█"`);
+    assert.equal(frame[y].length, 5, `row ${y} should have 5 visible chars`);
+  }
+});
+
+test('invalid density throws TypeError (1, "true", null)', () => {
+  const grid = [[10], [250]];
+  for (const d of [1, 'true', null]) {
+    assert.throws(
+      () => renderFrame(grid, { maxHeat: 255, palette: 'ansi256', density: d }),
+      TypeError,
+      `density=${String(d)} should throw TypeError`
+    );
+  }
+});
