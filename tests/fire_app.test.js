@@ -133,3 +133,39 @@ test('frames are headless-clean: injected write receives plain rows, no terminal
       `frame ${i} must not contain terminal escapes in headless mode`);
   }
 });
+
+test('realistic defaults: inertia=0.5, turbulence=0.5, density=true', () => {
+  const { createApp } = loadMain();
+  const app = createApp({ write: () => {} });
+  assert.equal(app.inertia, 0.5, 'inertia must default to 0.5');
+  assert.equal(app.turbulence, 0.5, 'turbulence must default to 0.5');
+  assert.equal(app.density, true, 'density must default to true');
+});
+
+test('overrides are honored for inertia/turbulence/density', () => {
+  const { createApp } = loadMain();
+  const app = createApp({ inertia: 0, turbulence: 0, density: false, write: () => {} });
+  assert.equal(app.inertia, 0, 'inertia must honor the override of 0');
+  assert.equal(app.turbulence, 0, 'turbulence must honor the override of 0');
+  assert.equal(app.density, false, 'density must honor the override of false');
+});
+
+test('headless frames stay clean (row count + no escapes) under the realistic defaults', async () => {
+  const { createApp } = loadMain();
+  const h = 10;
+  const frames = [];
+  const app = createApp({ w: 20, h, fps: 60, seed: 5, write: (s) => frames.push(String(s)) });
+  assert.equal(app.w, 20, 'app.w must be 20');
+  assert.equal(app.h, h, 'app.h must be 10');
+  app.start();
+  await sleep(200);
+  app.stop();
+  assert.ok(frames.length >= 1, `expected at least 1 frame, got ${frames.length}`);
+  for (let i = 0; i < frames.length; i++) {
+    const rows = frames[i].split('\n');
+    assert.equal(rows.length, h,
+      `frame ${i} must split into exactly ${h} rows, got ${rows.length}`);
+    assert.ok(!frames[i].includes('\u001b['),
+      `frame ${i} must not contain terminal escapes in headless mode under the realistic defaults`);
+  }
+});

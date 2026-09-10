@@ -74,9 +74,12 @@ function isTTY() {
  * @param {number} [opts.fps=25]   frames per second
  * @param {number} [opts.maxHeat]  forwarded to the heat model (default: its own, 255)
  * @param {number} [opts.seed]     forwarded to the heat model (determinism in tests)
+ * @param {number}  [opts.inertia=0.5]     forwarded to the heat model (temporal smoothing)
+ * @param {number}  [opts.turbulence=0.5]  forwarded to the heat model (plume turbulence)
+ * @param {boolean} [opts.density=true]    forwarded to renderFrame (glyph-density soft edges)
  * @param {function} [opts.write]  write(string) used to emit frames
  *                                (default: process.stdout.write)
- * @returns {{w:number, h:number, fps:number, maxHeat:number, start:function, stop:function}}
+ * @returns {{w:number, h:number, fps:number, maxHeat:number, inertia:number, turbulence:number, density:boolean, start:function, stop:function}}
  */
 function createApp(opts) {
   if (!(opts !== undefined && opts !== null && typeof opts === 'object' && !Array.isArray(opts))) {
@@ -90,7 +93,14 @@ function createApp(opts) {
   let fps = opts.fps === undefined ? DEFAULT_FPS : opts.fps;
   if (typeof fps !== 'number' || !Number.isFinite(fps) || fps <= 0) fps = DEFAULT_FPS;
 
-  const modelOpts = {};
+  // Realism options with sensible defaults: the DEFAULT app renders the more
+  // realistic fire (coherent rising tongues + soft, feathered edges). Each may
+  // be overridden by the caller. They are validated by the model/renderer.
+  const inertia = opts.inertia === undefined ? 0.5 : opts.inertia;
+  const turbulence = opts.turbulence === undefined ? 0.5 : opts.turbulence;
+  const density = opts.density === undefined ? true : opts.density;
+
+  const modelOpts = { inertia, turbulence };
   if (opts.maxHeat !== undefined) modelOpts.maxHeat = opts.maxHeat;
   if (opts.seed !== undefined) modelOpts.seed = opts.seed;
 
@@ -112,6 +122,7 @@ function createApp(opts) {
     const rows = renderFrame(model.grid, {
       maxHeat: model.maxHeat,
       palette: tty ? 'ansi256' : 'symbols',
+      density,
     });
     // In TTY mode the frame is positioned at the top of the screen.
     write((tty ? HOME : '') + rows.join('\n'));
@@ -144,7 +155,7 @@ function createApp(opts) {
     }
   }
 
-  return { w, h, fps, maxHeat: model.maxHeat, start, stop };
+  return { w, h, fps, maxHeat: model.maxHeat, inertia, turbulence, density, start, stop };
 }
 
 /**

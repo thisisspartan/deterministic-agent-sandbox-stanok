@@ -42,6 +42,22 @@ mode uses), so cold hot-cells render as dim `░`/`▒` and the core as a bright
 it must be a boolean, else `renderFrame` throws `TypeError`. `t <= 0` is always a
 space.
 
+### App-level realism options (`src/main.js`)
+
+`createApp(opts)` wires the realism options through with realistic defaults, so the
+**default** app renders the more realistic fire (coherent rising tongues + soft,
+feathered edges). Each option is overridable by the caller:
+
+- `inertia` — default `0.5`, forwarded to the heat model as `modelOpts.inertia`.
+- `turbulence` — default `0.5`, forwarded to the heat model as `modelOpts.turbulence`.
+- `density` — default `true`, forwarded to the renderer as
+  `renderFrame(model.grid, { ..., density })`. It only affects `ansi256` (TTY)
+  mode; in headless `symbols` mode the renderer ignores it (which is fine and expected).
+
+The three values are also exposed on the object returned by `createApp` (alongside
+`w, h, fps, maxHeat, start, stop`), so the defaults/overrides are observable:
+`{ w, h, fps, maxHeat, inertia, turbulence, density, start, stop }`.
+
 ## Run
 
 ```sh
@@ -71,3 +87,4 @@ When `process.stdout` is not a TTY (sandbox, piped output):
 
 - `getTerminalSize()` never throws — it uses `process.stdout.columns/rows` when they are positive integers, otherwise the **80 × 24** fallback.
 - **No terminal escapes** are emitted (no alt screen, cursor, or home positioning); frames are still produced at `fps` via the injectable `write(string)` function (default `process.stdout.write`), rendered with the escape-free `symbols` palette.
+- This holds even under the new realistic defaults (`inertia=0.5`, `turbulence=0.5`, `density=true`): headless mode still uses the escape-free `symbols` palette, and the renderer ignores `density` in `symbols` mode, so frames never contain terminal escapes.
