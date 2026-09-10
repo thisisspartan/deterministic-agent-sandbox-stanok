@@ -1,0 +1,3 @@
+# Machine launcher dependencies (Stanok 2.0)
+# claude-agent-sdk — Claude Agent SDK (runs claude-code via the API).
+claude-agent-sdk==0.2.139

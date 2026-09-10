@@ -1,0 +1,67 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "local-dummy",
+    "ANTHROPIC_API_KEY": "",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "Qwen3.8-27B-MTP",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen3.8-27B-MTP",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "Qwen3.8-27B-MTP",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    "API_TIMEOUT_MS": "600000",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "123000",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "95",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "20000",
+    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
+    "CLAUDE_CODE_MAX_RETRIES": "2",
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "0",
+    "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS": "16000",
+    "MAX_MCP_OUTPUT_TOKENS": "12000",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "Qwen3.8-27B-MTP",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0"
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Grep",
+      "Glob",
+      "Bash"
+    ],
+    "deny": [
+      "WebSearch",
+      "NotebookEdit",
+      "EnterWorktree",
+      "ExitWorktree",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "ScheduleWakeup",
+      "Workflow",
+      "SendMessage",
+      "ReportFindings",
+      "Skill",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskOutput",
+      "TaskStop",
+      "TaskUpdate"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Read|Grep|Glob", "hooks": [{ "type": "command", "command": "bash hooks/read-guard.sh" }] },
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash hooks/bash-gate.sh" }] },
+      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "bash hooks/test-lock.sh" }] },
+      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "bash hooks/malware-scan.sh" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Write|Edit", "hooks": [
+          { "type": "command", "command": "bash hooks/verifier.sh" }
+      ] }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+# machine run artifacts (git clean -fdq does NOT touch them — they are outside git)
+evidence/
+.stanok-locks/
+.stanok-logs/
+*.log
+# environment and python
+.venv/
+__pycache__/
