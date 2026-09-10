@@ -51,12 +51,30 @@
       "TaskUpdate"
     ]
   },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "network": {
+      "allowedDomains": ["192.168.8.131"]
+    },
+    "filesystem": {
+      "denyWrite": [
+        "/home/hermes/skeleton-pub/stanok/.git",
+        "/home/hermes/skeleton-pub/stanok/hooks",
+        "/home/hermes/skeleton-pub/stanok/.claude/settings.stanok.json"
+      ],
+      "denyRead": [
+        "~/.ssh",
+        "~/.aws",
+        "~/.config"
+      ]
+    }
+  },
   "hooks": {
     "PreToolUse": [
       { "matcher": "Read|Grep|Glob", "hooks": [{ "type": "command", "command": "bash hooks/read-guard.sh" }] },
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash hooks/bash-gate.sh" }] },
-      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "bash hooks/test-lock.sh" }] },
-      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "bash hooks/malware-scan.sh" }] }
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash hooks/bash-gate.sh" }] }
     ],
     "PostToolUse": [
       { "matcher": "Write|Edit", "hooks": [

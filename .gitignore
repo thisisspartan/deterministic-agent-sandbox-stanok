@@ -1,8 +1,22 @@
 # machine run artifacts (git clean -fdq does NOT touch them — they are outside git)
 evidence/
-.stanok-locks/
 .stanok-logs/
 *.log
 # environment and python
 .venv/
 __pycache__/
+# native-sandbox stub targets, pre-created by sandbox-run.sh (create-if-missing).
+# They must exist so the inner bwrap binds in place instead of creating the
+# mountpoint on the read-only repo. Empty dirs (.vscode/, .idea/,
+# .claude/{skills,commands,agents}) are invisible to git and need no entry.
+/.gitconfig
+/.gitmodules
+/.bashrc
+/.bash_profile
+/.zshrc
+/.zprofile
+/.profile
+/.ripgreprc
+/.mcp.json
+/.claude/settings.json
+/.claude/settings.local.json

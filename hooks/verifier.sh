@@ -1,36 +1,22 @@
 #!/usr/bin/env bash
-# verifier.sh — PostToolUse verifier with the Red-Before-Green (TDD) state machine.
+# verifier.sh — PostToolUse hook (Write|Edit). OS-level TDD freeze (D2).
 #
-# Convention (task repo layout):  src/<mod>.js  <->  tests/<mod>.test.js
+# Replaces the .stanok-locks hash state machine. The "spec cannot be weakened"
+# invariant is now an OS fact, not a detection:
+#   - When a written test runs RED (the spec is written and failing), the test
+#     file is made read-only: chmod a-w. The model's next Write/Edit then fails
+#     at the kernel (EACCES) and it cannot undo the mode — its only shell is
+#     bash-gate -> scripts/run.sh, which cannot chmod.
+#   - The file is frozen, NOT the tests/ directory: a ticket may declare several
+#     test files, and a read-only directory would block creating the rest.
 #
-# State files in .stanok-locks/ (key = test path relative to REPO_ROOT, '/' -> '_'):
-#   <key>.red   — the test was confirmed RED; stores sha256 of the test file at that moment.
-#   <key>.lock  — the test went GREEN with an unchanged hash; the test is now frozen
-#                 (PreToolUse test-lock.sh denies any further Write|Edit of it).
+# The runner unfreezes the workspace (chmod u+w tests/) at the start of every
+# run (reset_repo), so each run's phase 1 can write tests again.
 #
-# Phases (on Write|Edit of src/*.js or tests/*.test.js, when the matching test exists):
-#   A (no .red, no .lock):
-#       green + NEW test file (absent from git HEAD)  -> VERIFY: FAIL (TAUTOLOGY)
-#       green + existing test file                    -> lock (legit extension of a working suite)
-#       red + SyntaxError                             -> VERIFY: FAIL (INVALID_RED)
-#       red + timeout (rc=124)                        -> VERIFY: FAIL (TIMEOUT)
-#       red + anything else                           -> write .red, VERIFY: RED CONFIRMED
-#   B (.red exists, no .lock):
-#       green + hash == .red                          -> mv .red .lock, VERIFY: PASS (TDD verified)
-#       green + hash != .red                          -> rm .red, VERIFY: FAIL (TAMPERING)
-#       red                                           -> VERIFY: FAIL
-#   C (.lock exists):
-#       hash != .lock                                 -> VERIFY: FAIL (TAMPERING)
-#       green                                         -> VERIFY: PASS
-#       red                                           -> VERIFY: FAIL
+# The verdict itself comes from the project's declared runner (D3):
+# scripts/run.sh is the single canonical test invocation.
 #
-# The hook CANNOT undo a Write (PostToolUse) — it only reports the verdict into the
-# model context. Hard enforcement is the final TDD gate in launcher/stanok.py
-# (tdd_gate): every test touched this session must end with a .lock; any lingering
-# .red fails the run (fail-closed).
-#
-# REPO_ROOT is DERIVED from the script's own location (<repo>/hooks/verifier.sh), so this
-# SAME script works for ANY task repo — no module name, seed or directory is hardcoded.
+# REPO_ROOT is derived from the script location (<repo>/hooks/verifier.sh).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,117 +26,41 @@ INPUT=$(cat)
 FP=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty')
 [ -z "$FP" ] && exit 0
 
-# Relative file_path is anchored to REPO_ROOT (CWD-independence).
 if [[ "$FP" != /* ]]; then FP="$REPO_ROOT/$FP"; fi
 ABS="$(realpath -m "$FP")"
 
-# Only src/*.js and tests/*.test.js are verification targets; everything else: silent.
-MOD=""
+# Only writes under tests/ are our concern; everything else is silent.
 case "$ABS" in
-  "$REPO_ROOT/src/"*.js)         MOD="$(basename "$ABS" .js)" ;;
-  "$REPO_ROOT/tests/"*.test.js)  MOD="$(basename "$ABS" .test.js)" ;;
+  "$REPO_ROOT/tests/"*) ;;
   *) exit 0 ;;
 esac
-[ -z "$MOD" ] && exit 0
+[ -f "$ABS" ] || exit 0
 
-TEST="$REPO_ROOT/tests/$MOD.test.js"
-[ -f "$TEST" ] || exit 0   # no matching test yet -> cannot verify -> silent
+RUN_SH="$REPO_ROOT/scripts/run.sh"
+[ -f "$RUN_SH" ] || exit 0
 
-LOCK_DIR="$REPO_ROOT/.stanok-locks"
-mkdir -p "$LOCK_DIR"
-REL="${TEST#"$REPO_ROOT"/}"
-KEY="${REL//\//_}"
-RED_F="$LOCK_DIR/$KEY.red"
-LOCK_F="$LOCK_DIR/$KEY.lock"
+REL="${ABS#"$REPO_ROOT"/}"
 
-hash_of() { sha256sum "$1" | awk '{print $1}'; }
-stored_hash() {
-    local file="$1"
-    if [ -f "$file" ]; then
-        awk '{print $1}' "$file" || {
-            echo "[verifier] ERROR: unreadable or corrupted lock file: $file" >&2
-            return 1
-        }
-    fi
-}
 emit() {
   jq -n --arg r "$1" '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:$r}}'
 }
-fail_block() {
-  # TAP output: first "not ok" block (test line + indented assertion lines);
-  # non-TAP output: tail with the stack. Cap at 25 lines to keep the context small.
-  if printf '%s' "$1" | grep -qE '^not ok '; then
-    printf '%s' "$1" | awk '/^not ok /{f=1} f{print} f && /^$/{exit}' | head -25
-  else
-    printf '%s' "$1" | tail -25
-  fi
+tail_block() {
+  printf '%s' "$1" | tail -25
 }
 
-# Run the test (bounded: a hung test must not hang the hook and the model turn).
-OUT="$(cd "$REPO_ROOT" && timeout 60 node "$TEST" 2>&1)"
+# Run the test through the project entrypoint (outer timeout > run.sh's own, so
+# run.sh's rc=124 is the deterministic verdict on a hung test).
+OUT="$(cd "$REPO_ROOT" && timeout 75 bash "$RUN_SH" test "$REL" 2>&1)"
 RC=$?
 
-# Is the test file new (absent from git HEAD)?
-IS_NEW=0
-if ! (cd "$REPO_ROOT" && git ls-files --error-unmatch -- "$REL" >/dev/null 2>&1); then
-  IS_NEW=1
-fi
+# rc=2: the runner refused the path (not a test in its terms) -> not our concern.
+[ "$RC" -eq 2 ] && exit 0
 
-CUR_HASH="$(hash_of "$TEST")"
+# GREEN -> the implementation already exists; nothing to freeze, stay silent.
+[ "$RC" -eq 0 ] && exit 0
 
-if [ -f "$LOCK_F" ]; then
-  # ---- Phase C: locked (frozen after the TDD cycle) ----
-  STORED="$(stored_hash "$LOCK_F")" || { emit "VERIFY: FAIL (LOCK-CORRUPT: cannot read $LOCK_F)"; exit 1; }
-  if [ -n "$STORED" ] && [ "$STORED" != "$CUR_HASH" ]; then
-    emit "VERIFY: FAIL (TAMPERING: test $REL changed after lock)"
-    exit 1
-  fi
-  if [ "$RC" -eq 0 ]; then
-    emit "VERIFY: PASS reason: node $REL rc=0 (locked test still green)"
-    exit 0
-  fi
-  emit "VERIFY: FAIL reason: node $REL rc=$RC $(fail_block "$OUT")"
-  exit 1
-elif [ -f "$RED_F" ]; then
-  # ---- Phase B: red confirmed, waiting for green ----
-  if [ "$RC" -eq 0 ]; then
-    STORED="$(stored_hash "$RED_F")" || { emit "VERIFY: FAIL (RED-CORRUPT: cannot read $RED_F)"; exit 1; }
-    if [ -n "$STORED" ] && [ "$STORED" = "$CUR_HASH" ]; then
-      mv "$RED_F" "$LOCK_F"
-      emit "VERIFY: PASS (TDD verified: red->green, test file unchanged)"
-      exit 0
-    fi
-    rm -f "$RED_F"
-    emit "VERIFY: FAIL (TAMPERING: test $REL changed between RED and GREEN)"
-    exit 1
-  fi
-  emit "VERIFY: FAIL reason: node $REL rc=$RC $(fail_block "$OUT") (still red — implement src/)"
-  exit 1
-else
-  # ---- Phase A: fresh test, no state ----
-  if [ "$RC" -eq 0 ]; then
-    if [ "$IS_NEW" -eq 1 ]; then
-      emit "VERIFY: FAIL (TAUTOLOGY: new test $REL passed without a RED phase — write a failing test first)"
-      exit 1
-    fi
-    # Goodhart guard: never lock an empty or assertion-less test file.
-    if [ ! -s "$TEST" ] || ! grep -qE 'assert|test\(' "$TEST"; then
-      emit "VERIFY: FAIL (NO ASSERTIONS: test $REL is empty or has no assertions — cannot lock)"
-      exit 1
-    fi
-    printf '%s  %s\n' "$CUR_HASH" "$REL" > "$LOCK_F"
-    emit "VERIFY: PASS reason: node $REL rc=0 (existing suite extended, locked)"
-    exit 0
-  fi
-  if [ "$RC" -eq 124 ]; then
-    emit "VERIFY: FAIL (TIMEOUT: test $REL hung > 60s)"
-    exit 1
-  fi
-  if printf '%s' "$OUT" | grep -q 'SyntaxError'; then
-    emit "VERIFY: FAIL (INVALID_RED: SyntaxError in $REL — fix the test syntax)"
-    exit 1
-  fi
-  printf '%s  %s\n' "$CUR_HASH" "$REL" > "$RED_F"
-  emit "VERIFY: RED CONFIRMED ($REL). Implement src/ to make it GREEN. The test hash is now frozen."
-  exit 0
-fi
+# RED (including rc=124 timeout): the spec is written and failing -> freeze it.
+chmod a-w "$ABS" 2>/dev/null || true
+emit "VERIFY: RED CONFIRMED ($REL rc=$RC; test frozen read-only — the spec cannot be weakened). Implement src/ to make it GREEN.
+$(tail_block "$OUT")"
+exit 0
