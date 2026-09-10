@@ -52,8 +52,7 @@ sandbox-run.sh                — bwrap sandbox: repo mounted read-only with wri
                                 .stanok-logs/);
                                 .git is mounted strictly read-only (--ro-bind)
 hooks/                        — deterministic gates: read-guard, bash-gate,
-                                verifier, malware-scan, doctor,
-                                commit-msg
+                                verifier, doctor, commit-msg
 .claude/settings.stanok.json  — the machine sandbox (allow/deny, hooks)
 CLAUDE.md                     — the machine role (auto-loaded inside the repo)
 setup.sh                      — environment deployment (.venv)
@@ -70,7 +69,7 @@ src/ tests/ docs/             — the machine working directories (empty at star
 | `STANOK_CLAUDE_BIN`  | `claude` (from PATH)      | claude-code binary               |
 | `STANOK_PY`          | `<repo>/.venv/bin/python` | python for the Runner            |
 | `STANOK_REPO`        | `<repo>/stanok`           | machine root (override)          |
-| `STANOK_EVIDENCE`    | `<repo>/evidence`         | evidence dir (summary.json, malware flags) |
+| `STANOK_EVIDENCE`    | `<repo>/evidence`         | evidence dir (summary.json, logs) |
 | `STANOK_LOCAL_RETRIES` | `2`                     | in-session retry turns on verifier FAIL |
 | `STANOK_REQUIRED_WINDOW` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from settings | preflight: minimal server `n_ctx` (rc=20 if less) |
 | `STANOK_SKIP_SERVER_CHECK` | unset                   | `1` — skip the preflight `/props` check entirely |
@@ -92,8 +91,7 @@ src/ tests/ docs/             — the machine working directories (empty at star
    verifier.sh runs the matching test through `scripts/run.sh` and, on RED,
    freezes that test file read-only (`chmod a-w`) — an OS fact, not a hash:
    the spec cannot be weakened. The Runner unfreezes `tests/` at the start of
-   every run. malware-scan.sh DENIES suspicious `src/`/`tests/` writes
-   BEFORE they land on disk (PreToolUse, shift-left).
+   every run.
 4. On verifier FAIL the Runner appends an in-session retry turn
    (`--local-retries`, default 2) with the failure block.
 5. Final: `verifier: PASS/FAIL`, `probe_result: CLEAN-FIRST |

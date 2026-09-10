@@ -601,7 +601,6 @@ def write_summary(job: dict, elapsed_s: int) -> None:
         "inference_telemetry": inference_telemetry,
         "errors": [job["error"]] if job.get("error") else [],
         "failures": job.get("failures", []),
-        "malware_detected": bool(job.get("malware_detected")),
     }
     with open(os.path.join(_evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)

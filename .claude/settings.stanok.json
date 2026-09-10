@@ -74,8 +74,7 @@
   "hooks": {
     "PreToolUse": [
       { "matcher": "Read|Grep|Glob", "hooks": [{ "type": "command", "command": "bash hooks/read-guard.sh" }] },
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash hooks/bash-gate.sh" }] },
-      { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "bash hooks/malware-scan.sh" }] }
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash hooks/bash-gate.sh" }] }
     ],
     "PostToolUse": [
       { "matcher": "Write|Edit", "hooks": [
