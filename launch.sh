@@ -35,7 +35,7 @@ if [ "$cmd" = "run" ]; then
 fi
 
 if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 [run] <ticket> <label> [--background] [--local-retries N] [--direct] [-- extra...]" >&2
+    echo "Usage: $0 [run] <ticket> <label> [--background] [--local-retries N] [--direct]" >&2
     echo "              $0 status <label>" >&2
     echo "              $0 stop <label>" >&2
     echo "              $0 watch <label> [--follow]" >&2

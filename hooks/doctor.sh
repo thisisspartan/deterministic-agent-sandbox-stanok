@@ -22,7 +22,8 @@ chk "settings.stanok.json exists"     test -f "$REPO_ROOT/.claude/settings.stano
 chk "settings.stanok.json valid JSON" python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$REPO_ROOT/.claude/settings.stanok.json"
 chk "PreToolUse hook present"         grep -q '"PreToolUse"' "$REPO_ROOT/.claude/settings.stanok.json"
 chk "commit-msg executable"           test -x "$REPO_ROOT/hooks/commit-msg"
-chk "commit-msg .git symlink"         test -L "$REPO_ROOT/.git/hooks/commit-msg"   # FINDING-5: a broken symlink disables the TASK-ID gate
+HOOKS_DIR="$(git -C "$REPO_ROOT" rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+chk "commit-msg hook"                 test -L "$REPO_ROOT/$HOOKS_DIR/commit-msg"   # FINDING-5: a broken symlink disables the TASK-ID gate
 chk "CLAUDE.md exists"                test -f "$REPO_ROOT/CLAUDE.md"
 chk "write-path src/tests/docs"       test -d "$REPO_ROOT/src" -a -d "$REPO_ROOT/tests" -a -d "$REPO_ROOT/docs"
 chk "git repo initialized"            test -d "$REPO_ROOT/.git"

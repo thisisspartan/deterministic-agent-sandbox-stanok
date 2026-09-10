@@ -18,10 +18,13 @@ echo "--- installing dependencies ---"
 .venv/bin/pip install -r requirements.txt
 
 echo "--- commit-msg hook (the machine's TASK-ID gate) ---"
-if [[ ! -L ".git/hooks/commit-msg" ]]; then
-    mkdir -p .git/hooks
-    ln -sf ../../hooks/commit-msg .git/hooks/commit-msg
-    echo "  created .git/hooks/commit-msg -> ../../hooks/commit-msg"
+# git-path: works in a plain repo (.git dir) AND in a submodule (.git file ->
+# .git/modules/<name>/hooks).
+HOOKS_DIR="$(git rev-parse --git-path hooks)"
+mkdir -p "$HOOKS_DIR"
+if [[ ! -L "$HOOKS_DIR/commit-msg" ]]; then
+    ln -srf "$DIR/hooks/commit-msg" "$HOOKS_DIR/commit-msg"
+    echo "  created $HOOKS_DIR/commit-msg -> $DIR/hooks/commit-msg"
 else
     echo "  already installed"
 fi

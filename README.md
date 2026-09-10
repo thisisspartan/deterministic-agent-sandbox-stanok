@@ -20,7 +20,7 @@ pluggable git submodule for any project.
 
 ```bash
 ./setup.sh                                   # .venv + claude-agent-sdk
-DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # expected: 13 ok, 0 fail
+DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # expected: 14 ok, 0 fail
 ```
 
 ## Running
@@ -53,7 +53,7 @@ sandbox-run.sh                — bwrap sandbox: repo mounted read-only with wri
                                 .git/hooks is a private tmpfs, .git/config read-only
 hooks/                        — deterministic gates: read-guard, bash-gate,
                                 test-lock, verifier, malware-scan, doctor,
-                                domain-allowlist, commit-msg
+                                commit-msg
 .claude/settings.stanok.json  — the machine sandbox (allow/deny, hooks)
 CLAUDE.md                     — the machine role (auto-loaded inside the repo)
 setup.sh                      — environment deployment (.venv)
@@ -81,8 +81,8 @@ src/ tests/ docs/             — the machine working directories (empty at star
    (rc=13), label-guard (rc=15), ROLE-LEAK (rc=24), lock (rc=21),
    dirty-tree (rc=22, uncommitted changes — start forbidden),
    pre-flight `/props` of the server (rc=20; fail-closed also when the
-   server `n_ctx` is below the required window). Only on a clean tree it
-   normalizes the repo (`git reset --hard` + `git clean -fdq`).
+   server `n_ctx` is below the required window). The dirty-tree gate is
+   fail-closed: no destructive reset/clean — the operator commits before launch.
 2. The Runner opens ONE Claude session (cwd = repo) inside the bwrap sandbox
    (`sandbox-run.sh`): settings from `.claude/settings.stanok.json`, tools
    Read/Write/Edit/Grep/Glob/Bash — Bash restricted to `bash scripts/run.sh …`
@@ -92,8 +92,8 @@ src/ tests/ docs/             — the machine working directories (empty at star
    verifier.sh runs the matching test and reports PASS/FAIL; test-lock.sh
    locks a test after its first real run (Goodhart guard: only non-empty
    tests with real assertions lock) — a locked test cannot be rewritten
-   to make it pass. malware-scan.sh flags suspicious `src/` writes;
-   pending flags abort the run (rc=1, no retries).
+   to make it pass. malware-scan.sh DENIES suspicious `src/`/`tests/` writes
+   BEFORE they land on disk (PreToolUse, shift-left).
 4. On verifier FAIL the Runner appends an in-session retry turn
    (`--local-retries`, default 2) with the failure block.
 5. Final: `verifier: PASS/FAIL`, `probe_result: CLEAN-FIRST |

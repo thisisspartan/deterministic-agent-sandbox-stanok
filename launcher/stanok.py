@@ -878,7 +878,6 @@ def main() -> int:
     r = sub.add_parser("run")
     r.add_argument("ticket")
     r.add_argument("label")
-    r.add_argument("--background", action="store_true")
     r.add_argument("--direct", action="store_true")
     r.add_argument("--local-retries", type=int, default=DEFAULT_RETRIES)
 
@@ -953,18 +952,8 @@ def main() -> int:
         if dirty_tree_gate():
             return early_abort(22, "ERROR: the machine repo contains uncommitted changes (rc=22)")
 
-        if args.background:
-            launch_log = os.path.join(LOG_DIR, f"{args.label}.launch.log")
-            cmd = [sys.executable, os.path.abspath(__file__), "run", args.ticket_path, args.label,
-                   "--local-retries", str(args.local_retries)]
-            if args.direct:
-                cmd.append("--direct")
-            with open(launch_log, "ab") as fd:
-                subprocess.Popen(cmd, stdout=fd, stderr=subprocess.STDOUT,
-                                 stdin=subprocess.DEVNULL, start_new_session=True)
-            print(f"Machine launched in the background. Log: {launch_log}")
-            return 0
-
+        # Background mode is owned by launch.sh (host-side nohup): inside the bwrap
+        # namespace a self-re-spawn would bypass the lock and the host gates.
         lock_path = os.path.join(LOG_DIR, f"stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock")
         lf = open(lock_path, "w")
         try:
