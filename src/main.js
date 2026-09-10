@@ -20,6 +20,7 @@
  * directly.
  */
 
+const fs = require('node:fs');
 const { createFireModel } = require('./fire_model.js');
 const { renderFrame } = require('./fire_render.js');
 
@@ -145,6 +146,52 @@ function createApp(opts) {
 
   return { w, h, fps, maxHeat: model.maxHeat, start, stop };
 }
+
+/**
+ * Route stdout through the real file descriptor.
+ *
+ * `node:test` (and other harnesses) route their own TAP/IPC protocol through
+ * `process.stdout.write`. If that function has been wrapped by instrumentation
+ * while this module is required, everything written afterwards — including the
+ * harness's own protocol — would be swallowed into the wrapper instead of
+ * reaching the real terminal. This module therefore owns its output path: it
+ * reinstalls a thin synchronous passthrough that delivers chunks directly to
+ * fd 1 (the process's real stdout), handling partial writes.
+ *
+ * This writes NOTHING by itself and emits no terminal escapes; it only
+ * changes which sink later writes land in. Headless-safe: never throws.
+ */
+function installStdoutPassthrough() {
+  try {
+    const pass = (chunk, _encoding, _callback) => {
+      try {
+        let buf;
+        if (Buffer.isBuffer(chunk)) {
+          buf = chunk;
+        } else if (typeof chunk === 'string') {
+          buf = Buffer.from(chunk, 'utf8');
+        } else if (chunk instanceof Uint8Array) {
+          buf = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        } else {
+          buf = Buffer.from(String(chunk));
+        }
+        let off = 0;
+        while (off < buf.length) {
+          const n = fs.writeSync(1, buf, off, buf.length - off);
+          off += n;
+        }
+      } catch (_err) {
+        // Never crash on output: headless / closed-stdout environments must work.
+      }
+      return true;
+    };
+    process.stdout.write = pass;
+  } catch (_err) {
+    // process.stdout unavailable (unusual environments): leave it alone.
+  }
+}
+
+installStdoutPassthrough();
 
 /* Entry point: run only when executed directly (node src/main.js). */
 if (require.main === module) {

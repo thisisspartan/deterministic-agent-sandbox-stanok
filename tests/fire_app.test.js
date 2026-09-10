@@ -105,6 +105,21 @@ test('stop() is idempotent: calling it twice (and on a never-started app) does n
   assert.doesNotThrow(() => idle.stop(), 'stop() on a never-started app must not throw');
 });
 
+test('require-time cleanliness in a separate child process: stdout is empty', () => {
+  const path = require('node:path');
+  const cp = require('node:child_process');
+  const mainPath = path.join(__dirname, '..', 'src', 'main.js');
+  const out = cp.execFileSync(
+    process.execPath,
+    [
+      '-e',
+      `require(${JSON.stringify(mainPath)}); setTimeout(() => process.exit(0), 300);`,
+    ],
+    { encoding: 'utf8' }
+  );
+  assert.equal(out, '', `child require of src/main.js must write nothing to stdout, got ${JSON.stringify(out)}`);
+});
+
 test('frames are headless-clean: injected write receives plain rows, no terminal escapes', async () => {
   const { createApp } = loadMain();
   const frames = [];

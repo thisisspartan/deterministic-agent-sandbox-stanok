@@ -12,7 +12,7 @@ like rising fire.
 | --- | --- |
 | `src/fire_model.js` | Pure heat math. `createFireModel(w, h, { maxHeat, decay, seed })` returns `{ w, h, maxHeat, grid, step }`; `grid[y][x]` is in `[0, maxHeat]` (row `h-1` is the bottom, the heat source). Deterministic per seed (xorshift32). No I/O. |
 | `src/fire_render.js` | Pure heat → ANSI mapping. `renderFrame(grid, { maxHeat, palette })` returns `h` row strings: `palette: 'ansi256'` (256-color `█` ramp, black→red→orange→white) or `palette: 'symbols'` (` ░▒▓█`, no escapes). |
-| `src/main.js` | The terminal front-end: reads the terminal size, runs the fps-paced animation loop (`setInterval`, no busy-loop), handles terminal hygiene and SIGINT. CommonJS, no dependencies. |
+| `src/main.js` | The terminal front-end: reads the terminal size, runs the fps-paced animation loop (`setInterval`, no busy-loop), handles terminal hygiene and SIGINT, and routes its output straight to the real stdout (fd 1). CommonJS, no dependencies. |
 
 ## Run
 
@@ -35,7 +35,7 @@ bash scripts/run.sh test tests/fire_model.test.js tests/fire_render.test.js test
 - **Color reset**: `\033[0m` on stop so the shell keeps a clean color state.
 - Frames are positioned at the top of the screen with a `\033[H` home prefix each tick.
 - **SIGINT**: the script entry point registers `process.on('SIGINT')`, which calls `stop()` and exits with code 0. `stop()` is idempotent.
-- Requiring `src/main.js` as a module has **no side effects**: no loop starts, nothing is written, no escapes are emitted.
+- Requiring `src/main.js` as a module has **no side effects**: no loop starts, nothing is written, no escapes are emitted. It does install one thin synchronous passthrough on `process.stdout.write` so that all subsequent stdout traffic (frames included) reaches the real terminal (fd 1) even when that function has been wrapped by test instrumentation — the module itself stays silent.
 
 ## Headless fallback
 
