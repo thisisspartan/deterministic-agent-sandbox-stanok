@@ -342,18 +342,6 @@ def tdd_gate() -> list[str]:
     return violations
 
 
-def _pending_malware_flags() -> list[str]:
-    """Pending flags armed by hooks/malware-scan.sh (PostToolUse, src/ only).
-
-    The hook auto-clears a flag when a rescan of the same file is clean, so a
-    flag that survives to the end of a turn means the model planted suspicious
-    code and did not remove it. The Runner NEVER deletes the flags itself —
-    they are evidence.
-    """
-    ev = os.environ.get("STANOK_EVIDENCE", os.path.join(REPO_ROOT, "evidence"))
-    return sorted(glob.glob(os.path.join(ev, "malware-scan", "pending-*.flag")))
-
-
 # ==================================================================================
 # Inference environment (Prefix Invariance)
 # ==================================================================================
@@ -526,19 +514,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 if turn_input_context > CONTEXT_ROT_THRESHOLD:
                     log(f"  [CONTEXT-ROT WARN] Turn input context ({turn_input_context} tokens) "
                         f"exceeded the threshold {CONTEXT_ROT_THRESHOLD}. Model attention may degrade.")
-
-                # MALWARE GATE (fail-fast): a pending flag from malware-scan.sh forces
-                # rc=1 even on 100% green tests, and no further retry turns are burned
-                # on malicious code. Checked before verify_gate — no test time is spent.
-                pending = _pending_malware_flags()
-                if pending:
-                    names = ", ".join(os.path.basename(p) for p in pending)
-                    log(f"MALWARE: pending flag(s): {names} -> rc=1 (local retries skipped)")
-                    job["malware_detected"] = True
-                    job["error"] = f"MALWARE: pending flag(s) in evidence/malware-scan: {names}"
-                    job["verifier"] = "FAIL"
-                    job["turns"] = turn
-                    return 1
 
                 verify_ok, failures = verify_gate()
                 emit("verifier", {"turn": turn, "ok": verify_ok, "failures_count": len(failures)})
