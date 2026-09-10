@@ -51,6 +51,26 @@
       "TaskUpdate"
     ]
   },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "network": {
+      "allowedDomains": ["192.168.8.131"]
+    },
+    "filesystem": {
+      "denyWrite": [
+        "/home/hermes/darkcast/stanok/.git",
+        "/home/hermes/darkcast/stanok/hooks",
+        "/home/hermes/darkcast/stanok/.claude/settings.stanok.json"
+      ],
+      "denyRead": [
+        "~/.ssh",
+        "~/.aws",
+        "~/.config"
+      ]
+    }
+  },
   "hooks": {
     "PreToolUse": [
       { "matcher": "Read|Grep|Glob", "hooks": [{ "type": "command", "command": "bash hooks/read-guard.sh" }] },
