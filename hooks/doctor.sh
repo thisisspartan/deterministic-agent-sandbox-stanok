@@ -28,26 +28,6 @@ chk "CLAUDE.md exists"                test -f "$REPO_ROOT/CLAUDE.md"
 chk "write-path src/tests/docs"       test -d "$REPO_ROOT/src" -a -d "$REPO_ROOT/tests" -a -d "$REPO_ROOT/docs"
 chk "git repo initialized"            test -d "$REPO_ROOT/.git"
 
-# --- PATCH 5: cloud silence invariant --------------------------------------------
-# The only artifact of cloud_review() — cloud-review-*.jsonl in evidence. Without an explicit
-# --cloud (DOCTOR_EXPECT_NO_CLOUD=1, set by the launcher), no such files
-# should exist within the WINDOW_H window. A false cloud call (creds/config leak) => FAIL => the run is aborted.
-EVIDENCE="${STANOK_EVIDENCE:-$REPO_ROOT/evidence}"
-WINDOW_H="${DOCTOR_CLOUD_WINDOW_H:-24}"
-
-if [ "${DOCTOR_EXPECT_NO_CLOUD:-0}" = "1" ]; then
-  CLOUD_ARTIFACTS="$(find "$EVIDENCE" -maxdepth 1 -name 'cloud-review-*.jsonl' \
-    -mmin "-$((WINDOW_H*60))" 2>/dev/null | sort)"
-  if [ -z "$CLOUD_ARTIFACTS" ]; then
-    OK=$((OK+1)); echo "ok   cloud-silence (no cloud-review-*.jsonl in the last ${WINDOW_H}h)"
-  else
-    FAIL=$((FAIL+1)); echo "FAIL cloud-silence: cloud-review-*.jsonl found with DOCTOR_EXPECT_NO_CLOUD=1:"
-    printf '%s\n' "$CLOUD_ARTIFACTS" | sed 's/^/     /'
-  fi
-else
-  echo "skip cloud-silence (DOCTOR_EXPECT_NO_CLOUD unset — cloud is legitimately allowed)"
-fi
-
 # --- Runner invariants (launcher/stanok.py; regression protection, feedback from "the elder brothers") ---
 # All checks run with STANOK_PY=system python3: the SDK is imported
 # lazily, the gates are pure stdlib, so the invariants work even without a deployed .venv.

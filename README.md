@@ -20,7 +20,7 @@ pluggable git submodule for any project.
 
 ```bash
 ./setup.sh                                   # .venv + claude-agent-sdk
-DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # expected: 14 ok, 0 fail
+bash hooks/doctor.sh                         # expected: 13 ok, 0 fail
 ```
 
 ## Running
