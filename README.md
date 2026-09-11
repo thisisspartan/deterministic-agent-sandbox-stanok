@@ -34,7 +34,6 @@ bash hooks/doctor.sh                         # expected: 13 ok, 0 fail
 # a nonexistent ticket fails immediately (rc=13) instead of spawning a dead detach.
 ./launch.sh status <label>      # JSON: running/done/interrupted/missing
 ./launch.sh stop <label>        # interrupt the run (TERM by pid from .running)
-./launch.sh watch <label>       # live view of events.jsonl + stdout
 ```
 
 - `--background` — detach to the background (observe: `tail -f /tmp/stanok-logs/<label>.launch.log`)
@@ -44,7 +43,7 @@ bash hooks/doctor.sh                         # expected: 13 ok, 0 fail
 ## Structure
 
 ```
-launcher/stanok.py            — THE single Runner (CLI run/status/stop/watch,
+launcher/stanok.py            — THE single Runner (CLI run/status/stop,
                                 gates, Job/Attempt, typed summary.json)
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 sandbox-run.sh                — bwrap sandbox: repo mounted read-only with writable

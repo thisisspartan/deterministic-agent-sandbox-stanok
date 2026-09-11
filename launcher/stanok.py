@@ -59,7 +59,6 @@ CURATED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 _stdout_log_f = None
-_events_path = None
 _marker_path = None
 _evidence_dir = None
 _live_dir = None
@@ -77,17 +76,6 @@ def log(msg: str = "") -> None:
             _stdout_log_f.flush()
         except (OSError, ValueError):
             pass
-
-
-def emit(etype: str, data: dict) -> None:
-    if _events_path is None:
-        return
-    try:
-        with open(_events_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": time.time(), "type": etype, "data": data},
-                               ensure_ascii=False, default=str) + "\n")
-    except OSError:
-        pass
 
 
 def _safe_json_default(obj):
@@ -378,7 +366,6 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
             sid = msg.data.get("session_id")
         if sid and not job.get("session_id"):
             job["session_id"] = str(sid)
-            emit("session.resolved", {"session_id": str(sid), "run_id": local_run_id})
 
         u = _extract_usage(msg)
         if u:
@@ -411,7 +398,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
     max_turns = 1 + max_retries
     current_prompt = ticket_prompt
     log(f"SESSION START (run_id: {local_run_id}) | Turn limit: {max_turns} | model={LOCAL_MODEL}")
-    emit("session.start", {"run_id": local_run_id, "max_turns": max_turns})
 
     total_tokens = {
         "input_tokens": 0,
@@ -426,7 +412,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         async with ClaudeSDKClient(options=options) as client:
             for turn in range(1, max_turns + 1):
                 log(f"\n>>> Turn {turn}/{max_turns} {'(Fixing errors in src/)' if turn > 1 else '(Ticket start)'} <<<")
-                emit("turn.start", {"turn": turn})
 
                 t0 = time.time()
                 turn_task = asyncio.create_task(
@@ -490,9 +475,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     f"Turn tokens: in={inp}, out={out}, cache_hit={c_read} ({turn_hit_rate:.1f}%) | "
                     f"live window: {live_context} | "
                     f"Session cache_hit: {session_hit_rate:.1f}%")
-                emit("turn.tokens", {"turn": turn, "input": inp, "output": out, "cache_read": c_read,
-                                     "live_context": live_context,
-                                     "turn_hit_rate": turn_hit_rate, "session_hit_rate": session_hit_rate})
 
                 job.setdefault("turn_telemetry", []).append({
                     "turn": turn,
@@ -511,7 +493,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                         f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
 
                 verify_ok, failures = verify_gate()
-                emit("verifier", {"turn": turn, "ok": verify_ok, "failures_count": len(failures)})
 
                 if verify_ok:
                     log("VERIFIER: PASS — All tests passed successfully!")
@@ -626,7 +607,6 @@ def write_summary(job: dict, elapsed_s: int) -> None:
     }
     with open(os.path.join(_evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    emit("summary", summary)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -642,7 +622,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def cmd_run(args) -> int:
-    global _stdout_log_f, _events_path, _marker_path, _evidence_dir, _live_dir
+    global _stdout_log_f, _marker_path, _evidence_dir, _live_dir
 
     try:
         if os.getpgid(0) != os.getpid():
@@ -655,7 +635,6 @@ def cmd_run(args) -> int:
     os.makedirs(_live_dir, exist_ok=True)
 
     _stdout_log_f = open(os.path.join(_evidence_dir, "launcher.stdout.log"), "a", encoding="utf-8")
-    _events_path = os.path.join(_live_dir, "events.jsonl")
     _marker_path = os.path.join(_evidence_dir, ".running")
 
     start_ts = int(time.time())
@@ -682,8 +661,6 @@ def cmd_run(args) -> int:
     _install_signal_handlers()
 
     job = {"label": args.label, "ticket": args.ticket}
-    emit("job.start", {"label": args.label, "pid": recorded_pid})
-
     log(f"STANOK 4.2 RUNNER | Repo: {REPO_ROOT} | Label: {args.label}")
     if args.direct:
         log("--direct MODE: the ticket path is resolved relative to the repository")
@@ -731,7 +708,7 @@ def cmd_run(args) -> int:
 
 
 # ==================================================================================
-# Control utilities (status, stop, watch)
+# Control utilities (status, stop)
 # ==================================================================================
 def cmd_status(label: str) -> int:
     evidence_dir, _ = label_paths(label)
@@ -799,26 +776,6 @@ def cmd_stop(label: str) -> int:
     return 0
 
 
-def cmd_watch(label: str, follow: bool) -> int:
-    _, live_dir = label_paths(label)
-    events = os.path.join(live_dir, "events.jsonl")
-    offset = 0
-    try:
-        while True:
-            if os.path.exists(events):
-                with open(events, encoding="utf-8") as f:
-                    f.seek(offset)
-                    for line in f:
-                        print(line.strip(), flush=True)
-                    offset = f.tell()
-            if not follow:
-                break
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
-    return 0
-
-
 # ==================================================================================
 # CLI entry point
 # ==================================================================================
@@ -855,10 +812,6 @@ def main() -> int:
     st = sub.add_parser("stop")
     st.add_argument("label")
 
-    w = sub.add_parser("watch")
-    w.add_argument("label")
-    w.add_argument("--follow", action="store_true")
-
     # Single-source cleanliness gate for launch.sh (host side). Exit 22 on a
     # dirty REPO_ROOT, 0 when clean — no side effects.
     sub.add_parser("check-dirty")
@@ -871,8 +824,6 @@ def main() -> int:
         return cmd_status(args.label)
     if args.cmd == "stop":
         return cmd_stop(args.label)
-    if args.cmd == "watch":
-        return cmd_watch(args.label, args.follow)
 
     if args.cmd == "run":
         evidence_dir, _ = label_paths(args.label)

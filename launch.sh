@@ -26,7 +26,7 @@ fi
 cmd="${1:-}"
 
 # Status, stop, and log commands
-if [ "$cmd" = "status" ] || [ "$cmd" = "stop" ] || [ "$cmd" = "watch" ]; then
+if [ "$cmd" = "status" ] || [ "$cmd" = "stop" ]; then
     exec "$PY" "$STANOK_PY" "$@"
 fi
 
@@ -38,7 +38,6 @@ if [ "$#" -lt 2 ]; then
     echo "Usage: $0 [run] <ticket> <label> [--background] [--local-retries N] [--direct]" >&2
     echo "              $0 status <label>" >&2
     echo "              $0 stop <label>" >&2
-    echo "              $0 watch <label> [--follow]" >&2
     exit 1
 fi
 
