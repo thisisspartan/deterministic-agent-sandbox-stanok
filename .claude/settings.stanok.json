@@ -60,9 +60,9 @@
     },
     "filesystem": {
       "denyWrite": [
-        "/home/hermes/skeleton-pub/stanok/.git",
-        "/home/hermes/skeleton-pub/stanok/hooks",
-        "/home/hermes/skeleton-pub/stanok/.claude/settings.stanok.json"
+        "./.git",
+        "./hooks",
+        "./.claude/settings.stanok.json"
       ],
       "denyRead": [
         "~/.ssh",
