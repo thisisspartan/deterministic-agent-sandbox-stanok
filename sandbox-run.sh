@@ -91,9 +91,9 @@ fi
 #    .stanok-logs/).
 #    .git is READ-ONLY (SEC-01): the model cannot commit, plant hooks, or rewrite
 #    git state from inside the sandbox. No git writes happen anywhere: launch.sh
-#    fail-closed gates a dirty tree on the host (rc=22) BEFORE entering the
-#    sandbox, and the in-sandbox reset_repo() only verifies cleanliness
-#    (read-only) + unfreezes tests/ for the new run.
+#    fail-closed gates a dirty tree on the host (rc=22, via `stanok.py
+#    check-dirty`) BEFORE entering the sandbox, and the in-sandbox
+#    prepare_workspace() only preps the writable dirs + unfreezes tests/.
 #    The carve-out directories must exist on the host before bwrap runs
 #    (bwrap fails on a missing bind source).
 mkdir -p "$REPO_ROOT/src" "$REPO_ROOT/tests" "$REPO_ROOT/docs" \

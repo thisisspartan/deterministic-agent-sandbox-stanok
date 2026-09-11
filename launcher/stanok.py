@@ -199,22 +199,11 @@ def preflight_server() -> bool:
     return True
 
 
-def reset_repo() -> int:
+def prepare_workspace() -> int:
     # SEC-01: .git is read-only inside the bwrap sandbox — NO git writes here.
-    # The tree must already be clean (host-side fail-closed gate in launch.sh,
-    # rc=22). This is a read-only verification + workspace prep.
-    try:
-        st = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
-                            capture_output=True, text=True)
-        if st.returncode != 0:
-            log(f"ERROR: git status failed: {(st.stderr or '').strip()}")
-            return 14
-        if st.stdout.strip():
-            log("ERROR: tree dirty (host-side gate did not run) (rc=14)")
-            return 14
-    except OSError as e:
-        log(f"ERROR: repo check failed: {e}")
-        return 14
+    # The cleanliness gate is dirty_tree_gate() (single source, called by main()
+    # rc=22 and by launch.sh via `check-dirty`). This function only prepares the
+    # writable workspace.
     try:
         for d in ("src", "tests", "docs"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
@@ -675,9 +664,9 @@ def cmd_run(args) -> int:
             except OSError: pass
         return 20
 
-    if reset_repo() != 0:
+    if prepare_workspace() != 0:
         job["rc"] = 14
-        job["error"] = "git reset/clean error"
+        job["error"] = "workspace prep error"
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
@@ -837,8 +826,14 @@ def main() -> int:
     w.add_argument("label")
     w.add_argument("--follow", action="store_true")
 
+    # Single-source cleanliness gate for launch.sh (host side). Exit 22 on a
+    # dirty REPO_ROOT, 0 when clean — no side effects.
+    sub.add_parser("check-dirty")
+
     args = p.parse_args()
 
+    if args.cmd == "check-dirty":
+        return 22 if dirty_tree_gate() else 0
     if args.cmd == "status":
         return cmd_status(args.label)
     if args.cmd == "stop":

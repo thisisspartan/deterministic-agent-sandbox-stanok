@@ -104,7 +104,8 @@ fi
 # possible there. FAIL-CLOSED (rc=22): the tree must be clean BEFORE launch;
 # the supervisor commits machine artifacts / operator state before each run.
 # Never reset/clean here — that would silently destroy uncommitted work.
-if [ -n "$(git -C "$STANOK_ROOT" status --porcelain)" ]; then
+# Single source of truth: stanok.py `check-dirty` (exits 22 when dirty).
+if ! "$PY" "$STANOK_PY" check-dirty; then
     echo "ERROR: dirty tree in $STANOK_ROOT (rc=22) — commit or clean before launch" >&2
     exit 22
 fi

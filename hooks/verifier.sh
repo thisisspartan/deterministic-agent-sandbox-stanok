@@ -11,7 +11,7 @@
 #     test files, and a read-only directory would block creating the rest.
 #
 # The runner unfreezes the workspace (chmod u+w tests/) at the start of every
-# run (reset_repo), so each run's phase 1 can write tests again.
+# run (prepare_workspace), so each run's phase 1 can write tests again.
 #
 # The verdict itself comes from the project's declared runner (D3):
 # scripts/run.sh is the single canonical test invocation.
