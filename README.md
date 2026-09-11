@@ -65,7 +65,6 @@ src/ tests/ docs/             — the machine working directories (empty at star
 |----------------------|---------------------------|----------------------------------|
 | `STANOK_SERVER_URL`  | `http://127.0.0.1:8080`   | llama-server                     |
 | `STANOK_MODEL`       | `Qwen3.8-27B-MTP`         | local model                      |
-| `STANOK_PROXY`       | `http://127.0.0.1:8118`   | proxy for web tooling            |
 | `STANOK_CLAUDE_BIN`  | `claude` (from PATH)      | claude-code binary               |
 | `STANOK_PY`          | `<repo>/.venv/bin/python` | python for the Runner            |
 | `STANOK_REPO`        | `<repo>/stanok`           | machine root (override)          |

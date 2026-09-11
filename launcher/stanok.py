@@ -22,7 +22,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -42,14 +41,11 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 LOCAL_MODEL = os.environ.get("STANOK_MODEL", "Qwen3.8-27B-MTP")
 SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://127.0.0.1:8080")
-LOCAL_PROXY = os.environ.get("STANOK_PROXY", "http://127.0.0.1:8118")
-NO_PROXY = os.environ.get("STANOK_NO_PROXY", "127.0.0.1,localhost")
 CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "claude")
 
 MAX_TEST_LINES = 60
 MAX_TEST_BYTES = 4096
 DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))
-CONTEXT_ROT_THRESHOLD = int(os.environ.get("STANOK_CONTEXT_ROT_TOKENS", "50000"))
 
 API_TIMEOUT_S = max(1.0, float(os.environ.get("STANOK_API_TIMEOUT_S", "600")))
 TURN_TIMEOUT_S = float(os.environ.get("STANOK_TURN_TIMEOUT_S", "1200"))
@@ -170,6 +166,20 @@ def _required_context_window() -> int | None:
     except (OSError, ValueError):
         pass
     return None
+
+
+def context_rot_threshold() -> int:
+    """Warn threshold for the live context window (tokens on the LAST API call).
+    Env STANOK_CONTEXT_ROT_TOKENS wins; otherwise 80% of the compaction window —
+    the point where attention on a long prompt visibly degrades."""
+    env = os.environ.get("STANOK_CONTEXT_ROT_TOKENS")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            log(f"WARN: STANOK_CONTEXT_ROT_TOKENS={env!r} is not an integer; ignoring")
+    window = _required_context_window() or 125000
+    return int(window * 0.8)
 
 
 def preflight_server() -> bool:
@@ -315,7 +325,11 @@ def build_agent_env() -> dict[str, str]:
     settings.env)` (cli.js `jUK()`). That assignment runs AFTER the SDK has set
     this dict, so any key present in BOTH would silently win from settings and
     kill the runtime knob. Hence: only derive-from-runtime keys belong here
-    (endpoint, model, proxy, timeout); everything static belongs in settings.
+    (endpoint, model, timeout); everything static belongs in settings.
+
+    No proxy: the machine has no web tools (CURATED_TOOLS) and its only outbound
+    is the local API server, which is directly reachable. Native sandbox injects
+    its own proxy env into Bash commands when network.allowedDomains is set.
     """
     return {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -326,10 +340,6 @@ def build_agent_env() -> dict[str, str]:
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": LOCAL_MODEL,
         "CLAUDE_CODE_SUBAGENT_MODEL": LOCAL_MODEL,
         "API_TIMEOUT_MS": API_TIMEOUT_MS,
-        "http_proxy": LOCAL_PROXY,
-        "https_proxy": LOCAL_PROXY,
-        "all_proxy": "",
-        "no_proxy": NO_PROXY,
     }
 
 
@@ -351,9 +361,17 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> dict:
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> tuple[dict, dict]:
+    """Returns (turn_total, live_window).
+
+    turn_total  — ResultMessage.usage: cumulative across the turn's API calls
+                  (for session totals).
+    live_window — the last AssistantMessage.usage: the prompt size actually sent
+                  on the final API call (the true context window, for CONTEXT-ROT).
+    """
     await client.query(prompt)
-    turn_usage = {}
+    live_window = {}
+    turn_total = {}
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
         if not sid and hasattr(msg, "data") and isinstance(msg.data, dict):
@@ -364,10 +382,13 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
 
         u = _extract_usage(msg)
         if u:
-            turn_usage.update(u)
+            if type(msg).__name__ == "ResultMessage":
+                turn_total = u
+            else:
+                live_window = u
 
         _write_stream_msg(stream_f, turn, msg)
-    return turn_usage
+    return (turn_total or live_window), live_window
 
 
 async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int) -> int:
@@ -413,7 +434,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 )
 
                 try:
-                    turn_usage = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
+                    turn_usage, live_window = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
                 except asyncio.TimeoutError:
                     log(f"TIMEOUT: turn {turn} exceeded {TURN_TIMEOUT_S:.0f}s (silent stall) -> interrupt")
                     try:
@@ -457,10 +478,20 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 turn_input_context = inp + c_read + c_create
                 turn_hit_rate = (c_read / turn_input_context * 100.0) if turn_input_context > 0 else 0.0
 
+                # Live window = prompt size on the LAST API call (not the turn's
+                # cumulative usage) — the real context the model had to attend to.
+                live_context = (
+                    live_window.get("input_tokens", 0)
+                    + live_window.get("cache_read_input_tokens", 0)
+                    + live_window.get("cache_creation_input_tokens", 0)
+                ) or turn_input_context
+
                 log(f"Turn {turn} finished in {elapsed_turn:.1f}s | "
                     f"Turn tokens: in={inp}, out={out}, cache_hit={c_read} ({turn_hit_rate:.1f}%) | "
+                    f"live window: {live_context} | "
                     f"Session cache_hit: {session_hit_rate:.1f}%")
                 emit("turn.tokens", {"turn": turn, "input": inp, "output": out, "cache_read": c_read,
+                                     "live_context": live_context,
                                      "turn_hit_rate": turn_hit_rate, "session_hit_rate": session_hit_rate})
 
                 job.setdefault("turn_telemetry", []).append({
@@ -470,12 +501,14 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     "output_tokens": out,
                     "cache_read_input_tokens": c_read,
                     "cache_creation_input_tokens": c_create,
+                    "live_context_tokens": live_context,
                     "turn_hit_rate": round(turn_hit_rate, 1),
                 })
 
-                if turn_input_context > CONTEXT_ROT_THRESHOLD:
-                    log(f"  [CONTEXT-ROT WARN] Turn input context ({turn_input_context} tokens) "
-                        f"exceeded the threshold {CONTEXT_ROT_THRESHOLD}. Model attention may degrade.")
+                rot_threshold = context_rot_threshold()
+                if live_context > rot_threshold:
+                    log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
+                        f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
 
                 verify_ok, failures = verify_gate()
                 emit("verifier", {"turn": turn, "ok": verify_ok, "failures_count": len(failures)})

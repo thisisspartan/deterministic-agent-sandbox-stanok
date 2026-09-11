@@ -48,6 +48,14 @@ BWRAP_ARGS=(
   --tmpfs "$HOME"
 )
 
+# The native (inner) sandbox re-binds its temp dir `/tmp/claude-<uid>` read-write,
+# but ONLY if it exists: the inner runtime silently SKIPS a non-existent write path,
+# leaving it under its own `--ro-bind / /` (→ "read-only file system:
+# /tmp/claude-<uid>/cwd-*"). `--tmpfs /tmp` above is empty, so create it here.
+# (cli.js: write-allow = [".", AC()] where AC() = $CLAUDE_CODE_TMPDIR/claude-$(id -u);
+#  KC_ drops allow-paths that don't exist.)
+BWRAP_ARGS+=(--dir "${CLAUDE_CODE_TMPDIR:-/tmp}/claude-$(id -u)")
+
 # 3. Pass through all critical user directories (npm, node, local)
 for dir in ".npm-global" ".local" ".nvm" ".fnm" ".asdf" ".volta"; do
   if [ -d "$HOME/$dir" ]; then
