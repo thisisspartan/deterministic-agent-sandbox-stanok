@@ -319,24 +319,24 @@ def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
 # Inference environment (Prefix Invariance)
 # ==================================================================================
 def build_agent_env() -> dict[str, str]:
+    """Runtime-only env for the machine process.
+
+    Static machine config lives in `.claude/settings.stanok.json` -> `env`, which
+    claude applies natively at startup via `Object.assign(process.env,
+    settings.env)` (cli.js `jUK()`). That assignment runs AFTER the SDK has set
+    this dict, so any key present in BOTH would silently win from settings and
+    kill the runtime knob. Hence: only derive-from-runtime keys belong here
+    (endpoint, model, proxy, timeout); everything static belongs in settings.
+    """
     return {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "ANTHROPIC_BASE_URL": SERVER_URL,
-        "ANTHROPIC_AUTH_TOKEN": "local-dummy",
-        "ANTHROPIC_API_KEY": "",
         "ANTHROPIC_MODEL": LOCAL_MODEL,
         "ANTHROPIC_DEFAULT_SONNET_MODEL": LOCAL_MODEL,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": LOCAL_MODEL,
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": LOCAL_MODEL,
         "CLAUDE_CODE_SUBAGENT_MODEL": LOCAL_MODEL,
-        "MAX_THINKING_TOKENS": "0",
-        "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
         "API_TIMEOUT_MS": API_TIMEOUT_MS,
-        "DISABLE_AUTOUPDATER": "1",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
-        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-        "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
         "http_proxy": LOCAL_PROXY,
         "https_proxy": LOCAL_PROXY,
         "all_proxy": "",
