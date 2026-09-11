@@ -60,9 +60,9 @@
     },
     "filesystem": {
       "denyWrite": [
-        "/home/hermes/darkcast/stanok/.git",
-        "/home/hermes/darkcast/stanok/hooks",
-        "/home/hermes/darkcast/stanok/.claude/settings.stanok.json"
+        "./.git",
+        "./hooks",
+        "./.claude/settings.stanok.json"
       ],
       "denyRead": [
         "~/.ssh",
