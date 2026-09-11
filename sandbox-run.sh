@@ -124,7 +124,8 @@ for f in .mcp.json .claude/settings.json .claude/settings.local.json; do
 done
 # Empty dirs are invisible to git — no .gitignore entry needed.
 mkdir -p "$REPO_ROOT/.vscode" "$REPO_ROOT/.idea" \
-         "$REPO_ROOT/.claude/skills" "$REPO_ROOT/.claude/commands" "$REPO_ROOT/.claude/agents"
+         "$REPO_ROOT/.claude/skills" "$REPO_ROOT/.claude/commands" "$REPO_ROOT/.claude/agents" \
+         "$REPO_ROOT/.claude/.git"
 
 BWRAP_ARGS=(
   "${BWRAP_ARGS[@]}"
