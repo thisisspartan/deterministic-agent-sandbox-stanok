@@ -60,9 +60,9 @@
     },
     "filesystem": {
       "denyWrite": [
-        "./.git",
-        "./hooks",
-        "./.claude/settings.stanok.json"
+        "../.git",
+        "../hooks",
+        "./settings.stanok.json"
       ],
       "denyRead": [
         "~/.ssh",
