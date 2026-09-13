@@ -17,6 +17,10 @@
     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
     "MAX_THINKING_TOKENS": "0",
     "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+    "ENABLE_BETA_TRACING_DETAILED": "1",
+    "BETA_TRACING_ENDPOINT": "http://localhost:8080/v1/private/otel",
+    "OTEL_SERVICE_NAME": "stanok-machine",
+    "OTEL_EXPORTER_OTLP_HEADERS": "projectName=stanok",
     "DISABLE_AUTOUPDATER": "1",
     "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
     "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"
@@ -56,7 +60,7 @@
     "failIfUnavailable": true,
     "allowUnsandboxedCommands": false,
     "network": {
-      "allowedDomains": ["192.168.8.131"]
+      "allowedDomains": ["192.168.8.131", "localhost", "127.0.0.1"]
     },
     "filesystem": {
       "denyWrite": [
