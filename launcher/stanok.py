@@ -166,7 +166,7 @@ def context_rot_threshold() -> int:
             return int(env)
         except ValueError:
             log(f"WARN: STANOK_CONTEXT_ROT_TOKENS={env!r} is not an integer; ignoring")
-    window = _required_context_window() or 125000
+    window = _required_context_window() or 128000
     return int(window * 0.8)
 
 
