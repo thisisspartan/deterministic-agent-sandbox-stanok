@@ -20,7 +20,7 @@ pluggable git submodule for any project.
 
 ```bash
 ./setup.sh                                   # .venv + claude-agent-sdk
-DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # expected: 14 ok, 0 fail
+bash hooks/doctor.sh                         # expected: 13 ok, 0 fail
 ```
 
 ## Running
@@ -34,7 +34,6 @@ DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # expected: 14 ok, 0 fail
 # a nonexistent ticket fails immediately (rc=13) instead of spawning a dead detach.
 ./launch.sh status <label>      # JSON: running/done/interrupted/missing
 ./launch.sh stop <label>        # interrupt the run (TERM by pid from .running)
-./launch.sh watch <label>       # live view of events.jsonl + stdout
 ```
 
 - `--background` — detach to the background (observe: `tail -f /tmp/stanok-logs/<label>.launch.log`)
@@ -44,7 +43,7 @@ DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh  # expected: 14 ok, 0 fail
 ## Structure
 
 ```
-launcher/stanok.py            — THE single Runner (CLI run/status/stop/watch,
+launcher/stanok.py            — THE single Runner (CLI run/status/stop,
                                 gates, Job/Attempt, typed summary.json)
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 sandbox-run.sh                — bwrap sandbox: repo mounted read-only with writable
@@ -65,7 +64,6 @@ src/ tests/ docs/             — the machine working directories (empty at star
 |----------------------|---------------------------|----------------------------------|
 | `STANOK_SERVER_URL`  | `http://127.0.0.1:8080`   | llama-server                     |
 | `STANOK_MODEL`       | `Qwen3.8-27B-MTP`         | local model                      |
-| `STANOK_PROXY`       | `http://127.0.0.1:8118`   | proxy for web tooling            |
 | `STANOK_CLAUDE_BIN`  | `claude` (from PATH)      | claude-code binary               |
 | `STANOK_PY`          | `<repo>/.venv/bin/python` | python for the Runner            |
 | `STANOK_REPO`        | `<repo>/stanok`           | machine root (override)          |

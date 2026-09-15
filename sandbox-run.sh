@@ -48,6 +48,14 @@ BWRAP_ARGS=(
   --tmpfs "$HOME"
 )
 
+# The native (inner) sandbox re-binds its temp dir `/tmp/claude-<uid>` read-write,
+# but ONLY if it exists: the inner runtime silently SKIPS a non-existent write path,
+# leaving it under its own `--ro-bind / /` (→ "read-only file system:
+# /tmp/claude-<uid>/cwd-*"). `--tmpfs /tmp` above is empty, so create it here.
+# (cli.js: write-allow = [".", AC()] where AC() = $CLAUDE_CODE_TMPDIR/claude-$(id -u);
+#  KC_ drops allow-paths that don't exist.)
+BWRAP_ARGS+=(--dir "${CLAUDE_CODE_TMPDIR:-/tmp}/claude-$(id -u)")
+
 # 3. Pass through all critical user directories (npm, node, local)
 for dir in ".npm-global" ".local" ".nvm" ".fnm" ".asdf" ".volta"; do
   if [ -d "$HOME/$dir" ]; then
@@ -91,9 +99,9 @@ fi
 #    .stanok-logs/).
 #    .git is READ-ONLY (SEC-01): the model cannot commit, plant hooks, or rewrite
 #    git state from inside the sandbox. No git writes happen anywhere: launch.sh
-#    fail-closed gates a dirty tree on the host (rc=22) BEFORE entering the
-#    sandbox, and the in-sandbox reset_repo() only verifies cleanliness
-#    (read-only) + unfreezes tests/ for the new run.
+#    fail-closed gates a dirty tree on the host (rc=22, via `stanok.py
+#    check-dirty`) BEFORE entering the sandbox, and the in-sandbox
+#    prepare_workspace() only preps the writable dirs + unfreezes tests/.
 #    The carve-out directories must exist on the host before bwrap runs
 #    (bwrap fails on a missing bind source).
 mkdir -p "$REPO_ROOT/src" "$REPO_ROOT/tests" "$REPO_ROOT/docs" \
@@ -116,7 +124,8 @@ for f in .mcp.json .claude/settings.json .claude/settings.local.json; do
 done
 # Empty dirs are invisible to git — no .gitignore entry needed.
 mkdir -p "$REPO_ROOT/.vscode" "$REPO_ROOT/.idea" \
-         "$REPO_ROOT/.claude/skills" "$REPO_ROOT/.claude/commands" "$REPO_ROOT/.claude/agents"
+         "$REPO_ROOT/.claude/skills" "$REPO_ROOT/.claude/commands" "$REPO_ROOT/.claude/agents" \
+         "$REPO_ROOT/.claude/.git"
 
 BWRAP_ARGS=(
   "${BWRAP_ARGS[@]}"

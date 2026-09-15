@@ -26,7 +26,7 @@ fi
 cmd="${1:-}"
 
 # Status, stop, and log commands
-if [ "$cmd" = "status" ] || [ "$cmd" = "stop" ] || [ "$cmd" = "watch" ]; then
+if [ "$cmd" = "status" ] || [ "$cmd" = "stop" ]; then
     exec "$PY" "$STANOK_PY" "$@"
 fi
 
@@ -38,7 +38,6 @@ if [ "$#" -lt 2 ]; then
     echo "Usage: $0 [run] <ticket> <label> [--background] [--local-retries N] [--direct]" >&2
     echo "              $0 status <label>" >&2
     echo "              $0 stop <label>" >&2
-    echo "              $0 watch <label> [--follow]" >&2
     exit 1
 fi
 
@@ -104,7 +103,8 @@ fi
 # possible there. FAIL-CLOSED (rc=22): the tree must be clean BEFORE launch;
 # the supervisor commits machine artifacts / operator state before each run.
 # Never reset/clean here — that would silently destroy uncommitted work.
-if [ -n "$(git -C "$STANOK_ROOT" status --porcelain)" ]; then
+# Single source of truth: stanok.py `check-dirty` (exits 22 when dirty).
+if ! "$PY" "$STANOK_PY" check-dirty; then
     echo "ERROR: dirty tree in $STANOK_ROOT (rc=22) — commit or clean before launch" >&2
     exit 22
 fi

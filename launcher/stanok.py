@@ -22,7 +22,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -42,14 +41,11 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 LOCAL_MODEL = os.environ.get("STANOK_MODEL", "Qwen3.8-27B-MTP")
 SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://127.0.0.1:8080")
-LOCAL_PROXY = os.environ.get("STANOK_PROXY", "http://127.0.0.1:8118")
-NO_PROXY = os.environ.get("STANOK_NO_PROXY", "127.0.0.1,localhost")
 CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "claude")
 
 MAX_TEST_LINES = 60
 MAX_TEST_BYTES = 4096
 DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))
-CONTEXT_ROT_THRESHOLD = int(os.environ.get("STANOK_CONTEXT_ROT_TOKENS", "50000"))
 
 API_TIMEOUT_S = max(1.0, float(os.environ.get("STANOK_API_TIMEOUT_S", "600")))
 TURN_TIMEOUT_S = float(os.environ.get("STANOK_TURN_TIMEOUT_S", "1200"))
@@ -63,7 +59,6 @@ CURATED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 _stdout_log_f = None
-_events_path = None
 _marker_path = None
 _evidence_dir = None
 _live_dir = None
@@ -81,17 +76,6 @@ def log(msg: str = "") -> None:
             _stdout_log_f.flush()
         except (OSError, ValueError):
             pass
-
-
-def emit(etype: str, data: dict) -> None:
-    if _events_path is None:
-        return
-    try:
-        with open(_events_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": time.time(), "type": etype, "data": data},
-                               ensure_ascii=False, default=str) + "\n")
-    except OSError:
-        pass
 
 
 def _safe_json_default(obj):
@@ -172,6 +156,20 @@ def _required_context_window() -> int | None:
     return None
 
 
+def context_rot_threshold() -> int:
+    """Warn threshold for the live context window (tokens on the LAST API call).
+    Env STANOK_CONTEXT_ROT_TOKENS wins; otherwise 80% of the compaction window —
+    the point where attention on a long prompt visibly degrades."""
+    env = os.environ.get("STANOK_CONTEXT_ROT_TOKENS")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            log(f"WARN: STANOK_CONTEXT_ROT_TOKENS={env!r} is not an integer; ignoring")
+    window = _required_context_window() or 125000
+    return int(window * 0.8)
+
+
 def preflight_server() -> bool:
     if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
         return True
@@ -199,22 +197,11 @@ def preflight_server() -> bool:
     return True
 
 
-def reset_repo() -> int:
+def prepare_workspace() -> int:
     # SEC-01: .git is read-only inside the bwrap sandbox — NO git writes here.
-    # The tree must already be clean (host-side fail-closed gate in launch.sh,
-    # rc=22). This is a read-only verification + workspace prep.
-    try:
-        st = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
-                            capture_output=True, text=True)
-        if st.returncode != 0:
-            log(f"ERROR: git status failed: {(st.stderr or '').strip()}")
-            return 14
-        if st.stdout.strip():
-            log("ERROR: tree dirty (host-side gate did not run) (rc=14)")
-            return 14
-    except OSError as e:
-        log(f"ERROR: repo check failed: {e}")
-        return 14
+    # The cleanliness gate is dirty_tree_gate() (single source, called by main()
+    # rc=22 and by launch.sh via `check-dirty`). This function only prepares the
+    # writable workspace.
     try:
         for d in ("src", "tests", "docs"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
@@ -319,28 +306,28 @@ def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
 # Inference environment (Prefix Invariance)
 # ==================================================================================
 def build_agent_env() -> dict[str, str]:
+    """Runtime-only env for the machine process.
+
+    Static machine config lives in `.claude/settings.stanok.json` -> `env`, which
+    claude applies natively at startup via `Object.assign(process.env,
+    settings.env)` (cli.js `jUK()`). That assignment runs AFTER the SDK has set
+    this dict, so any key present in BOTH would silently win from settings and
+    kill the runtime knob. Hence: only derive-from-runtime keys belong here
+    (endpoint, model, timeout); everything static belongs in settings.
+
+    No proxy: the machine has no web tools (CURATED_TOOLS) and its only outbound
+    is the local API server, which is directly reachable. Native sandbox injects
+    its own proxy env into Bash commands when network.allowedDomains is set.
+    """
     return {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "ANTHROPIC_BASE_URL": SERVER_URL,
-        "ANTHROPIC_AUTH_TOKEN": "local-dummy",
-        "ANTHROPIC_API_KEY": "",
         "ANTHROPIC_MODEL": LOCAL_MODEL,
         "ANTHROPIC_DEFAULT_SONNET_MODEL": LOCAL_MODEL,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": LOCAL_MODEL,
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": LOCAL_MODEL,
         "CLAUDE_CODE_SUBAGENT_MODEL": LOCAL_MODEL,
-        "MAX_THINKING_TOKENS": "0",
-        "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
         "API_TIMEOUT_MS": API_TIMEOUT_MS,
-        "DISABLE_AUTOUPDATER": "1",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
-        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-        "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
-        "http_proxy": LOCAL_PROXY,
-        "https_proxy": LOCAL_PROXY,
-        "all_proxy": "",
-        "no_proxy": NO_PROXY,
     }
 
 
@@ -362,23 +349,33 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> dict:
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> tuple[dict, dict]:
+    """Returns (turn_total, live_window).
+
+    turn_total  — ResultMessage.usage: cumulative across the turn's API calls
+                  (for session totals).
+    live_window — the last AssistantMessage.usage: the prompt size actually sent
+                  on the final API call (the true context window, for CONTEXT-ROT).
+    """
     await client.query(prompt)
-    turn_usage = {}
+    live_window = {}
+    turn_total = {}
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
         if not sid and hasattr(msg, "data") and isinstance(msg.data, dict):
             sid = msg.data.get("session_id")
         if sid and not job.get("session_id"):
             job["session_id"] = str(sid)
-            emit("session.resolved", {"session_id": str(sid), "run_id": local_run_id})
 
         u = _extract_usage(msg)
         if u:
-            turn_usage.update(u)
+            if type(msg).__name__ == "ResultMessage":
+                turn_total = u
+            else:
+                live_window = u
 
         _write_stream_msg(stream_f, turn, msg)
-    return turn_usage
+    return (turn_total or live_window), live_window
 
 
 async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int) -> int:
@@ -401,7 +398,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
     max_turns = 1 + max_retries
     current_prompt = ticket_prompt
     log(f"SESSION START (run_id: {local_run_id}) | Turn limit: {max_turns} | model={LOCAL_MODEL}")
-    emit("session.start", {"run_id": local_run_id, "max_turns": max_turns})
 
     total_tokens = {
         "input_tokens": 0,
@@ -416,7 +412,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         async with ClaudeSDKClient(options=options) as client:
             for turn in range(1, max_turns + 1):
                 log(f"\n>>> Turn {turn}/{max_turns} {'(Fixing errors in src/)' if turn > 1 else '(Ticket start)'} <<<")
-                emit("turn.start", {"turn": turn})
 
                 t0 = time.time()
                 turn_task = asyncio.create_task(
@@ -424,7 +419,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 )
 
                 try:
-                    turn_usage = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
+                    turn_usage, live_window = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
                 except asyncio.TimeoutError:
                     log(f"TIMEOUT: turn {turn} exceeded {TURN_TIMEOUT_S:.0f}s (silent stall) -> interrupt")
                     try:
@@ -468,11 +463,18 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 turn_input_context = inp + c_read + c_create
                 turn_hit_rate = (c_read / turn_input_context * 100.0) if turn_input_context > 0 else 0.0
 
+                # Live window = prompt size on the LAST API call (not the turn's
+                # cumulative usage) — the real context the model had to attend to.
+                live_context = (
+                    live_window.get("input_tokens", 0)
+                    + live_window.get("cache_read_input_tokens", 0)
+                    + live_window.get("cache_creation_input_tokens", 0)
+                ) or turn_input_context
+
                 log(f"Turn {turn} finished in {elapsed_turn:.1f}s | "
                     f"Turn tokens: in={inp}, out={out}, cache_hit={c_read} ({turn_hit_rate:.1f}%) | "
+                    f"live window: {live_context} | "
                     f"Session cache_hit: {session_hit_rate:.1f}%")
-                emit("turn.tokens", {"turn": turn, "input": inp, "output": out, "cache_read": c_read,
-                                     "turn_hit_rate": turn_hit_rate, "session_hit_rate": session_hit_rate})
 
                 job.setdefault("turn_telemetry", []).append({
                     "turn": turn,
@@ -481,15 +483,16 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     "output_tokens": out,
                     "cache_read_input_tokens": c_read,
                     "cache_creation_input_tokens": c_create,
+                    "live_context_tokens": live_context,
                     "turn_hit_rate": round(turn_hit_rate, 1),
                 })
 
-                if turn_input_context > CONTEXT_ROT_THRESHOLD:
-                    log(f"  [CONTEXT-ROT WARN] Turn input context ({turn_input_context} tokens) "
-                        f"exceeded the threshold {CONTEXT_ROT_THRESHOLD}. Model attention may degrade.")
+                rot_threshold = context_rot_threshold()
+                if live_context > rot_threshold:
+                    log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
+                        f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
 
                 verify_ok, failures = verify_gate()
-                emit("verifier", {"turn": turn, "ok": verify_ok, "failures_count": len(failures)})
 
                 if verify_ok:
                     log("VERIFIER: PASS — All tests passed successfully!")
@@ -604,7 +607,6 @@ def write_summary(job: dict, elapsed_s: int) -> None:
     }
     with open(os.path.join(_evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    emit("summary", summary)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -620,7 +622,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def cmd_run(args) -> int:
-    global _stdout_log_f, _events_path, _marker_path, _evidence_dir, _live_dir
+    global _stdout_log_f, _marker_path, _evidence_dir, _live_dir
 
     try:
         if os.getpgid(0) != os.getpid():
@@ -633,7 +635,6 @@ def cmd_run(args) -> int:
     os.makedirs(_live_dir, exist_ok=True)
 
     _stdout_log_f = open(os.path.join(_evidence_dir, "launcher.stdout.log"), "a", encoding="utf-8")
-    _events_path = os.path.join(_live_dir, "events.jsonl")
     _marker_path = os.path.join(_evidence_dir, ".running")
 
     start_ts = int(time.time())
@@ -660,8 +661,6 @@ def cmd_run(args) -> int:
     _install_signal_handlers()
 
     job = {"label": args.label, "ticket": args.ticket}
-    emit("job.start", {"label": args.label, "pid": recorded_pid})
-
     log(f"STANOK 4.2 RUNNER | Repo: {REPO_ROOT} | Label: {args.label}")
     if args.direct:
         log("--direct MODE: the ticket path is resolved relative to the repository")
@@ -675,9 +674,9 @@ def cmd_run(args) -> int:
             except OSError: pass
         return 20
 
-    if reset_repo() != 0:
+    if prepare_workspace() != 0:
         job["rc"] = 14
-        job["error"] = "git reset/clean error"
+        job["error"] = "workspace prep error"
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
@@ -709,7 +708,7 @@ def cmd_run(args) -> int:
 
 
 # ==================================================================================
-# Control utilities (status, stop, watch)
+# Control utilities (status, stop)
 # ==================================================================================
 def cmd_status(label: str) -> int:
     evidence_dir, _ = label_paths(label)
@@ -777,26 +776,6 @@ def cmd_stop(label: str) -> int:
     return 0
 
 
-def cmd_watch(label: str, follow: bool) -> int:
-    _, live_dir = label_paths(label)
-    events = os.path.join(live_dir, "events.jsonl")
-    offset = 0
-    try:
-        while True:
-            if os.path.exists(events):
-                with open(events, encoding="utf-8") as f:
-                    f.seek(offset)
-                    for line in f:
-                        print(line.strip(), flush=True)
-                    offset = f.tell()
-            if not follow:
-                break
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
-    return 0
-
-
 # ==================================================================================
 # CLI entry point
 # ==================================================================================
@@ -833,18 +812,18 @@ def main() -> int:
     st = sub.add_parser("stop")
     st.add_argument("label")
 
-    w = sub.add_parser("watch")
-    w.add_argument("label")
-    w.add_argument("--follow", action="store_true")
+    # Single-source cleanliness gate for launch.sh (host side). Exit 22 on a
+    # dirty REPO_ROOT, 0 when clean — no side effects.
+    sub.add_parser("check-dirty")
 
     args = p.parse_args()
 
+    if args.cmd == "check-dirty":
+        return 22 if dirty_tree_gate() else 0
     if args.cmd == "status":
         return cmd_status(args.label)
     if args.cmd == "stop":
         return cmd_stop(args.label)
-    if args.cmd == "watch":
-        return cmd_watch(args.label, args.follow)
 
     if args.cmd == "run":
         evidence_dir, _ = label_paths(args.label)

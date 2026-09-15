@@ -34,4 +34,4 @@ echo "--- SDK check ---"
 
 echo
 echo "Environment ready. Machine check:"
-echo "  DOCTOR_EXPECT_NO_CLOUD=1 bash hooks/doctor.sh"
+echo "  bash hooks/doctor.sh"
