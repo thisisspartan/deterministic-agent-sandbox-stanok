@@ -24,7 +24,8 @@
     "OTEL_EXPORTER_OTLP_HEADERS": "projectName=stanok",
     "DISABLE_AUTOUPDATER": "1",
     "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
-    "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"
+    "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
+    "CLAUDE_AGENT_SDK_MCP_NO_PREFIX": "1"
   },
   "permissions": {
     "allow": [
@@ -32,10 +33,10 @@
       "Write",
       "Edit",
       "Grep",
-      "Glob",
-      "Bash"
+      "Glob"
     ],
     "deny": [
+      "Bash",
       "WebSearch",
       "NotebookEdit",
       "EnterWorktree",
@@ -93,9 +94,6 @@
     }
   },
   "hooks": {
-    "PreToolUse": [
-      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "bash hooks/bash-gate.sh" }] }
-    ],
     "PostToolUse": [
       { "matcher": "Write|Edit", "hooks": [
           { "type": "command", "command": "bash hooks/verifier.sh" }

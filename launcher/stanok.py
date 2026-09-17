@@ -54,7 +54,7 @@ if TURN_TIMEOUT_S <= API_TIMEOUT_S:
     TURN_TIMEOUT_S = API_TIMEOUT_S + max(15.0, API_TIMEOUT_S * 0.2)
 
 API_TIMEOUT_MS = str(int(API_TIMEOUT_S * 1000))
-CURATED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "run"]
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _MODULE_RE = re.compile(r"^module:\s*([A-Za-z0-9_.-]+)\s*$")
@@ -481,6 +481,60 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
     return (turn_total or live_window), live_window, writes
 
 
+def _build_run_mcp_server():
+    """W3.1: the MCP `run` tool — the machine's only way to run tests.
+
+    Typed schema {mode: test|smoke|list, path: str}. The only validation
+    left from the old bash-gate: ONE realpath check that the path stays
+    inside REPO_ROOT/{src,tests}. run.sh keeps its own checks (2nd line).
+    The handler runs host-side (same trust level as the host verify_gate).
+    """
+    from claude_agent_sdk import create_sdk_mcp_server, tool
+
+    @tool(
+        "run",
+        "Project test runner — the ONLY way to run tests. "
+        "mode: 'test' (run one test file), 'smoke' (run one module), "
+        "'list' (list test files). path: repo-relative file — "
+        "tests/<module>.test.js for 'test', src/<module>.js for 'smoke'; "
+        "omit path for 'list'.",
+        {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["test", "smoke", "list"]},
+                "path": {"type": "string"},
+            },
+            "required": ["mode"],
+        },
+    )
+    async def run(args: dict) -> dict:
+        mode = args.get("mode", "")
+        path = args.get("path") or ""
+        if path:
+            abs_path = os.path.realpath(os.path.join(REPO_ROOT, path))
+            roots = (
+                os.path.realpath(os.path.join(REPO_ROOT, "src")),
+                os.path.realpath(os.path.join(REPO_ROOT, "tests")),
+            )
+            if not any(abs_path == r or abs_path.startswith(r + os.sep) for r in roots):
+                return {
+                    "content": [{"type": "text", "text": f"run: DENIED — path must be inside src/ or tests/ (got {path!r})"}],
+                    "is_error": True,
+                }
+        cmd = ["bash", "scripts/run.sh", mode] + ([path] if path else [])
+        try:
+            proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            return {"content": [{"type": "text", "text": "run: TIMEOUT — the runner hung (90s)"}], "is_error": True}
+        log(f"[RUN-TOOL] mode={mode} path={path or '-'} rc={proc.returncode}")
+        text = proc.stdout or ""
+        if proc.stderr:
+            text += ("\n" if text else "") + proc.stderr
+        return {"content": [{"type": "text", "text": f"[run {mode}] rc={proc.returncode}\n{text[:8000]}"}]}
+
+    return create_sdk_mcp_server(name="run", version="1.0.0", tools=[run])
+
+
 async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, declared_paths: list[str]) -> int:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
@@ -494,6 +548,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         settings=f"{REPO_ROOT}/.claude/settings.stanok.json",
         permission_mode="dontAsk",
         allowed_tools=CURATED_TOOLS,
+        mcp_servers={"run": _build_run_mcp_server()},
         max_turns=30,
         model=LOCAL_MODEL,
         env=build_agent_env(),
