@@ -776,6 +776,16 @@ def build_summary(job: dict, elapsed_s: int) -> dict:
     probe_result, c5, review_verdict = _status_fields(rc, verifier, turns)
     if job.get("probe_result"):
         probe_result = job["probe_result"]
+        # rc=1 is polysemous: NO-OP-PASS vs exhausted-retries. Disambiguate by
+        # probe_result, NOT rc — the rc->fields table cannot express two field
+        # sets for one rc, so _status_fields is not a pure function of rc (the
+        # probe_result override above already broke that); do not "restore" a
+        # pure rc->fields table. A NO-OP is a success: verify_gate really
+        # passed (c5=PASS is a fact), and review_verdict is the third outcome
+        # (NOOP) — neither CLEAN (no build) nor DEFECT (no defect).
+        if probe_result == "NO-OP-PASS":
+            c5 = "PASS"
+            review_verdict = "NOOP"
 
     per_turn = job.get("turn_telemetry", [])
     inference_telemetry = {
