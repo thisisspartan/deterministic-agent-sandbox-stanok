@@ -20,7 +20,7 @@ chk() { # chk <name> <cmd...>
 
 chk "settings.stanok.json exists"     test -f "$REPO_ROOT/.claude/settings.stanok.json"
 chk "settings.stanok.json valid JSON" python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$REPO_ROOT/.claude/settings.stanok.json"
-chk "PreToolUse hook present"         grep -q '"PreToolUse"' "$REPO_ROOT/.claude/settings.stanok.json"
+chk "PostToolUse verifier hook present" grep -q '"PostToolUse"' "$REPO_ROOT/.claude/settings.stanok.json"
 chk "commit-msg executable"           test -x "$REPO_ROOT/hooks/commit-msg"
 HOOKS_DIR="$(git -C "$REPO_ROOT" rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
 chk "commit-msg hook"                 test -L "$REPO_ROOT/$HOOKS_DIR/commit-msg"   # FINDING-5: a broken symlink disables the TASK-ID gate
@@ -33,16 +33,24 @@ chk "git repo initialized"            test -d "$REPO_ROOT/.git"
 # lazily, the gates are pure stdlib, so the invariants work even without a deployed .venv.
 # STANOK_NO_SANDBOX=1: the tests check the RUNNER, not the sandbox; bwrap mounts
 # a private /tmp (--tmpfs /tmp), so mktemp /tmp/... tickets are invisible inside (rc=13).
-# 1) label-guard: a label starting with '--' -> rc=15 BEFORE flags/ROLE-LEAK/lock
+# Gate order (single source: launcher/stanok.py main() + the shim's check-dirty):
+#   shim: check-dirty (rc=22, host side, before python)
+#   python: label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->
+#           dirty-tree (rc=22) -> lock (rc=21) -> [cmd_run: W2.1 ticket header
+#           (rc=13, no module:/reset:none) -> pre-flight /props (rc=20)]
+# 1) label-guard: a label starting with '--' -> rc=15 BEFORE ROLE-LEAK/lock
 #    (protection against evidence/--background when the label is forgotten). argparse swallows '--background'
 #    as a flag itself (rc=2), so we check the reachable path: an explicit '--'.
-# 2) fail-fast: a dead server -> rc=20 along the ticket->dirty-tree->lock->pre-flight path.
+# 2) fail-fast: a dead server -> rc=20. The ticket carries a `module:` line so the
+#    W2.1 header check (rc=13) does not mask the pre-flight refusal.
 #    On a dirty tree, dirty-tree (rc=22) fires BEFORE pre-flight — this is a valid
 #    refusal (skip), not a test regression.
 # 2b) dirty-tree: an uncommitted file -> rc=22 (reset --hard + clean -fdq would erase
 #    the operator's work; the machine refuses to start, the TUI commits first).
-# 3) ROLE-LEAK: a parent CLAUDE.md above the repo -> rc=24 BEFORE lock/mkdir (fail-closed,
+# 3) ROLE-LEAK: a parent CLAUDE.md above the repo -> rc=24 (fail-closed,
 #    equivalent to the old rc=25: the Runner is Python itself, "python3 disappeared" is no longer possible).
+#    The temp repo is `git init`-ed: the shim's check-dirty (rc=22) would otherwise
+#    fire before the python role-leak gate on a non-git directory.
 LAUNCH="$REPO_ROOT/launch.sh"
 
 # 1) label-guard (rc=15): a label starting with '--' -> rc=15 BEFORE ticket resolution.
@@ -60,8 +68,9 @@ else
 fi
 rm -f "$TMPT_LG"
 
-# 2) fail-fast on a dead server (rc=20)
-TMPT="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nplaceholder\n' > "$TMPT"
+# 2) fail-fast on a dead server (rc=20). The ticket carries a `module:` line:
+# the W2.1 header check (no module:/reset:none -> rc=13) fires BEFORE preflight.
+TMPT="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nmodule: doctor\n' > "$TMPT"
 DR="doctor-dead-$$-${RANDOM}"
 if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 STANOK_NO_SANDBOX=1 \
      "$LAUNCH" run "$TMPT" "$DR" >/dev/null 2>&1; then
@@ -115,7 +124,7 @@ HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYEOF
 python3 "$MOCKDIR/server.py" "$MOCKPORT" & MOCKPID=$!
 sleep 1
-TMPT4="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nplaceholder\n' > "$TMPT4"
+TMPT4="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nmodule: doctor\n' > "$TMPT4"
 DR2="doctor-window-$$-${RANDOM}"
 if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL="http://127.0.0.1:$MOCKPORT" STANOK_NO_SANDBOX=1 \
      "$LAUNCH" run "$TMPT4" "$DR2" >/dev/null 2>&1; then
@@ -135,6 +144,7 @@ rm -rf "$MOCKDIR" "$REPO_ROOT/evidence/$DR2" "/tmp/stanok-logs/$DR2" "$TMPT4"
 # 3) ROLE-LEAK: a CLAUDE.md above the repo -> rc=24 (fail-closed, no side effects)
 TMPROOT="$(mktemp -d /tmp/doctor-roleleak-XXXXXX)"
 mkdir -p "$TMPROOT/repo"
+git init -q "$TMPROOT/repo"                      # the shim's check-dirty needs a git repo (else rc=22 masks rc=24)
 touch "$TMPROOT/CLAUDE.md"                       # a "parent" CLAUDE.md = role leak
 TMPT2="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nplaceholder\n' > "$TMPT2"
 if STANOK_PY="$(command -v python3)" STANOK_REPO="$TMPROOT/repo" \
