@@ -33,7 +33,8 @@
       "Write",
       "Edit",
       "Grep",
-      "Glob"
+      "Glob",
+      "mcp__run__run"
     ],
     "deny": [
       "Bash",

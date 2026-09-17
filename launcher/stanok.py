@@ -54,7 +54,10 @@ if TURN_TIMEOUT_S <= API_TIMEOUT_S:
     TURN_TIMEOUT_S = API_TIMEOUT_S + max(15.0, API_TIMEOUT_S * 0.2)
 
 API_TIMEOUT_MS = str(int(API_TIMEOUT_S * 1000))
-CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "run"]
+# The MCP `run` tool is auto-approved by its CANONICAL name (cli.js D77/wK1
+# match allow rules against mcp__<server>__<tool>, not the NO_PREFIX display
+# name), so the allow rule must be "mcp__run__run".
+CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "mcp__run__run"]
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _MODULE_RE = re.compile(r"^module:\s*([A-Za-z0-9_.-]+)\s*$")
