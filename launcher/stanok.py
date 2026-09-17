@@ -127,14 +127,17 @@ def root_refusal() -> None:
 
 
 def dirty_tree_gate() -> bool:
+    # Fail-closed: a git error means the tree state is UNKNOWN -> treat as dirty.
     try:
         out = subprocess.run(["git", "status", "--porcelain"],
                              cwd=REPO_ROOT, capture_output=True, text=True)
-        if out.returncode == 0 and out.stdout.strip():
+        if out.returncode != 0:
+            log("WARN: git status failed in dirty_tree_gate — fail-closed (treating as dirty)")
             return True
+        return bool(out.stdout.strip())
     except OSError:
-        pass
-    return False
+        log("WARN: git status raised in dirty_tree_gate — fail-closed (treating as dirty)")
+        return True
 
 
 def _required_context_window() -> int | None:
@@ -357,6 +360,8 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
     live_window — the last AssistantMessage.usage: the prompt size actually sent
                   on the final API call (the true context window, for CONTEXT-ROT).
     """
+    from claude_agent_sdk import ResultMessage
+
     await client.query(prompt)
     live_window = {}
     turn_total = {}
@@ -369,7 +374,7 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
 
         u = _extract_usage(msg)
         if u:
-            if type(msg).__name__ == "ResultMessage":
+            if isinstance(msg, ResultMessage):
                 turn_total = u
             else:
                 live_window = u
@@ -389,8 +394,9 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         cwd=REPO_ROOT,
         setting_sources=["project"],
         settings=f"{REPO_ROOT}/.claude/settings.stanok.json",
-        permission_mode="default",
+        permission_mode="dontAsk",
         allowed_tools=CURATED_TOOLS,
+        max_turns=30,
         model=LOCAL_MODEL,
         env=build_agent_env(),
     )
@@ -428,9 +434,12 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                         log(f"WARN: client.interrupt() finished with an error: {e}")
 
                     try:
-                        await asyncio.wait_for(turn_task, timeout=5.0)
+                        await asyncio.wait_for(asyncio.shield(turn_task), timeout=5.0)
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         pass
+                    if not turn_task.done():
+                        turn_task.cancel()
+                    await asyncio.gather(turn_task, return_exceptions=True)
 
                     job["error"] = f"TURN-TIMEOUT ({TURN_TIMEOUT_S:.0f}s)"
                     job["verifier"] = "FAIL"
@@ -486,6 +495,19 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     "live_context_tokens": live_context,
                     "turn_hit_rate": round(turn_hit_rate, 1),
                 })
+
+                # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
+                # spike in the turn's input_tokens (uncached re-send).
+                prev_inputs = [t["input_tokens"] for t in job["turn_telemetry"][:-1]]
+                if prev_inputs:
+                    median_prev = sorted(prev_inputs)[len(prev_inputs) // 2]
+                    if inp > 2 * median_prev:
+                        job["turn_telemetry"][-1]["prefix_break"] = True
+                        log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} "
+                            f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
+                elif inp > 4000:
+                    job["turn_telemetry"][-1]["prefix_break"] = True
+                    log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} > 4000 baseline")
 
                 rot_threshold = context_rot_threshold()
                 if live_context > rot_threshold:
@@ -560,19 +582,24 @@ def _install_signal_handlers() -> None:
     signal.signal(signal.SIGINT, handler)
 
 
-def write_summary(job: dict, elapsed_s: int) -> None:
-    """Builds the exact summary.json contract expected by the L1 Supervisor."""
+def _status_fields(rc: int, verifier: str, turns: int) -> tuple[str, str, str]:
+    """RC_TABLE — single source of the status fields, derived from
+    (rc, verifier, turns). A new outcome = one row here.
+    Fail-closed: only rc==0 AND verifier=="PASS" is a pass; everything
+    else is a defect (no PASS-on-FAIL)."""
+    if rc == 0 and verifier == "PASS":
+        probe_result = "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
+        return probe_result, "PASS", "CLEAN"
+    return "VERIFY-FAIL", "FAIL", "DEFECT"
+
+
+def build_summary(job: dict, elapsed_s: int) -> dict:
+    """Single source of the summary.json schema (shared by write_summary
+    and early_abort)."""
     turns = job.get("turns", 1)
     verifier = job.get("verifier", "FAIL")
     rc = job.get("rc", 1)
-
-    if rc == 0 and verifier == "PASS":
-        probe_result = "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
-        c5 = "PASS"
-    else:
-        probe_result = "VERIFY-FAIL" if rc != 0 else "PASS"
-        c5 = "PASS" if rc == 0 else "FAIL"
-
+    probe_result, c5, review_verdict = _status_fields(rc, verifier, turns)
     if job.get("probe_result"):
         probe_result = job["probe_result"]
 
@@ -587,13 +614,13 @@ def write_summary(job: dict, elapsed_s: int) -> None:
         },
     }
 
-    summary = {
+    return {
         "label": job.get("label"),
         "ticket": job.get("ticket"),
         "rc": rc,
         "verifier": verifier,
         "probe_result": probe_result,
-        "review_verdict": "CLEAN" if rc == 0 else "DEFECT",
+        "review_verdict": review_verdict,
         "cloud_calls": 0,
         "c5": c5,
         "turns": turns,
@@ -605,8 +632,12 @@ def write_summary(job: dict, elapsed_s: int) -> None:
         "errors": [job["error"]] if job.get("error") else [],
         "failures": job.get("failures", []),
     }
+
+
+def write_summary(job: dict, elapsed_s: int) -> None:
+    """Writes the exact summary.json contract expected by the L1 Supervisor."""
     with open(os.path.join(_evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+        json.dump(build_summary(job, elapsed_s), f, ensure_ascii=False, indent=2)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -839,25 +870,17 @@ def main() -> int:
             os.makedirs(evidence_dir, exist_ok=True)
             sum_path = os.path.join(evidence_dir, "summary.json")
             if not os.path.exists(sum_path):
-                payload = {
+                job = {
                     "label": args.label,
                     "ticket": args.ticket,
                     "rc": rc,
                     "verifier": "FAIL",
                     "probe_result": "EARLY-ABORT",
-                    "review_verdict": "DEFECT",
-                    "cloud_calls": 0,
-                    "c5": "FAIL",
                     "turns": 0,
-                    "elapsed_s": 0,
-                    "session_id": None,
-                    "tokens": {},
-                    "cache_hit_rate": "0.0%",
-                    "errors": [err_msg],
-                    "failures": [],
+                    "error": err_msg,
                 }
                 with open(sum_path, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                    json.dump(build_summary(job, 0), f, ensure_ascii=False, indent=2)
             return rc
 
         if validate_label(args.label):
