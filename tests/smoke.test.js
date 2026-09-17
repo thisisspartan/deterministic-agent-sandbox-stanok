@@ -1,6 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-
 const { add } = require('../src/smoke.js');
 
 test('add(2, 3) === 5', () => {
