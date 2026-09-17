@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
-# verifier.sh — PostToolUse hook (Write|Edit). OS-level TDD freeze (D2).
+# verifier.sh — PostToolUse hook (Write|Edit).
 #
-# Replaces the .stanok-locks hash state machine. The "spec cannot be weakened"
-# invariant is now an OS fact, not a detection:
-#   - When a written test runs RED (the spec is written and failing), the test
-#     file is made read-only: chmod a-w. The model's next Write/Edit then fails
-#     at the kernel (EACCES) and it cannot undo the mode — its only shell is
-#     bash-gate -> scripts/run.sh, which cannot chmod.
-#   - The file is frozen, NOT the tests/ directory: a ticket may declare several
-#     test files, and a read-only directory would block creating the rest.
+# The "spec cannot be weakened" invariant is enforced by the runner's tests/
+# manifest (contract_lock): stanok.py snapshots tests/ before the session and
+# after each turn; a pre-existing test file that is modified or deleted is a
+# contract_lock violation in summary.json. This hook no longer freezes files.
 #
-# The runner unfreezes the workspace (chmod u+w tests/) at the start of every
-# run (prepare_workspace), so each run's phase 1 can write tests again.
+# Its remaining job: when a written test runs RED (the spec is written and
+# failing), report it to the model so it goes straight to the implementation.
 #
 # The verdict itself comes from the project's declared runner (D3):
 # scripts/run.sh is the single canonical test invocation.
@@ -59,8 +55,7 @@ RC=$?
 # GREEN -> the implementation already exists; nothing to freeze, stay silent.
 [ "$RC" -eq 0 ] && exit 0
 
-# RED (including rc=124 timeout): the spec is written and failing -> freeze it.
-chmod a-w "$ABS" 2>/dev/null || true
-emit "VERIFY: RED CONFIRMED ($REL rc=$RC; test frozen read-only — the spec cannot be weakened). Implement src/ to make it GREEN.
+# RED (including rc=124 timeout): the spec is written and failing -> report it.
+emit "VERIFY: RED CONFIRMED ($REL rc=$RC). Implement src/ to make it GREEN.
 $(tail_block "$OUT")"
 exit 0

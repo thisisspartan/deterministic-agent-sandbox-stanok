@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run.sh — the ONLY command available to the machine's model (Bash via bash-gate).
+# run.sh — the ONLY command available to the machine's model (via the MCP `run` tool).
 # The model does NOT assemble shell commands: the subcommands are fixed, the script
 # validates the paths. No shell operators, no network, no git.
 #

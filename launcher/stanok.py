@@ -54,9 +54,14 @@ if TURN_TIMEOUT_S <= API_TIMEOUT_S:
     TURN_TIMEOUT_S = API_TIMEOUT_S + max(15.0, API_TIMEOUT_S * 0.2)
 
 API_TIMEOUT_MS = str(int(API_TIMEOUT_S * 1000))
-CURATED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+# The MCP `run` tool is auto-approved by its CANONICAL name (cli.js D77/wK1
+# match allow rules against mcp__<server>__<tool>, not the NO_PREFIX display
+# name), so the allow rule must be "mcp__run__run".
+CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "mcp__run__run"]
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_MODULE_RE = re.compile(r"^module:\s*([A-Za-z0-9_.-]+)\s*$")
+_RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
 
 _stdout_log_f = None
 _marker_path = None
@@ -127,14 +132,17 @@ def root_refusal() -> None:
 
 
 def dirty_tree_gate() -> bool:
+    # Fail-closed: a git error means the tree state is UNKNOWN -> treat as dirty.
     try:
         out = subprocess.run(["git", "status", "--porcelain"],
                              cwd=REPO_ROOT, capture_output=True, text=True)
-        if out.returncode == 0 and out.stdout.strip():
+        if out.returncode != 0:
+            log("WARN: git status failed in dirty_tree_gate — fail-closed (treating as dirty)")
             return True
+        return bool(out.stdout.strip())
     except OSError:
-        pass
-    return False
+        log("WARN: git status raised in dirty_tree_gate — fail-closed (treating as dirty)")
+        return True
 
 
 def _required_context_window() -> int | None:
@@ -166,7 +174,7 @@ def context_rot_threshold() -> int:
             return int(env)
         except ValueError:
             log(f"WARN: STANOK_CONTEXT_ROT_TOKENS={env!r} is not an integer; ignoring")
-    window = _required_context_window() or 125000
+    window = _required_context_window() or 128000
     return int(window * 0.8)
 
 
@@ -197,7 +205,37 @@ def preflight_server() -> bool:
     return True
 
 
-def prepare_workspace() -> int:
+def parse_ticket_header(ticket_text: str) -> tuple[list[str], bool]:
+    """Ticket-scoped invariant (W2.1): the header is the leading block of
+    `module: <name>` lines (one per module) plus an optional `reset: none`
+    escape hatch for extension tickets. `#` title lines and blank lines are
+    skipped inside the header block; the first other line ends it (a module
+    mentioned in the body is never matched). Paths follow CLAUDE.md rule 1:
+    src/<m>.js, tests/<m>.test.js, docs/<m>.md.
+    Returns (declared_paths, reset_none)."""
+    modules: list[str] = []
+    reset_none = False
+    for line in ticket_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = _MODULE_RE.match(stripped)
+        if m:
+            modules.append(m.group(1))
+            continue
+        if _RESET_NONE_RE.match(stripped):
+            reset_none = True
+            continue
+        break
+    declared = [
+        f"{zone}/{m}{ext}"
+        for m in modules
+        for zone, ext in (("src", ".js"), ("tests", ".test.js"), ("docs", ".md"))
+    ]
+    return declared, reset_none
+
+
+def prepare_workspace(declared_paths: list[str]) -> int:
     # SEC-01: .git is read-only inside the bwrap sandbox — NO git writes here.
     # The cleanliness gate is dirty_tree_gate() (single source, called by main()
     # rc=22 and by launch.sh via `check-dirty`). This function only prepares the
@@ -205,11 +243,23 @@ def prepare_workspace() -> int:
     try:
         for d in ("src", "tests", "docs"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
-        # D2: the previous run may have frozen test files (chmod a-w, set by
-        # hooks/verifier.sh on RED). Unfreeze before this run's test-writing
-        # phase — the freeze is per-run, not permanent.
-        subprocess.run(["chmod", "-R", "u+w", os.path.join(REPO_ROOT, "tests")],
-                       capture_output=True)
+        # Ticket-scoped invariant (W2.2): QUARANTINE (not delete) the artifacts
+        # the ticket declares, so the run starts in a state where they do not
+        # exist. Non-destructive: moved to _live_dir/pre-existing/ (outside the
+        # repo — dirty_tree_gate is unaffected). Called ONCE before the session:
+        # retries never wipe the model's work.
+        quarantined = []
+        for rel in declared_paths:
+            src_path = os.path.join(REPO_ROOT, rel)
+            if not os.path.exists(src_path):
+                continue
+            dest = os.path.join(_live_dir, "pre-existing", rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.move(src_path, dest)
+            quarantined.append(rel)
+        if quarantined:
+            log(f"QUARANTINE: {len(quarantined)} pre-existing declared path(s) "
+                f"moved to {_live_dir}/pre-existing/: {quarantined}")
         return 0
     except OSError as e:
         log(f"ERROR: repo prep failed: {e}")
@@ -276,12 +326,20 @@ def _run_one_test(rel: str) -> tuple[str, str] | None:
     return None
 
 
-def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
-    """Verdict = run every test the project's runner declares (D3).
+def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tuple[str, str]]]:
+    """Verdict = positive contract on the ticket's declared paths (W2.3)
+    + every test the project's runner declares (D3).
 
     Discovery goes through the project entrypoint too (run.sh list), so the
     machine no longer hardcodes the *.test.js convention.
     """
+    failures: list[tuple[str, str]] = []
+    # Positive contract: every artifact the ticket declares must exist.
+    # Closes the hole where a model that skipped docs/<m>.md still passed.
+    for rel in (declared_paths or []):
+        if not os.path.exists(os.path.join(REPO_ROOT, rel)):
+            failures.append((rel, f"MISSING: declared by the ticket but not created: {rel}"))
+
     try:
         lp = subprocess.run(["bash", "scripts/run.sh", "list"],
                             cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
@@ -289,9 +347,10 @@ def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
         return (False, [("(no tests)", f"run.sh list failed: {e}")])
     tests = [ln.strip() for ln in (lp.stdout or "").splitlines() if ln.strip()]
     if not tests:
+        if failures:
+            return (False, failures)
         return (False, [("(no tests)", "The project runner declares no tests")])
 
-    failures: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
         futures = {ex.submit(_run_one_test, t): t for t in tests}
         for fut in as_completed(futures):
@@ -300,6 +359,42 @@ def verify_gate() -> tuple[bool, list[tuple[str, str]]]:
                 failures.append(res)
     failures.sort(key=lambda x: x[0])
     return (len(failures) == 0, failures)
+
+
+def _tests_manifest() -> dict[str, str]:
+    """Snapshot {rel_path: sha256} of tests/ (contract_lock, W2.5)."""
+    manifest: dict[str, str] = {}
+    tests_dir = os.path.join(REPO_ROOT, "tests")
+    if not os.path.isdir(tests_dir):
+        return manifest
+    for root, _dirs, files in os.walk(tests_dir):
+        for name in files:
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, REPO_ROOT)
+            try:
+                with open(full, "rb") as f:
+                    manifest[rel] = hashlib.sha256(f.read()).hexdigest()
+            except OSError:
+                manifest[rel] = "unreadable"
+    return manifest
+
+
+def _check_contract_lock(before: dict[str, str], job: dict, turn: int) -> None:
+    """After each turn: a pre-existing test file that was MODIFIED or DELETED
+    is a contract_lock violation (replaces the chmod a-w freeze, W2.5).
+    New test files are allowed (a ticket may declare several)."""
+    after = _tests_manifest()
+    violations = []
+    for rel, digest in before.items():
+        if rel not in after:
+            violations.append(f"DELETED: {rel}")
+        elif after[rel] != digest:
+            violations.append(f"MODIFIED: {rel}")
+    if violations:
+        job.setdefault("contract_lock_violations", []).extend(
+            f"turn {turn}: {v}" for v in violations
+        )
+        log(f"  [CONTRACT-LOCK] turn {turn}: {violations}")
 
 
 # ==================================================================================
@@ -349,17 +444,22 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> tuple[dict, dict]:
-    """Returns (turn_total, live_window).
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> tuple[dict, dict, int]:
+    """Returns (turn_total, live_window, writes).
 
     turn_total  — ResultMessage.usage: cumulative across the turn's API calls
                   (for session totals).
     live_window — the last AssistantMessage.usage: the prompt size actually sent
                   on the final API call (the true context window, for CONTEXT-ROT).
+    writes      — count of Write/Edit tool_use blocks in the turn (NO-OP assert,
+                  W2.4; immune to test side effects, unlike a file manifest).
     """
+    from claude_agent_sdk import ResultMessage
+
     await client.query(prompt)
     live_window = {}
     turn_total = {}
+    writes = 0
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
         if not sid and hasattr(msg, "data") and isinstance(msg.data, dict):
@@ -369,16 +469,76 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
 
         u = _extract_usage(msg)
         if u:
-            if type(msg).__name__ == "ResultMessage":
+            if isinstance(msg, ResultMessage):
                 turn_total = u
             else:
                 live_window = u
 
+        content = getattr(msg, "content", None)
+        if isinstance(content, list):
+            for block in content:
+                if getattr(block, "name", None) in ("Write", "Edit"):
+                    writes += 1
+
         _write_stream_msg(stream_f, turn, msg)
-    return (turn_total or live_window), live_window
+    return (turn_total or live_window), live_window, writes
 
 
-async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int) -> int:
+def _build_run_mcp_server():
+    """W3.1: the MCP `run` tool — the machine's only way to run tests.
+
+    Typed schema {mode: test|smoke|list, path: str}. The only validation
+    left from the old bash-gate: ONE realpath check that the path stays
+    inside REPO_ROOT/{src,tests}. run.sh keeps its own checks (2nd line).
+    The handler runs host-side (same trust level as the host verify_gate).
+    """
+    from claude_agent_sdk import create_sdk_mcp_server, tool
+
+    @tool(
+        "run",
+        "Project test runner — the ONLY way to run tests. "
+        "mode: 'test' (run one test file), 'smoke' (run one module), "
+        "'list' (list test files). path: repo-relative file — "
+        "tests/<module>.test.js for 'test', src/<module>.js for 'smoke'; "
+        "omit path for 'list'.",
+        {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["test", "smoke", "list"]},
+                "path": {"type": "string"},
+            },
+            "required": ["mode"],
+        },
+    )
+    async def run(args: dict) -> dict:
+        mode = args.get("mode", "")
+        path = args.get("path") or ""
+        if path:
+            abs_path = os.path.realpath(os.path.join(REPO_ROOT, path))
+            roots = (
+                os.path.realpath(os.path.join(REPO_ROOT, "src")),
+                os.path.realpath(os.path.join(REPO_ROOT, "tests")),
+            )
+            if not any(abs_path == r or abs_path.startswith(r + os.sep) for r in roots):
+                return {
+                    "content": [{"type": "text", "text": f"run: DENIED — path must be inside src/ or tests/ (got {path!r})"}],
+                    "is_error": True,
+                }
+        cmd = ["bash", "scripts/run.sh", mode] + ([path] if path else [])
+        try:
+            proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            return {"content": [{"type": "text", "text": "run: TIMEOUT — the runner hung (90s)"}], "is_error": True}
+        log(f"[RUN-TOOL] mode={mode} path={path or '-'} rc={proc.returncode}")
+        text = proc.stdout or ""
+        if proc.stderr:
+            text += ("\n" if text else "") + proc.stderr
+        return {"content": [{"type": "text", "text": f"[run {mode}] rc={proc.returncode}\n{text[:8000]}"}]}
+
+    return create_sdk_mcp_server(name="run", version="1.0.0", tools=[run])
+
+
+async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, declared_paths: list[str]) -> int:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
     local_run_id = str(uuid.uuid4())[:8]
@@ -389,8 +549,10 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         cwd=REPO_ROOT,
         setting_sources=["project"],
         settings=f"{REPO_ROOT}/.claude/settings.stanok.json",
-        permission_mode="default",
+        permission_mode="dontAsk",
         allowed_tools=CURATED_TOOLS,
+        mcp_servers={"run": _build_run_mcp_server()},
+        max_turns=30,
         model=LOCAL_MODEL,
         env=build_agent_env(),
     )
@@ -408,6 +570,10 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
     job["tokens"] = total_tokens
     job["cache_hit_rate"] = "0.0%"
 
+    # contract_lock (W2.5): snapshot tests/ before the session; a pre-existing
+    # test file modified/deleted during the run is a violation in summary.json.
+    tests_manifest_before = _tests_manifest()
+
     with open(stream_out_path, "a", encoding="utf-8") as stream_f:
         async with ClaudeSDKClient(options=options) as client:
             for turn in range(1, max_turns + 1):
@@ -419,7 +585,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 )
 
                 try:
-                    turn_usage, live_window = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
+                    turn_usage, live_window, turn_writes = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
                 except asyncio.TimeoutError:
                     log(f"TIMEOUT: turn {turn} exceeded {TURN_TIMEOUT_S:.0f}s (silent stall) -> interrupt")
                     try:
@@ -428,9 +594,12 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                         log(f"WARN: client.interrupt() finished with an error: {e}")
 
                     try:
-                        await asyncio.wait_for(turn_task, timeout=5.0)
+                        await asyncio.wait_for(asyncio.shield(turn_task), timeout=5.0)
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         pass
+                    if not turn_task.done():
+                        turn_task.cancel()
+                    await asyncio.gather(turn_task, return_exceptions=True)
 
                     job["error"] = f"TURN-TIMEOUT ({TURN_TIMEOUT_S:.0f}s)"
                     job["verifier"] = "FAIL"
@@ -485,16 +654,43 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     "cache_creation_input_tokens": c_create,
                     "live_context_tokens": live_context,
                     "turn_hit_rate": round(turn_hit_rate, 1),
+                    "writes": turn_writes,
                 })
+
+                # contract_lock (W2.5): did the turn touch pre-existing tests?
+                _check_contract_lock(tests_manifest_before, job, turn)
+
+                # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
+                # spike in the turn's input_tokens (uncached re-send).
+                prev_inputs = [t["input_tokens"] for t in job["turn_telemetry"][:-1]]
+                if prev_inputs:
+                    median_prev = sorted(prev_inputs)[len(prev_inputs) // 2]
+                    if inp > 2 * median_prev:
+                        job["turn_telemetry"][-1]["prefix_break"] = True
+                        log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} "
+                            f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
+                elif inp > 4000:
+                    job["turn_telemetry"][-1]["prefix_break"] = True
+                    log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} > 4000 baseline")
 
                 rot_threshold = context_rot_threshold()
                 if live_context > rot_threshold:
                     log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
                         f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
 
-                verify_ok, failures = verify_gate()
+                verify_ok, failures = verify_gate(declared_paths)
 
                 if verify_ok:
+                    # NO-OP assert (W2.4): a turn-1 pass with zero Write/Edit
+                    # tool_use means the machine did no work — the artifacts
+                    # pre-existed. rc=1 (defect); no new rc code is introduced.
+                    if turn == 1 and turn_writes == 0:
+                        log("NO-OP-PASS: verifier passed on turn 1 with zero "
+                            "Write/Edit calls — the machine did no work")
+                        job["verifier"] = "PASS"
+                        job["probe_result"] = "NO-OP-PASS"
+                        job["turns"] = turn
+                        return 1
                     log("VERIFIER: PASS — All tests passed successfully!")
                     job["verifier"] = "PASS"
                     job["turns"] = turn
@@ -560,21 +756,36 @@ def _install_signal_handlers() -> None:
     signal.signal(signal.SIGINT, handler)
 
 
-def write_summary(job: dict, elapsed_s: int) -> None:
-    """Builds the exact summary.json contract expected by the L1 Supervisor."""
+def _status_fields(rc: int, verifier: str, turns: int) -> tuple[str, str, str]:
+    """RC_TABLE — single source of the status fields, derived from
+    (rc, verifier, turns). A new outcome = one row here.
+    Fail-closed: only rc==0 AND verifier=="PASS" is a pass; everything
+    else is a defect (no PASS-on-FAIL)."""
+    if rc == 0 and verifier == "PASS":
+        probe_result = "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
+        return probe_result, "PASS", "CLEAN"
+    return "VERIFY-FAIL", "FAIL", "DEFECT"
+
+
+def build_summary(job: dict, elapsed_s: int) -> dict:
+    """Single source of the summary.json schema (shared by write_summary
+    and early_abort)."""
     turns = job.get("turns", 1)
     verifier = job.get("verifier", "FAIL")
     rc = job.get("rc", 1)
-
-    if rc == 0 and verifier == "PASS":
-        probe_result = "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
-        c5 = "PASS"
-    else:
-        probe_result = "VERIFY-FAIL" if rc != 0 else "PASS"
-        c5 = "PASS" if rc == 0 else "FAIL"
-
+    probe_result, c5, review_verdict = _status_fields(rc, verifier, turns)
     if job.get("probe_result"):
         probe_result = job["probe_result"]
+        # rc=1 is polysemous: NO-OP-PASS vs exhausted-retries. Disambiguate by
+        # probe_result, NOT rc — the rc->fields table cannot express two field
+        # sets for one rc, so _status_fields is not a pure function of rc (the
+        # probe_result override above already broke that); do not "restore" a
+        # pure rc->fields table. A NO-OP is a success: verify_gate really
+        # passed (c5=PASS is a fact), and review_verdict is the third outcome
+        # (NOOP) — neither CLEAN (no build) nor DEFECT (no defect).
+        if probe_result == "NO-OP-PASS":
+            c5 = "PASS"
+            review_verdict = "NOOP"
 
     per_turn = job.get("turn_telemetry", [])
     inference_telemetry = {
@@ -587,26 +798,42 @@ def write_summary(job: dict, elapsed_s: int) -> None:
         },
     }
 
-    summary = {
+    # Provenance (W2.6): the exact commit the run started from.
+    commit_sha = None
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            commit_sha = out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    return {
         "label": job.get("label"),
         "ticket": job.get("ticket"),
         "rc": rc,
         "verifier": verifier,
         "probe_result": probe_result,
-        "review_verdict": "CLEAN" if rc == 0 else "DEFECT",
+        "review_verdict": review_verdict,
         "cloud_calls": 0,
         "c5": c5,
         "turns": turns,
         "elapsed_s": elapsed_s,
         "session_id": job.get("session_id"),
+        "commit_sha": commit_sha,
         "tokens": job.get("tokens", {}),
         "cache_hit_rate": job.get("cache_hit_rate", "0.0%"),
         "inference_telemetry": inference_telemetry,
+        "contract_lock_violations": job.get("contract_lock_violations", []),
         "errors": [job["error"]] if job.get("error") else [],
         "failures": job.get("failures", []),
     }
+
+
+def write_summary(job: dict, elapsed_s: int) -> None:
+    """Writes the exact summary.json contract expected by the L1 Supervisor."""
     with open(os.path.join(_evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+        json.dump(build_summary(job, elapsed_s), f, ensure_ascii=False, indent=2)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -665,6 +892,34 @@ def cmd_run(args) -> int:
     if args.direct:
         log("--direct MODE: the ticket path is resolved relative to the repository")
 
+    # Ticket-scoped invariant (W2.1): parse the header BEFORE any workspace
+    # mutation. Fail-closed: no `module:` line and no `reset: none` means the
+    # invariant cannot be enforced (the old false CLEAN-FIRST returns).
+    try:
+        with open(args.ticket_path, encoding="utf-8") as f:
+            ticket_prompt = f.read().strip()
+    except OSError as e:
+        job["rc"] = 13
+        job["error"] = f"ticket read error: {e}"
+        write_summary(job, int(time.time()) - start_ts)
+        if os.path.exists(_marker_path):
+            try: os.remove(_marker_path)
+            except OSError: pass
+        return 13
+
+    declared_paths, reset_none = parse_ticket_header(ticket_prompt)
+    if not declared_paths and not reset_none:
+        job["rc"] = 13
+        job["error"] = ("ticket declares no `module:` line and no `reset: none` — "
+                        "the ticket-scoped invariant cannot be enforced (fail-closed)")
+        write_summary(job, int(time.time()) - start_ts)
+        if os.path.exists(_marker_path):
+            try: os.remove(_marker_path)
+            except OSError: pass
+        return 13
+    if declared_paths:
+        log(f"DECLARED PATHS: {declared_paths}")
+
     if not preflight_server():
         job["rc"] = 20
         job["error"] = f"Server unavailable ({SERVER_URL})"
@@ -674,7 +929,7 @@ def cmd_run(args) -> int:
             except OSError: pass
         return 20
 
-    if prepare_workspace() != 0:
+    if prepare_workspace(declared_paths) != 0:
         job["rc"] = 14
         job["error"] = "workspace prep error"
         write_summary(job, int(time.time()) - start_ts)
@@ -685,9 +940,7 @@ def cmd_run(args) -> int:
 
     rc = 1
     try:
-        with open(args.ticket_path, encoding="utf-8") as f:
-            ticket_prompt = f.read().strip()
-        rc = asyncio.run(run_continuous_session(job, ticket_prompt, args.local_retries))
+        rc = asyncio.run(run_continuous_session(job, ticket_prompt, args.local_retries, declared_paths))
     except KeyboardInterrupt:
         rc = _INTERRUPTED_RC or 130
     except Exception as e:
@@ -839,25 +1092,17 @@ def main() -> int:
             os.makedirs(evidence_dir, exist_ok=True)
             sum_path = os.path.join(evidence_dir, "summary.json")
             if not os.path.exists(sum_path):
-                payload = {
+                job = {
                     "label": args.label,
                     "ticket": args.ticket,
                     "rc": rc,
                     "verifier": "FAIL",
                     "probe_result": "EARLY-ABORT",
-                    "review_verdict": "DEFECT",
-                    "cloud_calls": 0,
-                    "c5": "FAIL",
                     "turns": 0,
-                    "elapsed_s": 0,
-                    "session_id": None,
-                    "tokens": {},
-                    "cache_hit_rate": "0.0%",
-                    "errors": [err_msg],
-                    "failures": [],
+                    "error": err_msg,
                 }
                 with open(sum_path, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                    json.dump(build_summary(job, 0), f, ensure_ascii=False, indent=2)
             return rc
 
         if validate_label(args.label):
