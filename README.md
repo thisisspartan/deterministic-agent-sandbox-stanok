@@ -50,8 +50,9 @@ sandbox-run.sh                — bwrap sandbox: repo mounted read-only with wri
                                 carve-outs (src/, tests/, docs/, evidence/,
                                 .stanok-logs/);
                                 .git is mounted strictly read-only (--ro-bind)
-hooks/                        — deterministic gates: read-guard, bash-gate,
-                                verifier, doctor, commit-msg
+hooks/                        — verifier (PostToolUse Write|Edit: runs the
+                                matching test, injects RED/GREEN), doctor,
+                                commit-msg
 .claude/settings.stanok.json  — the machine sandbox (allow/deny, hooks)
 CLAUDE.md                     — the machine role (auto-loaded inside the repo)
 setup.sh                      — environment deployment (.venv)
@@ -75,21 +76,24 @@ src/ tests/ docs/             — the machine working directories (empty at star
 ## How it works (briefly)
 
 1. `launch.sh run` (shim → Runner) passes the fail-closed gates in this order:
-   label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->
-   dirty-tree (rc=22, uncommitted changes — start forbidden) -> lock (rc=21) ->
-   pre-flight `/props` of the server (rc=20; fail-closed also when the
-   server `n_ctx` is below the required window). The dirty-tree gate is
-   fail-closed: no destructive reset/clean — the operator commits before launch.
+   shim check-dirty (rc=22, host side) -> label-guard (rc=15) ->
+   ROLE-LEAK (rc=24) -> ticket (rc=13) -> dirty-tree (rc=22, uncommitted
+   changes — start forbidden) -> lock (rc=21) -> ticket header (rc=13: a
+   `module:` line or `reset: none` is required — the ticket-scoped
+   invariant, W2.1) -> pre-flight `/props` of the server (rc=20;
+   fail-closed also when the server `n_ctx` is below the required window).
+   The dirty-tree gate is fail-closed: no destructive reset/clean — the
+   operator commits before launch.
 2. The Runner opens ONE Claude session (cwd = repo) inside the bwrap sandbox
    (`sandbox-run.sh`): settings from `.claude/settings.stanok.json`, tools
-   Read/Write/Edit/Grep/Glob/Bash — Bash restricted to `bash scripts/run.sh …`
-   by bash-gate; subagents (Agent/Task) are denied.
+   Read/Write/Edit/Grep/Glob/run — `run` (MCP) is the ONLY shell
+   (`scripts/run.sh test|smoke|list`); Bash is denied; subagents
+   (Agent/Task) are denied.
 3. Monolithic TDD in a single session: the model writes the test first
-   (red), then the implementation (green), then docs. After every Write/Edit:
-   verifier.sh runs the matching test through `scripts/run.sh` and, on RED,
-   freezes that test file read-only (`chmod a-w`) — an OS fact, not a hash:
-   the spec cannot be weakened. The Runner unfreezes `tests/` at the start of
-   every run.
+   (red), then the implementation (green), then docs. After every Write/Edit
+   under `tests/`: verifier.sh (PostToolUse) runs the matching test through
+   `scripts/run.sh` and injects the verdict (RED CONFIRMED / GREEN) into the
+   session — the TDD red phase is harness-provided, not model discipline.
 4. On verifier FAIL the Runner appends an in-session retry turn
    (`--local-retries`, default 2) with the failure block.
 5. Final: `verifier: PASS/FAIL`, `probe_result: CLEAN-FIRST |
@@ -98,7 +102,7 @@ src/ tests/ docs/             — the machine working directories (empty at star
 
 ## Commits
 
-The agent does NOT commit: bash-gate allows only `bash scripts/run.sh …`,
-so git is unreachable from inside the sandbox. The operator commits
-(outside the sandbox) — the dirty-tree gate (rc=22) is the checkpoint:
-a run starts only on a clean tree.
+The agent does NOT commit: Bash is denied (the `run` tool is the only shell)
+and `.git` is mounted read-only inside the bwrap sandbox, so git is
+unreachable from inside. The operator commits (outside the sandbox) — the
+dirty-tree gate (rc=22) is the checkpoint: a run starts only on a clean tree.
