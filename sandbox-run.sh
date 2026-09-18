@@ -188,9 +188,12 @@ trap cleanup EXIT INT TERM
 # the venv is unusable in the container and `import claude_agent_sdk`
 # fails. The Dockerfile bakes the SDK into the image's system python on
 # purpose: run that directly (same binary, no venv confusion).
-if [ "$1" = "$REPO_ROOT/.venv/bin/python" ] || [ ! -x "$1" ]; then
-    set -- /usr/bin/python3 "${@:2}"
-fi
+case "$1" in
+    "$REPO_ROOT/.venv/bin/python")
+        set -- /usr/bin/python3 "${@:2}" ;;
+    /*)
+        [ -x "$1" ] || set -- /usr/bin/python3 "${@:2}" ;;
+esac
 docker run --rm \
   --name "$CONTAINER_NAME" \
   --init \

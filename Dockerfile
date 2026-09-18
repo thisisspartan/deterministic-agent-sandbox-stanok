@@ -62,12 +62,17 @@ ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 #                           apparmor=unconfined at docker run (see
 #                           sandbox-run.sh) and enableWeakerNestedSandbox=true
 #                           (skips --proc /proc, which EPERMs in a container).
+# socat                   — the CLI's network bridge (allowedDomains) forwards
+#                           the sandbox's HTTP/SOCKS bridge sockets via socat;
+#                           the CLI hard-fails at startup without it (verified:
+#                           "dependencies are missing: socat not installed").
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ca-certificates \
       curl \
       build-essential \
       bubblewrap \
+      socat \
       python3 \
       python3-pip \
       python3-venv \
