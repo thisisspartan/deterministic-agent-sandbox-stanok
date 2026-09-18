@@ -17,10 +17,8 @@ test('add(0, 0) === 0', () => {
   assert.equal(add(0, 0), 0);
 });
 
-test('add returns a number', () => {
+test('add returns numeric sums for other inputs', () => {
+  assert.equal(add(-4, -6), -10);
+  assert.equal(add(1.5, 2.25), 3.75);
   assert.equal(typeof add(1, 2), 'number');
-});
-
-test('add works with floats', () => {
-  assert.equal(add(0.1, 0.2), 0.1 + 0.2);
 });
