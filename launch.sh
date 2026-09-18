@@ -99,7 +99,7 @@ if [ -n "$RETRIES" ]; then
     PY_FLAGS+=(--local-retries "$RETRIES")
 fi
 
-# SEC-01: .git is mounted read-only inside the bwrap sandbox — no git writes are
+# SEC-01: .git is mounted read-only inside the container — no git writes are
 # possible there. FAIL-CLOSED (rc=22): the tree must be clean BEFORE launch;
 # the supervisor commits machine artifacts / operator state before each run.
 # Never reset/clean here — that would silently destroy uncommitted work.

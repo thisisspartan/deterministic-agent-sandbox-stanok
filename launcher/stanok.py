@@ -54,14 +54,15 @@ if TURN_TIMEOUT_S <= API_TIMEOUT_S:
     TURN_TIMEOUT_S = API_TIMEOUT_S + max(15.0, API_TIMEOUT_S * 0.2)
 
 API_TIMEOUT_MS = str(int(API_TIMEOUT_S * 1000))
-# The MCP `run` tool is auto-approved by its CANONICAL name (cli.js D77/wK1
-# match allow rules against mcp__<server>__<tool>, not the NO_PREFIX display
-# name), so the allow rule must be "mcp__run__run".
-CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "mcp__run__run"]
+# Native Bash replaces the old MCP `run` tool (Docker refactor): the model
+# runs `bash scripts/run.sh {list,test,smoke}` directly; the boundary is the
+# container, not a per-command allowlist.
+CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_MODULE_RE = re.compile(r"^module:\s*([A-Za-z0-9_.-]+)\s*$")
+_FILE_LINE_RE = re.compile(r"^(impl|test|docs):\s*([A-Za-z0-9_./-]+)\s*$")
 _RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
+_DECLARED_ZONES = ("src", "tests", "docs", "scripts")
 
 _stdout_log_f = None
 _marker_path = None
@@ -205,43 +206,57 @@ def preflight_server() -> bool:
     return True
 
 
+def _validate_declared_path(rel: str) -> bool:
+    """Literal `files:` paths are ticket-supplied input: prepare_workspace's
+    quarantine shutil.move()s them, so an unvalidated path (e.g. `impl:
+    /etc/passwd`) could destroy arbitrary host files. Fail-closed: relative,
+    no `..` segments, top-level dir inside the writable zones."""
+    if rel.startswith("/") or rel.startswith("./"):
+        return False
+    if ".." in rel.split("/"):
+        return False
+    return rel.split("/", 1)[0] in _DECLARED_ZONES
+
+
 def parse_ticket_header(ticket_text: str) -> tuple[list[str], bool]:
     """Ticket-scoped invariant (W2.1): the header is the leading block of
-    `module: <name>` lines (one per module) plus an optional `reset: none`
-    escape hatch for extension tickets. `#` title lines and blank lines are
-    skipped inside the header block; the first other line ends it (a module
-    mentioned in the body is never matched). Paths follow CLAUDE.md rule 1:
-    src/<m>.js, tests/<m>.test.js, docs/<m>.md.
+    literal `impl: <path>` / `test: <path>` / `docs: <path>` lines plus an
+    optional `reset: none` escape hatch for extension tickets. `#` title
+    lines and blank lines are skipped inside the header block; the first
+    other line ends it (a path mentioned in the body is never matched).
+    Paths are validated (relative, no `..`, inside src/tests/docs/scripts);
+    an invalid path raises ValueError (fail-closed, rc=13 upstream).
     Returns (declared_paths, reset_none)."""
-    modules: list[str] = []
+    declared: list[str] = []
     reset_none = False
     for line in ticket_text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        m = _MODULE_RE.match(stripped)
+        m = _FILE_LINE_RE.match(stripped)
         if m:
-            modules.append(m.group(1))
+            rel = m.group(2)
+            if not _validate_declared_path(rel):
+                raise ValueError(
+                    f"invalid declared path {rel!r}: must be relative, contain no "
+                    f"'..', and start with one of {list(_DECLARED_ZONES)}"
+                )
+            declared.append(rel)
             continue
         if _RESET_NONE_RE.match(stripped):
             reset_none = True
             continue
         break
-    declared = [
-        f"{zone}/{m}{ext}"
-        for m in modules
-        for zone, ext in (("src", ".js"), ("tests", ".test.js"), ("docs", ".md"))
-    ]
     return declared, reset_none
 
 
 def prepare_workspace(declared_paths: list[str]) -> int:
-    # SEC-01: .git is read-only inside the bwrap sandbox — NO git writes here.
+    # SEC-01: .git is read-only inside the container — NO git writes here.
     # The cleanliness gate is dirty_tree_gate() (single source, called by main()
     # rc=22 and by launch.sh via `check-dirty`). This function only prepares the
     # writable workspace.
     try:
-        for d in ("src", "tests", "docs"):
+        for d in ("src", "tests", "docs", "scripts"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
         # Ticket-scoped invariant (W2.2): QUARANTINE (not delete) the artifacts
         # the ticket declares, so the run starts in a state where they do not
@@ -272,7 +287,7 @@ def prepare_workspace(declared_paths: list[str]) -> int:
 def _extract_smart_diff(raw_text: str) -> str:
     cleaned_lines = [
         line for line in raw_text.strip().splitlines()
-        if "node:internal/" not in line and "node_modules/" not in line
+        if "node_modules/" not in line
     ]
     if not cleaned_lines:
         cleaned_lines = raw_text.strip().splitlines()
@@ -484,60 +499,6 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
     return (turn_total or live_window), live_window, writes
 
 
-def _build_run_mcp_server():
-    """W3.1: the MCP `run` tool — the machine's only way to run tests.
-
-    Typed schema {mode: test|smoke|list, path: str}. The only validation
-    left from the old bash-gate: ONE realpath check that the path stays
-    inside REPO_ROOT/{src,tests}. run.sh keeps its own checks (2nd line).
-    The handler runs host-side (same trust level as the host verify_gate).
-    """
-    from claude_agent_sdk import create_sdk_mcp_server, tool
-
-    @tool(
-        "run",
-        "Project test runner — the ONLY way to run tests. "
-        "mode: 'test' (run one test file), 'smoke' (run one module), "
-        "'list' (list test files). path: repo-relative file — "
-        "tests/<module>.test.js for 'test', src/<module>.js for 'smoke'; "
-        "omit path for 'list'.",
-        {
-            "type": "object",
-            "properties": {
-                "mode": {"type": "string", "enum": ["test", "smoke", "list"]},
-                "path": {"type": "string"},
-            },
-            "required": ["mode"],
-        },
-    )
-    async def run(args: dict) -> dict:
-        mode = args.get("mode", "")
-        path = args.get("path") or ""
-        if path:
-            abs_path = os.path.realpath(os.path.join(REPO_ROOT, path))
-            roots = (
-                os.path.realpath(os.path.join(REPO_ROOT, "src")),
-                os.path.realpath(os.path.join(REPO_ROOT, "tests")),
-            )
-            if not any(abs_path == r or abs_path.startswith(r + os.sep) for r in roots):
-                return {
-                    "content": [{"type": "text", "text": f"run: DENIED — path must be inside src/ or tests/ (got {path!r})"}],
-                    "is_error": True,
-                }
-        cmd = ["bash", "scripts/run.sh", mode] + ([path] if path else [])
-        try:
-            proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=90)
-        except subprocess.TimeoutExpired:
-            return {"content": [{"type": "text", "text": "run: TIMEOUT — the runner hung (90s)"}], "is_error": True}
-        log(f"[RUN-TOOL] mode={mode} path={path or '-'} rc={proc.returncode}")
-        text = proc.stdout or ""
-        if proc.stderr:
-            text += ("\n" if text else "") + proc.stderr
-        return {"content": [{"type": "text", "text": f"[run {mode}] rc={proc.returncode}\n{text[:8000]}"}]}
-
-    return create_sdk_mcp_server(name="run", version="1.0.0", tools=[run])
-
-
 async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, declared_paths: list[str]) -> int:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
@@ -551,7 +512,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         settings=f"{REPO_ROOT}/.claude/settings.stanok.json",
         permission_mode="dontAsk",
         allowed_tools=CURATED_TOOLS,
-        mcp_servers={"run": _build_run_mcp_server()},
         max_turns=30,
         model=LOCAL_MODEL,
         env=build_agent_env(),
@@ -704,7 +664,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
                     if has_no_tests:
                         rules = (
-                            "1. There are no test files in the tests/ directory! Create the reference *.test.js strictly per the ticket specification.\n"
+                            "1. There are no test files in the tests/ directory! Create the reference tests strictly per the ticket specification.\n"
                             "2. Then implement the corresponding working module code in the src/ directory."
                         )
                     else:
@@ -893,25 +853,27 @@ def cmd_run(args) -> int:
         log("--direct MODE: the ticket path is resolved relative to the repository")
 
     # Ticket-scoped invariant (W2.1): parse the header BEFORE any workspace
-    # mutation. Fail-closed: no `module:` line and no `reset: none` means the
-    # invariant cannot be enforced (the old false CLEAN-FIRST returns).
+    # mutation. Fail-closed: no `impl:`/`test:`/`docs:` line and no
+    # `reset: none` means the invariant cannot be enforced (the old false
+    # CLEAN-FIRST returns); an invalid literal path is rejected the same way.
     try:
         with open(args.ticket_path, encoding="utf-8") as f:
             ticket_prompt = f.read().strip()
-    except OSError as e:
+        declared_paths, reset_none = parse_ticket_header(ticket_prompt)
+    except (OSError, ValueError) as e:
         job["rc"] = 13
-        job["error"] = f"ticket read error: {e}"
+        job["error"] = f"ticket parse error: {e}"
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
             except OSError: pass
         return 13
 
-    declared_paths, reset_none = parse_ticket_header(ticket_prompt)
     if not declared_paths and not reset_none:
         job["rc"] = 13
-        job["error"] = ("ticket declares no `module:` line and no `reset: none` — "
-                        "the ticket-scoped invariant cannot be enforced (fail-closed)")
+        job["error"] = ("ticket declares no `impl:`/`test:`/`docs:` line and no "
+                        "`reset: none` — the ticket-scoped invariant cannot be "
+                        "enforced (fail-closed)")
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
@@ -1122,8 +1084,8 @@ def main() -> int:
         if dirty_tree_gate():
             return early_abort(22, "ERROR: the machine repo contains uncommitted changes (rc=22)")
 
-        # Background mode is owned by launch.sh (host-side nohup): inside the bwrap
-        # namespace a self-re-spawn would bypass the lock and the host gates.
+        # Background mode is owned by launch.sh (host-side nohup): inside the
+        # container a self-re-spawn would bypass the lock and the host gates.
         lock_path = os.path.join(LOG_DIR, f"stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock")
         lf = open(lock_path, "w")
         try:

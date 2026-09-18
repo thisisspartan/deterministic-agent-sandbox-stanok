@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# run.sh — the ONLY command available to the machine's model (via the MCP `run` tool).
-# The model does NOT assemble shell commands: the subcommands are fixed, the script
-# validates the paths. No shell operators, no network, no git.
+# run.sh — the project's test entrypoint: the ONLY interface the machine's
+# model and the external verifier use to run tests (see CLAUDE.md,
+# "Project entrypoint"). The model has native Bash, but this script is the
+# fixed contract: the subcommands are fixed, the script validates the paths.
 #
 #   bash scripts/run.sh test <tests/*.test.js>...   — run the tests (single-file, one at a time)
 #   bash scripts/run.sh smoke <src/*.js>            — smoke run (stdin=/dev/null, timeout 10s)

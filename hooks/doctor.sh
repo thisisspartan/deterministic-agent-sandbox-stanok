@@ -25,24 +25,27 @@ chk "commit-msg executable"           test -x "$REPO_ROOT/hooks/commit-msg"
 HOOKS_DIR="$(git -C "$REPO_ROOT" rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
 chk "commit-msg hook"                 test -L "$REPO_ROOT/$HOOKS_DIR/commit-msg"   # FINDING-5: a broken symlink disables the TASK-ID gate
 chk "CLAUDE.md exists"                test -f "$REPO_ROOT/CLAUDE.md"
-chk "write-path src/tests/docs"       test -d "$REPO_ROOT/src" -a -d "$REPO_ROOT/tests" -a -d "$REPO_ROOT/docs"
+chk "write-path src/tests/docs/scripts" test -d "$REPO_ROOT/src" -a -d "$REPO_ROOT/tests" -a -d "$REPO_ROOT/docs" -a -d "$REPO_ROOT/scripts"
 chk "git repo initialized"            test -d "$REPO_ROOT/.git"
+chk "docker available"                command -v docker
+chk "machine image built"             docker image inspect "${STANOK_DOCKER_IMAGE:-stanok-machine:latest}"
 
 # --- Runner invariants (launcher/stanok.py; regression protection, feedback from "the elder brothers") ---
 # All checks run with STANOK_PY=system python3: the SDK is imported
 # lazily, the gates are pure stdlib, so the invariants work even without a deployed .venv.
-# STANOK_NO_SANDBOX=1: the tests check the RUNNER, not the sandbox; bwrap mounts
-# a private /tmp (--tmpfs /tmp), so mktemp /tmp/... tickets are invisible inside (rc=13).
+# STANOK_NO_SANDBOX=1: the tests check the RUNNER, not the sandbox; the Docker
+# container does not mount the host /tmp, so mktemp /tmp/... tickets are
+# invisible inside (rc=13).
 # Gate order (single source: launcher/stanok.py main() + the shim's check-dirty):
 #   shim: check-dirty (rc=22, host side, before python)
 #   python: label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->
 #           dirty-tree (rc=22) -> lock (rc=21) -> [cmd_run: W2.1 ticket header
-#           (rc=13, no module:/reset:none) -> pre-flight /props (rc=20)]
+#           (rc=13, no impl:/test:/docs:/reset:none) -> pre-flight /props (rc=20)]
 # 1) label-guard: a label starting with '--' -> rc=15 BEFORE ROLE-LEAK/lock
 #    (protection against evidence/--background when the label is forgotten). argparse swallows '--background'
 #    as a flag itself (rc=2), so we check the reachable path: an explicit '--'.
-# 2) fail-fast: a dead server -> rc=20. The ticket carries a `module:` line so the
-#    W2.1 header check (rc=13) does not mask the pre-flight refusal.
+# 2) fail-fast: a dead server -> rc=20. The ticket carries a `reset: none`
+#    line so the W2.1 header check (rc=13) does not mask the pre-flight refusal.
 #    On a dirty tree, dirty-tree (rc=22) fires BEFORE pre-flight — this is a valid
 #    refusal (skip), not a test regression.
 # 2b) dirty-tree: an uncommitted file -> rc=22 (reset --hard + clean -fdq would erase
@@ -68,9 +71,10 @@ else
 fi
 rm -f "$TMPT_LG"
 
-# 2) fail-fast on a dead server (rc=20). The ticket carries a `module:` line:
-# the W2.1 header check (no module:/reset:none -> rc=13) fires BEFORE preflight.
-TMPT="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nmodule: doctor\n' > "$TMPT"
+# 2) fail-fast on a dead server (rc=20). The ticket carries a `reset: none`
+# line: the W2.1 header check (no impl:/test:/docs:/reset:none -> rc=13)
+# fires BEFORE preflight.
+TMPT="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nreset: none\n' > "$TMPT"
 DR="doctor-dead-$$-${RANDOM}"
 if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL=http://127.0.0.1:59999 STANOK_NO_SANDBOX=1 \
      "$LAUNCH" run "$TMPT" "$DR" >/dev/null 2>&1; then
@@ -124,7 +128,7 @@ HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PYEOF
 python3 "$MOCKDIR/server.py" "$MOCKPORT" & MOCKPID=$!
 sleep 1
-TMPT4="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nmodule: doctor\n' > "$TMPT4"
+TMPT4="$(mktemp /tmp/doctor-ticket-XXXXXX.md)"; printf '# doctor\n\nreset: none\n' > "$TMPT4"
 DR2="doctor-window-$$-${RANDOM}"
 if STANOK_PY="$(command -v python3)" STANOK_SERVER_URL="http://127.0.0.1:$MOCKPORT" STANOK_NO_SANDBOX=1 \
      "$LAUNCH" run "$TMPT4" "$DR2" >/dev/null 2>&1; then
