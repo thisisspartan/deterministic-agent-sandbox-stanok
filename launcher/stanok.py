@@ -510,14 +510,20 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
             else:
                 live_window = u
 
-        # A ResultMessage with is_error=True (e.g. "API Error: terminated")
-        # means the SDK session is dead: further queries on it return a stale
-        # 0-token result instantly. Capture the reason so the caller can stop
-        # instead of burning the remaining turns on a dead session.
+        # A ResultMessage with is_error=True (e.g. "API Error: terminated" or
+        # "API Error: 503 Loading model") means the SDK session is dead: further
+        # queries on it return a stale 0-token result instantly. Capture the
+        # reason so the caller can stop instead of burning the remaining turns
+        # on a dead session. is_error/result are direct dataclass fields.
         if isinstance(msg, ResultMessage):
+            is_err = getattr(msg, "is_error", None)
+            res = getattr(msg, "result", None)
             data = getattr(msg, "data", None)
-            if isinstance(data, dict) and data.get("is_error"):
-                turn_error = str(data.get("result") or "unknown API error")
+            if isinstance(data, dict):
+                is_err = is_err or data.get("is_error")
+                res = res or data.get("result")
+            if is_err:
+                turn_error = str(res or "unknown API error")
 
         content = getattr(msg, "content", None)
         if isinstance(content, list):
