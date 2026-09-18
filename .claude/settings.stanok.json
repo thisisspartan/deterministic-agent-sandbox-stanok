@@ -34,10 +34,9 @@
       "Edit",
       "Grep",
       "Glob",
-      "mcp__run__run"
+      "Bash"
     ],
     "deny": [
-      "Bash",
       "WebSearch",
       "NotebookEdit",
       "EnterWorktree",
@@ -77,20 +76,17 @@
   "sandbox": {
     "enabled": true,
     "failIfUnavailable": true,
-    "allowUnsandboxedCommands": false,
+    "enableWeakerNestedSandbox": true,
     "network": {
-      "allowedDomains": ["192.168.8.131", "localhost", "127.0.0.1"]
-    },
-    "filesystem": {
-      "denyWrite": [
-        "../.git",
-        "../hooks",
-        "./settings.stanok.json"
-      ],
-      "denyRead": [
-        "~/.ssh",
-        "~/.aws",
-        "~/.config"
+      "allowedDomains": [
+        "192.168.8.131",
+        "localhost",
+        "127.0.0.1",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "registry.npmjs.org",
+        "deb.debian.org",
+        "security.debian.org"
       ]
     }
   },
