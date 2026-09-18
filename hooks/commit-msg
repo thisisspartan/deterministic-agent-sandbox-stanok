@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# commit-msg: TASK-ID gate (git-native, grok commit-msg analog).
+# Rejects a commit without TASK-STANOK-CC-NNN in the message.
+# The model does NOT commit (git-write is forbidden); only the operator commits,
+# outside the sandbox.
+MSG_FILE="$1"
+if ! grep -Eq 'TASK-STANOK-CC-[0-9]+' "$MSG_FILE"; then
+  echo "COMMIT REJECTED: commit message must contain TASK-STANOK-CC-NNN" >&2
+  exit 1
+fi
+exit 0
