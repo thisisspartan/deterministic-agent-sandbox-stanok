@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Machine environment setup: .venv + launcher dependencies.
+# Machine environment setup: .venv (host-side gate python) + launcher
+# dependencies + the Docker machine image.
 # Run: ./setup.sh  (from the root of the stanok repo)
 set -euo pipefail
 
@@ -31,6 +32,12 @@ fi
 
 echo "--- SDK check ---"
 .venv/bin/python -c "from claude_agent_sdk import query; print('claude-agent-sdk OK')"
+
+echo "--- building the machine image (Docker boundary) ---"
+# The .venv above is only the HOST-side python for launch.sh's check-dirty
+# gate; the run itself executes in the image (sandbox-run.sh remaps the
+# venv python to the image system python, which carries the SDK).
+docker build -t "${STANOK_DOCKER_IMAGE:-stanok-machine:latest}" -f "$DIR/Dockerfile" "$DIR"
 
 echo
 echo "Environment ready. Machine check:"
