@@ -180,6 +180,17 @@ trap cleanup EXIT INT TERM
 # No `exec`: it would replace this shell and discard the cleanup trap,
 # leaving the container orphaned when the launcher dies. Run docker as a
 # child; set -e propagates its exit code and the EXIT trap fires either way.
+#
+# Launcher python: the host's $1 is normally $REPO_ROOT/.venv/bin/python —
+# a symlink to /usr/bin/python3. Inside the container that symlink lands on
+# the IMAGE's python (3.11), but the venv's pyvenv.cfg and site-packages
+# were built for the host's python (3.12) and the venv dir is read-only —
+# the venv is unusable in the container and `import claude_agent_sdk`
+# fails. The Dockerfile bakes the SDK into the image's system python on
+# purpose: run that directly (same binary, no venv confusion).
+if [ "$1" = "$REPO_ROOT/.venv/bin/python" ] || [ ! -x "$1" ]; then
+    set -- /usr/bin/python3 "${@:2}"
+fi
 docker run --rm \
   --name "$CONTAINER_NAME" \
   --init \
