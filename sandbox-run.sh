@@ -44,12 +44,28 @@ if [ -z "$HOST_CLAUDE" ]; then
     exit 1
 fi
 HOST_CLAUDE_SHIM_DIR="$(dirname "$HOST_CLAUDE")"
-HOST_CLAUDE_REAL="$(readlink -f "$HOST_CLAUDE")"
-HOST_CLAUDE_DIR="$(dirname "$HOST_CLAUDE_REAL")"
 
-# Mount scope is deliberately narrow: ONLY the shim dir and the resolved
-# cli.js dir. A broader parent (e.g. dirname(dirname(cli.js))) can be a
-# user's git checkout root and would leak unrelated repos to the model.
+# The claude install can be a MULTI-HOP symlink chain (verified on this
+# host: bin/claude -> .npm-global/lib/node_modules/.../cli.js ->
+# git/claude-code-2.1.88/cli.js). Every directory a hop lives in must be
+# bind-mounted, or an intermediate hop dangles inside the container and
+# `command -v claude` fails. Scope stays narrow: only the chain's own
+# directories — never a broader parent that could be a user's git checkout
+# root leaking unrelated repos.
+CLAUDE_MOUNT_DIRS=()
+_hop="$HOST_CLAUDE"
+while :; do
+    _d="$(dirname "$_hop")"
+    case " ${CLAUDE_MOUNT_DIRS[*]} " in *" $_d "*) : ;; *) CLAUDE_MOUNT_DIRS+=("$_d") ;; esac
+    [ -L "$_hop" ] || break
+    _next="$(readlink "$_hop")"
+    case "$_next" in /*) : ;; *) _next="$_d/$_next" ;; esac
+    _hop="$_next"
+done
+CLAUDE_MOUNTS=()
+for _d in "${CLAUDE_MOUNT_DIRS[@]}"; do
+    CLAUDE_MOUNTS+=(-v "$_d:$_d:ro")
+done
 
 HOST_NODE="$(command -v node || true)"
 NODE_MOUNTS=()
@@ -83,8 +99,7 @@ VOLUME_ARGS=(
   -v "$REPO_ROOT/scripts:$REPO_ROOT/scripts:rw"
   -v "$REPO_ROOT/evidence:$REPO_ROOT/evidence:rw"
   -v "$LOG_DIR:$LOG_DIR:rw"
-  -v "$HOST_CLAUDE_SHIM_DIR:$HOST_CLAUDE_SHIM_DIR:ro"
-  -v "$HOST_CLAUDE_DIR:$HOST_CLAUDE_DIR:ro"
+  "${CLAUDE_MOUNTS[@]}"
   "${NODE_MOUNTS[@]}"
 )
 
@@ -126,7 +141,7 @@ done
 RESOURCE_ARGS=(
   --memory="${STANOK_CONTAINER_MEM:-4g}"
   --pids-limit="${STANOK_CONTAINER_PIDS:-512}"
-  --cpus="${STANOK_CONTAINER_CPUS:-4}"
+  --cpus="${STANOK_CONTAINER_CPUS:-2}"
 )
 
 # --- Hardening that costs nothing behaviorally ------------------------------
