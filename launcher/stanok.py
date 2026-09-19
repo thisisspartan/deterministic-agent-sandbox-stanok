@@ -547,6 +547,10 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         setting_sources=["project"],
         settings=f"{REPO_ROOT}/.claude/settings.stanok.json",
         permission_mode="dontAsk",
+        # R3: `tools` -> `--tools` restricts the session's tool surface to
+        # exactly CURATED_TOOLS (the CLI's default set is NOT added on top);
+        # allowed_tools is kept as the permission-allow side of the same set.
+        tools=CURATED_TOOLS,
         allowed_tools=CURATED_TOOLS,
         max_turns=30,
         model=LOCAL_MODEL,
