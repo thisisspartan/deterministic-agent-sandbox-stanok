@@ -23,7 +23,6 @@
     "OTEL_SERVICE_NAME": "stanok-machine",
     "OTEL_EXPORTER_OTLP_HEADERS": "projectName=stanok",
     "DISABLE_AUTOUPDATER": "1",
-    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
     "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
     "CLAUDE_AGENT_SDK_MCP_NO_PREFIX": "1"
   },
@@ -37,30 +36,6 @@
       "Bash"
     ],
     "deny": [
-      "WebSearch",
-      "NotebookEdit",
-      "EnterWorktree",
-      "ExitWorktree",
-      "CronCreate",
-      "CronDelete",
-      "CronList",
-      "ScheduleWakeup",
-      "Workflow",
-      "SendMessage",
-      "ReportFindings",
-      "Skill",
-      "TaskCreate",
-      "TaskGet",
-      "TaskList",
-      "TaskOutput",
-      "TaskStop",
-      "TaskUpdate",
-      "Agent",
-      "AskUserQuestion",
-      "EnterPlanMode",
-      "ExitPlanMode",
-      "TodoWrite",
-      "WebFetch",
       "Read(.git/**)",
       "Read(hooks/**)",
       "Read(launcher/**)",
@@ -89,12 +64,5 @@
         "security.debian.org"
       ]
     }
-  },
-  "hooks": {
-    "PostToolUse": [
-      { "matcher": "Write|Edit", "hooks": [
-          { "type": "command", "command": "bash hooks/verifier.sh" }
-      ] }
-    ]
   }
 }

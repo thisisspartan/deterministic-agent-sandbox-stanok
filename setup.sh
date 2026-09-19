@@ -33,10 +33,26 @@ fi
 echo "--- SDK check ---"
 .venv/bin/python -c "from claude_agent_sdk import query; print('claude-agent-sdk OK')"
 
+echo "--- staging the Claude Code CLI into the build context (R4) ---"
+# The Dockerfile COPYs .build-context/claude-code-2.1.88/ — the CLI checkout
+# lives OUTSIDE the build context ($DIR), so stage only the essential files
+# here first: cli.js + package.json, plus the vendored ripgrep binary for
+# x64-linux (the CLI's native sandbox hard-fails at startup without
+# vendor/ripgrep/x64-linux/rg). No .git/source/other-platforms/maps.
+CLI_SRC="${STANOK_CLI_DIR:-/home/hermes/git/claude-code-2.1.88}"
+if [[ ! -f "$CLI_SRC/cli.js" || ! -f "$CLI_SRC/package.json" || ! -f "$CLI_SRC/vendor/ripgrep/x64-linux/rg" ]]; then
+    echo "ERROR: CLI staging source not found: $CLI_SRC (need cli.js + package.json + vendor/ripgrep/x64-linux/rg)" >&2
+    echo "  Set STANOK_CLI_DIR to the validated claude-code 2.1.88 checkout." >&2
+    exit 1
+fi
+mkdir -p "$DIR/.build-context/claude-code-2.1.88/vendor/ripgrep/x64-linux"
+cp -f "$CLI_SRC/cli.js" "$CLI_SRC/package.json" "$DIR/.build-context/claude-code-2.1.88/"
+cp -f "$CLI_SRC/vendor/ripgrep/x64-linux/rg" "$DIR/.build-context/claude-code-2.1.88/vendor/ripgrep/x64-linux/"
+
 echo "--- building the machine image (Docker boundary) ---"
-# The .venv above is only the HOST-side python for launch.sh's check-dirty
-# gate; the run itself executes in the image (sandbox-run.sh remaps the
-# venv python to the image system python, which carries the SDK).
+# The .venv above is only the HOST-side python for the Runner's host-side
+# gates; the run itself executes in the image (launcher/sandbox.py runs the
+# image system python, which carries the SDK).
 docker build -t "${STANOK_DOCKER_IMAGE:-stanok-machine:latest}" -f "$DIR/Dockerfile" "$DIR"
 
 echo

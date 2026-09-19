@@ -5,6 +5,8 @@ evidence/
 # environment and python
 .venv/
 __pycache__/
+# R4: CLI staging dir prepared by setup.sh before `docker build` (not source)
+.build-context/
 # native-sandbox stub targets, pre-created by sandbox-run.sh (create-if-missing).
 # They must exist so the inner bwrap binds in place instead of creating the
 # mountpoint on the read-only repo. Empty dirs (.vscode/, .idea/,

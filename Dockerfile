@@ -5,41 +5,50 @@
 # Design decision (replaces bwrap + bash-gate + read-guard + custom `run` MCP
 # tool from waves 1-3): the model gets native Bash back. The security boundary
 # moves from "approve every command in advance" to "one strong container +
-# resource limits + external, unwritable verification" — see sandbox-run.sh
+# resource limits + external, unwritable verification" — see launcher/sandbox.py
 # for the runtime side of that boundary.
 #
-# This image deliberately does NOT bake in claude-code or a matching Node
-# runtime for it. That binary is bind-mounted read-only from the HOST at
-# container start (sandbox-run.sh), pinned to whatever CLI version the
-# operator has already validated — throughout this project that has been
-# 2.1.88, grepped and verified directly, not assumed from docs. Baking a
-# second, independently-versioned claude-code inside the image would
-# reintroduce exactly the kind of drift this project has spent several
-# review rounds eliminating (README/CLAUDE.md disagreeing about what's
-# actually running). Bind-mount, don't reinstall.
+# R4 (hermetic image, supersedes the old bind-mount decision): the image
+# NOW bakes in Node.js and the Claude Code CLI 2.1.88. The old rule was
+# "bind-mount the host CLI, don't reinstall" — the owner reversed it: a
+# self-contained image where `docker run --rm $IMAGE claude --version`
+# IS the version proof, with zero host coupling at container start.
+# The CLI is staged into .build-context/claude-code-2.1.88/ by setup.sh
+# from $STANOK_CLI_DIR (the operator's validated checkout) — cli.js +
+# package.json + the vendored ripgrep binary (vendor/ripgrep/x64-linux/rg,
+# required by the CLI's native sandbox at startup), no .git/source/
+# other-platforms/maps. Node comes from the
+# official nodejs.org tarball, NOT a copy of the host's /usr/bin/node
+# (a host ELF is dynamically linked against the host glibc and is not
+# portable into bookworm). The SDK below is still installed from sdist
+# (--no-binary): the wheel bundles a second CLI (_bundled/claude) that we
+# do not want in the image.
 #
-# What IS baked in: the launcher's own Python runtime (claude-agent-sdk) and
-# a minimal, generic toolchain so the MODEL can build/test ANY project stack
-# via native Bash — python3/pip/venv out of the box. Everything else (Go,
-# Rust, JVM, ...) is one apt-get/curl line added here the day a real ticket
-# actually needs it. Do not pre-guess every stack the project might ever use.
+# What IS baked in: the launcher's own Python runtime (claude-agent-sdk),
+# Node.js + the Claude Code CLI, and a minimal, generic toolchain so the
+# MODEL can build/test ANY project stack via native Bash — python3/pip/venv
+# out of the box. Everything else (Go, Rust, JVM, ...) is one apt-get/curl
+# line added here the day a real ticket actually needs it. Do not
+# pre-guess every stack the project might ever use.
 
 FROM debian:bookworm-slim
 
 ARG STANOK_UID=10001
 ARG STANOK_GID=10001
-# Pin deliberately. Each claude-agent-sdk release bundles a specific Claude
-# Code CLI build (0.2.139 -> CLI 2.1.233, at time of writing) but stanok.py
-# points cli_path at the bind-mounted HOST claude binary instead (see
-# sandbox-run.sh), so this pin only fixes the *Python SDK* surface stanok.py
-# imports against (ClaudeAgentOptions, ClaudeSDKClient, message types).
+# Pin deliberately. The SDK wheel bundles a second, independently-versioned
+# Claude Code CLI (_bundled/claude); we install from sdist (--no-binary) so
+# the image carries ONLY the *Python SDK* surface stanok.py imports against
+# (ClaudeAgentOptions, ClaudeSDKClient, message types). stanok.py's
+# cli_path resolves `claude` on PATH — inside the container that is the
+# baked-in /usr/local/bin/claude (Node.js + CLI section below); without it
+# the SDK has no bundled fallback and the launch fails closed.
 # Bump it deliberately when you upgrade, not by accident on a rebuild.
 ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 
 # --- OS packages -------------------------------------------------------------
 # git                     — model needs read access to history/blame; real
 #                           work often needs `git log`/`git blame`, and write
-#                           access is blocked at the mount layer (sandbox-run.sh),
+#                           access is blocked at the mount layer (launcher/sandbox.py),
 #                           not by withholding the binary — see SEC-01 note there.
 # ca-certificates, curl   — outbound goes through http(s)_proxy/no_proxy env
 #                           vars set at `docker run`, same policy as before.
@@ -48,7 +57,7 @@ ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 #                           reachability to the local llama-server, exactly
 #                           matching what bwrap already did (it never
 #                           unshared the network namespace either — see
-#                           sandbox-run.sh comment on --network).
+#                           launcher/sandbox.py comment on --network).
 # build-essential         — most "curl | sh" language installers and native
 #                           npm/pip packages with C extensions need a compiler.
 # python3/pip/venv        — (a) runs the launcher itself, (b) gives
@@ -60,7 +69,7 @@ ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 #                           the CLI at startup. Runs INSIDE the container (B1
 #                           hybrid): needs --security-opt seccomp=unconfined +
 #                           apparmor=unconfined at docker run (see
-#                           sandbox-run.sh) and enableWeakerNestedSandbox=true
+#                           launcher/sandbox.py) and enableWeakerNestedSandbox=true
 #                           (skips --proc /proc, which EPERMs in a container).
 # socat                   — the CLI's network bridge (allowedDomains) forwards
 #                           the sandbox's HTTP/SOCKS bridge sockets via socat;
@@ -79,14 +88,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Launcher runtime ---------------------------------------------------
+# --no-binary: build from sdist, NOT the wheel — the wheel ships
+# _bundled/claude (a second CLI, ~300 MB). The sdist build has no _bundled
+# dir; cli_path (stanok.py) always points at the host binary.
 RUN pip install --break-system-packages --no-cache-dir \
+      --no-binary claude-agent-sdk \
       "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}"
+
+# --- Node.js + Claude Code CLI (R4: hermetic image) ------------------------
+# Node: official nodejs.org tarball, extracted over /usr/local (bin/node,
+# bin/npm, lib/node_modules/npm). NOT a COPY of the host's /usr/bin/node —
+# that ELF is dynamically linked against the host glibc and is not
+# portable into bookworm.
+# CLI: staged by setup.sh into .build-context/claude-code-2.1.88/ (cli.js +
+# package.json + vendor/ripgrep/x64-linux/rg from $STANOK_CLI_DIR).
+# Bump both deliberately.
+ARG NODE_VERSION=22.22.3
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" \
+      | tar -xzf - --strip-components=1 -C /usr/local
+COPY .build-context/claude-code-2.1.88/ /opt/claude-code-2.1.88/
+RUN chmod +x /opt/claude-code-2.1.88/cli.js \
+    && ln -s /opt/claude-code-2.1.88/cli.js /usr/local/bin/claude
 
 # --- Non-root user -------------------------------------------------------
 # Mirrors stanok.py's own root_refusal() host-side check: the container must
 # not run the model as root either, or a container escape and a host-level
 # root compromise become the same bug instead of two separate ones.
-# sandbox-run.sh additionally passes --user "$(id -u):$(id -g)" at runtime so
+# launcher/sandbox.py additionally passes --user "$(id -u):$(id -g)" at runtime so
 # files written into the bind-mounted src/tests/docs/scripts/evidence land
 # owned by the invoking host user, not this baked-in UID; this UID is only
 # the sane default for anyone who runs the image directly/interactively
@@ -97,7 +125,7 @@ RUN groupadd -g "$STANOK_GID" stanok \
 WORKDIR /work
 USER stanok
 
-# No ENTRYPOINT/CMD on purpose. sandbox-run.sh always passes the full command
+# No ENTRYPOINT/CMD on purpose. launcher/sandbox.py always passes the full command
 # explicitly (python3 launcher/stanok.py run ...). An implicit default here
 # would be a second, easy-to-forget place the launch command could drift
 # from what launch.sh actually invokes — the same class of bug as the

@@ -31,6 +31,8 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import sandbox  # R2: the Docker boundary (former sandbox-run.sh)
+
 # --- Circuit constants -------------------------------------------------------------
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 # If STANOK_REPO is not set, we go up one level (stanok/launcher -> stanok)
@@ -39,7 +41,8 @@ REPO_ROOT = os.path.abspath(os.environ.get("STANOK_REPO", DEFAULT_REPO))
 LOG_DIR = os.environ.get("STANOK_LOG_DIR", "/tmp/stanok-logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-LOCAL_MODEL = os.environ.get("STANOK_MODEL", "Qwen3.8-27B-MTP")
+DEFAULT_MODEL = "Qwen3.8-27B-MTP"
+LOCAL_MODEL = os.environ.get("STANOK_MODEL", DEFAULT_MODEL)
 SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://127.0.0.1:8080")
 CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "claude")
 
@@ -215,7 +218,8 @@ def _opik_trace_count() -> int | None:
     silent 'no traces' can never happen again."""
     if os.environ.get("STANOK_SKIP_OPIK_CHECK") == "1":
         return None
-    url = "http://localhost:8080/v1/private/traces?project_name=stanok&limit=1"
+    base = os.environ.get("STANOK_OPIK_URL", "http://localhost:8080")
+    url = f"{base}/v1/private/traces?project_name=stanok&limit=1"
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(urllib.request.Request(url), timeout=5) as resp:
@@ -315,7 +319,10 @@ def _extract_smart_diff(raw_text: str) -> str:
     if len(cleaned_lines) <= MAX_TEST_LINES:
         res = "\n".join(cleaned_lines)
     else:
-        high_pri = re.compile(r"(assertionerror|strictequal|deepstrictequal|expected|actual|not ok\s+\d+|#\s+fail\s+\d+|diff:)", re.I)
+        high_pri = re.compile(
+            r"(assertionerror|strictequal|deepstrictequal|expected|actual|not ok\s+\d+"
+            r"|#\s+fail\s+\d+|diff:|traceback \(most recent call last\)|^\s*e\s+assert)",
+            re.I)
         matches = [i for i, line in enumerate(cleaned_lines) if high_pri.search(line)]
 
         if not matches:
@@ -333,7 +340,11 @@ def _extract_smart_diff(raw_text: str) -> str:
             ftr = [f"... [{len(cleaned_lines) - end} lines skipped below] ..."] if end < len(cleaned_lines) else []
             res = "\n".join(hdr + window + ftr)
         else:
-            res = "\n".join(cleaned_lines[:15] + [f"\n... [lines skipped: {len(cleaned_lines) - MAX_TEST_LINES}] ...\n"] + cleaned_lines[-45:])
+            # Mandatory fallback (P6): no specific pattern matched — keep the
+            # last 25 lines of the test output (the failure is at the tail).
+            start = max(0, len(cleaned_lines) - 25)
+            hdr = [f"... [{start} lines skipped above] ..."] if start > 0 else []
+            res = "\n".join(hdr + cleaned_lines[start:])
 
     b_res = res.encode("utf-8")
     if len(b_res) > MAX_TEST_BYTES:
@@ -397,30 +408,44 @@ def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tup
 
 
 def _tests_manifest() -> dict[str, str]:
-    """Snapshot {rel_path: sha256} of tests/ (contract_lock, W2.5)."""
+    """Snapshot {rel_path: sha256} of tests/ + scripts/run.sh (contract_lock,
+    W2.5 + P2). Only PRE-EXISTING files are snapshotted: a missing
+    scripts/run.sh (bootstrap of a new project) is therefore free to create."""
     manifest: dict[str, str] = {}
     tests_dir = os.path.join(REPO_ROOT, "tests")
-    if not os.path.isdir(tests_dir):
-        return manifest
-    for root, _dirs, files in os.walk(tests_dir):
-        for name in files:
-            full = os.path.join(root, name)
-            rel = os.path.relpath(full, REPO_ROOT)
-            try:
-                with open(full, "rb") as f:
-                    manifest[rel] = hashlib.sha256(f.read()).hexdigest()
-            except OSError:
-                manifest[rel] = "unreadable"
+    if os.path.isdir(tests_dir):
+        for root, _dirs, files in os.walk(tests_dir):
+            for name in files:
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, REPO_ROOT)
+                try:
+                    with open(full, "rb") as f:
+                        manifest[rel] = hashlib.sha256(f.read()).hexdigest()
+                except OSError:
+                    manifest[rel] = "unreadable"
+    runsh = os.path.join(REPO_ROOT, "scripts", "run.sh")
+    if os.path.isfile(runsh):
+        try:
+            with open(runsh, "rb") as f:
+                manifest["scripts/run.sh"] = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            manifest["scripts/run.sh"] = "unreadable"
     return manifest
 
 
-def _check_contract_lock(before: dict[str, str], job: dict, turn: int) -> None:
-    """After each turn: a pre-existing test file that was MODIFIED or DELETED
-    is a contract_lock violation (replaces the chmod a-w freeze, W2.5).
-    New test files are allowed (a ticket may declare several)."""
+def _check_contract_lock(before: dict[str, str], job: dict, turn: int,
+                         declared_paths: list[str] | None = None) -> None:
+    """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
+    that was MODIFIED or DELETED is a contract_lock violation (replaces the
+    chmod a-w freeze, W2.5). New files are allowed (a ticket may declare
+    several). scripts/run.sh is exempt when the ticket declares it
+    (runner-update ticket, P2)."""
     after = _tests_manifest()
+    declared = set(declared_paths or [])
     violations = []
     for rel, digest in before.items():
+        if rel == "scripts/run.sh" and rel in declared:
+            continue
         if rel not in after:
             violations.append(f"DELETED: {rel}")
         elif after[rel] != digest:
@@ -535,8 +560,74 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
     return (turn_total or live_window), live_window, writes, turn_error
 
 
+# R1 (Phase 2): in-process replacement for hooks/verifier.sh.
+# PostToolUse on Write|Edit: if the written file is a test under tests/ and it
+# runs RED through the project entrypoint, inject "VERIFY: RED CONFIRMED" so
+# the model goes straight to the implementation.
+#
+# Runs as an SDK hook callback (CLI hook_callback control channel), NOT a
+# shell command: no jq, no bash hook process in the trace. The subprocess is
+# asyncio.create_subprocess_exec — a sync subprocess here would block the
+# event loop that also runs the turn watchdog. Fail-open, exactly like the
+# old shell hook: ANY error in this callback yields a no-op, never a failed
+# turn (the external verifier is the fail-closed gate; this is feedback only).
+_HOOK_TEST_TIMEOUT_S = 75  # mirrors the old `timeout 75` in verifier.sh
+
+
+async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -> dict:
+    try:
+        tool_input = hook_input.get("tool_input") or {}
+        fp = tool_input.get("file_path")
+        if not fp:
+            return {}
+        if not fp.startswith("/"):
+            fp = os.path.join(REPO_ROOT, fp)
+        abs_path = os.path.realpath(fp)
+        tests_dir = os.path.join(REPO_ROOT, "tests")
+        if not abs_path.startswith(tests_dir + os.sep):
+            return {}
+        if not os.path.isfile(abs_path):
+            return {}
+        run_sh = os.path.join(REPO_ROOT, "scripts", "run.sh")
+        if not os.path.isfile(run_sh):
+            return {}
+        rel = os.path.relpath(abs_path, REPO_ROOT)
+        proc = await asyncio.create_subprocess_exec(
+            "bash", run_sh, "test", rel,
+            cwd=REPO_ROOT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=_HOOK_TEST_TIMEOUT_S)
+            rc = proc.returncode
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            rc, out = 124, b""
+        # rc=0: GREEN (implementation exists) — stay silent.
+        # rc=2: runner refused the path (not a test in its terms) — not our concern.
+        if rc in (0, 2):
+            return {}
+        text = out.decode("utf-8", "replace")
+        tail = "\n".join(text.splitlines()[-25:])
+        log(f"VERIFIER HOOK: RED CONFIRMED ({rel} rc={rc})")
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": (
+                    f"VERIFY: RED CONFIRMED ({rel} rc={rc}). "
+                    f"Implement src/ to make it GREEN.\n{tail}"
+                ),
+            }
+        }
+    except Exception as e:
+        log(f"VERIFIER HOOK: no-op (error: {e})")
+        return {}
+
+
 async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, declared_paths: list[str]) -> int:
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 
     local_run_id = str(uuid.uuid4())[:8]
     stream_out_path = os.path.join(_live_dir, f"session-{local_run_id}.jsonl")
@@ -547,7 +638,19 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         setting_sources=["project"],
         settings=f"{REPO_ROOT}/.claude/settings.stanok.json",
         permission_mode="dontAsk",
+        # R3: `tools` -> `--tools` restricts the session's tool surface to
+        # exactly CURATED_TOOLS (the CLI's default set is NOT added on top);
+        # allowed_tools is kept as the permission-allow side of the same set.
+        tools=CURATED_TOOLS,
         allowed_tools=CURATED_TOOLS,
+        # R1: in-process PostToolUse verifier (replaces hooks/verifier.sh).
+        # timeout > _HOOK_TEST_TIMEOUT_S so the hook's own 75 s test timeout
+        # is the deterministic verdict, not the SDK's hook timeout.
+        hooks={
+            "PostToolUse": [
+                HookMatcher(matcher="Write|Edit", hooks=[_verifier_hook], timeout=90)
+            ]
+        },
         max_turns=30,
         model=LOCAL_MODEL,
         env=build_agent_env(),
@@ -666,8 +769,9 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     job["turns"] = turn
                     return 1
 
-                # contract_lock (W2.5): did the turn touch pre-existing tests?
-                _check_contract_lock(tests_manifest_before, job, turn)
+                # contract_lock (W2.5 + P2): did the turn touch pre-existing
+                # tests/ or scripts/run.sh?
+                _check_contract_lock(tests_manifest_before, job, turn, declared_paths)
 
                 # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
                 # spike in the turn's input_tokens (uncached re-send).
@@ -824,7 +928,6 @@ def build_summary(job: dict, elapsed_s: int) -> dict:
         "verifier": verifier,
         "probe_result": probe_result,
         "review_verdict": review_verdict,
-        "cloud_calls": 0,
         "c5": c5,
         "turns": turns,
         "elapsed_s": elapsed_s,
@@ -877,7 +980,10 @@ def cmd_run(args) -> int:
     start_ts = int(time.time())
     recorded_pid = os.getpid()
 
-    # Preserve the host PID if it was already set by launch.sh
+    # R2: the marker is written by the host-side supervisor (run_sandboxed /
+    # launch_background) with ITS pid — inside the container os.getpid() is
+    # not visible from the host. If the marker already exists, preserve its
+    # start_ts/pid; only a fresh in-process run (no-sandbox) writes its own.
     if os.path.exists(_marker_path):
         try:
             parts = open(_marker_path, "r", encoding="utf-8").read().split()
@@ -885,11 +991,6 @@ def cmd_run(args) -> int:
                 start_ts = int(parts[0])
                 recorded_pid = int(parts[1])
         except (ValueError, OSError):
-            pass
-    elif os.environ.get("STANOK_HOST_PID"):
-        try:
-            recorded_pid = int(os.environ["STANOK_HOST_PID"])
-        except ValueError:
             pass
 
     with open(_marker_path, "w", encoding="utf-8") as f:
@@ -1072,6 +1173,72 @@ def cmd_stop(label: str) -> int:
 
 
 # ==================================================================================
+# Launch orchestration (R2: the former launch.sh + sandbox-run.sh, in Python)
+# ==================================================================================
+def _inner_run_argv(args) -> list:
+    """The container-side / child-side `run` argv (single source)."""
+    inner = ["run", args.ticket]
+    if args.direct:
+        inner.append("--direct")
+    if args.local_retries != DEFAULT_RETRIES:
+        inner += ["--local-retries", str(args.local_retries)]
+    inner += ["--", args.label, *args.extra]
+    return inner
+
+
+def run_sandboxed(args) -> int:
+    """Host-side sync run: supervise the Docker container (replaces
+    sandbox-run.sh). The marker carries THIS process's pid — cmd_stop's
+    killpg lands here, and the try/finally stops the container and removes
+    the marker on every exit path (normal return, crash, signal)."""
+    evidence_dir, _ = label_paths(args.label)
+    os.makedirs(evidence_dir, exist_ok=True)
+    # Mount points must exist before `docker run` (else Docker creates them
+    # root-owned).
+    for d in ("src", "tests", "docs", "scripts", "evidence"):
+        os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
+
+    marker = os.path.join(evidence_dir, ".running")
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write(f"{int(time.time())} {os.getpid()}\n")
+
+    _install_signal_handlers()
+    image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
+    # The container runs the IMAGE's system python (the SDK is baked in);
+    # the host venv python is only for the host-side gates.
+    name, argv = sandbox.sandbox_argv(
+        REPO_ROOT, LOG_DIR, image,
+        ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args))
+    log(f"SANDBOX: docker container {name}")
+    try:
+        proc = subprocess.Popen(argv, start_new_session=True)
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        rc = _INTERRUPTED_RC or 130
+    finally:
+        sandbox.docker_stop(name)
+        try:
+            os.remove(marker)
+        except OSError:
+            pass
+    return rc
+
+
+def launch_background(args) -> int:
+    """Background run (replaces launch.sh's nohup branch): a detached
+    self-spawn executes the sync path — the child writes the marker with its
+    own pid and supervises the container (or runs in-process under
+    STANOK_NO_SANDBOX). The parent exits 0 immediately."""
+    log_path = os.path.join(LOG_DIR, f"{args.label}.launch.log")
+    child_argv = [sys.executable, os.path.abspath(__file__)] + _inner_run_argv(args)
+    with open(log_path, "a", encoding="utf-8") as lf:
+        child = subprocess.Popen(child_argv, stdout=lf, stderr=subprocess.STDOUT,
+                                 start_new_session=True, cwd=REPO_ROOT)
+    log(f"Machine launched in the background (PID {child.pid}). Log: {log_path}")
+    return 0
+
+
+# ==================================================================================
 # CLI entry point
 # ==================================================================================
 def _resolve_ticket(arg: str, direct: bool = False) -> str:
@@ -1095,11 +1262,17 @@ def main() -> int:
     p = argparse.ArgumentParser(prog="stanok", description="Stanok 4.2 Runner")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # R2: argparse is the single source of the CLI (the former launch.sh flag
+    # parsing is gone). `--` separates the label from extra positionals — a
+    # label starting with `--` stays positional (the label-guard test relies
+    # on it: `run <ticket> -- --background` -> label="--background" -> rc=15).
     r = sub.add_parser("run")
     r.add_argument("ticket")
     r.add_argument("label")
+    r.add_argument("extra", nargs="*", default=[])
     r.add_argument("--direct", action="store_true")
     r.add_argument("--local-retries", type=int, default=DEFAULT_RETRIES)
+    r.add_argument("--background", action="store_true")
 
     s = sub.add_parser("status")
     s.add_argument("label")
@@ -1164,16 +1337,31 @@ def main() -> int:
         if dirty_tree_gate():
             return early_abort(22, "ERROR: the machine repo contains uncommitted changes (rc=22)")
 
-        # Background mode is owned by launch.sh (host-side nohup): inside the
-        # container a self-re-spawn would bypass the lock and the host gates.
-        lock_path = os.path.join(LOG_DIR, f"stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock")
-        lf = open(lock_path, "w")
-        try:
-            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return early_abort(21, f"LOCK: the repo is already busy with another run ({lock_path})")
+        # R2: launch orchestration (the former launch.sh branches, in Python).
+        in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
+        no_sandbox = os.environ.get("STANOK_NO_SANDBOX") == "1"
 
-        return cmd_run(args)
+        if args.background:
+            # The child re-runs these gates and takes the lock itself; the
+            # parent must not hold the lock (flock would deadlock the child).
+            return launch_background(args)
+
+        if in_container or no_sandbox:
+            # In-process session (container-side Runner, or host no-sandbox):
+            # the lock serializes runs of this repo.
+            lock_path = os.path.join(LOG_DIR, f"stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock")
+            lf = open(lock_path, "w")
+            try:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return early_abort(21, f"LOCK: the repo is already busy with another run ({lock_path})")
+            return cmd_run(args)
+
+        # Host sync: supervise the Docker container (launcher/sandbox.py).
+        # The container-side Runner re-runs the gates and takes the lock.
+        if shutil.which("docker") is None:
+            return early_abort(1, "ERROR: docker not found on PATH")
+        return run_sandboxed(args)
 
     return 0
 
