@@ -41,7 +41,8 @@ REPO_ROOT = os.path.abspath(os.environ.get("STANOK_REPO", DEFAULT_REPO))
 LOG_DIR = os.environ.get("STANOK_LOG_DIR", "/tmp/stanok-logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-LOCAL_MODEL = os.environ.get("STANOK_MODEL", "Qwen3.8-27B-MTP")
+DEFAULT_MODEL = "Qwen3.8-27B-MTP"
+LOCAL_MODEL = os.environ.get("STANOK_MODEL", DEFAULT_MODEL)
 SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://127.0.0.1:8080")
 CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "claude")
 
@@ -217,7 +218,8 @@ def _opik_trace_count() -> int | None:
     silent 'no traces' can never happen again."""
     if os.environ.get("STANOK_SKIP_OPIK_CHECK") == "1":
         return None
-    url = "http://localhost:8080/v1/private/traces?project_name=stanok&limit=1"
+    base = os.environ.get("STANOK_OPIK_URL", "http://localhost:8080")
+    url = f"{base}/v1/private/traces?project_name=stanok&limit=1"
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(urllib.request.Request(url), timeout=5) as resp:
@@ -317,7 +319,10 @@ def _extract_smart_diff(raw_text: str) -> str:
     if len(cleaned_lines) <= MAX_TEST_LINES:
         res = "\n".join(cleaned_lines)
     else:
-        high_pri = re.compile(r"(assertionerror|strictequal|deepstrictequal|expected|actual|not ok\s+\d+|#\s+fail\s+\d+|diff:)", re.I)
+        high_pri = re.compile(
+            r"(assertionerror|strictequal|deepstrictequal|expected|actual|not ok\s+\d+"
+            r"|#\s+fail\s+\d+|diff:|traceback \(most recent call last\)|^\s*e\s+assert)",
+            re.I)
         matches = [i for i, line in enumerate(cleaned_lines) if high_pri.search(line)]
 
         if not matches:
@@ -335,7 +340,11 @@ def _extract_smart_diff(raw_text: str) -> str:
             ftr = [f"... [{len(cleaned_lines) - end} lines skipped below] ..."] if end < len(cleaned_lines) else []
             res = "\n".join(hdr + window + ftr)
         else:
-            res = "\n".join(cleaned_lines[:15] + [f"\n... [lines skipped: {len(cleaned_lines) - MAX_TEST_LINES}] ...\n"] + cleaned_lines[-45:])
+            # Mandatory fallback (P6): no specific pattern matched — keep the
+            # last 25 lines of the test output (the failure is at the tail).
+            start = max(0, len(cleaned_lines) - 25)
+            hdr = [f"... [{start} lines skipped above] ..."] if start > 0 else []
+            res = "\n".join(hdr + cleaned_lines[start:])
 
     b_res = res.encode("utf-8")
     if len(b_res) > MAX_TEST_BYTES:
@@ -399,30 +408,44 @@ def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tup
 
 
 def _tests_manifest() -> dict[str, str]:
-    """Snapshot {rel_path: sha256} of tests/ (contract_lock, W2.5)."""
+    """Snapshot {rel_path: sha256} of tests/ + scripts/run.sh (contract_lock,
+    W2.5 + P2). Only PRE-EXISTING files are snapshotted: a missing
+    scripts/run.sh (bootstrap of a new project) is therefore free to create."""
     manifest: dict[str, str] = {}
     tests_dir = os.path.join(REPO_ROOT, "tests")
-    if not os.path.isdir(tests_dir):
-        return manifest
-    for root, _dirs, files in os.walk(tests_dir):
-        for name in files:
-            full = os.path.join(root, name)
-            rel = os.path.relpath(full, REPO_ROOT)
-            try:
-                with open(full, "rb") as f:
-                    manifest[rel] = hashlib.sha256(f.read()).hexdigest()
-            except OSError:
-                manifest[rel] = "unreadable"
+    if os.path.isdir(tests_dir):
+        for root, _dirs, files in os.walk(tests_dir):
+            for name in files:
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, REPO_ROOT)
+                try:
+                    with open(full, "rb") as f:
+                        manifest[rel] = hashlib.sha256(f.read()).hexdigest()
+                except OSError:
+                    manifest[rel] = "unreadable"
+    runsh = os.path.join(REPO_ROOT, "scripts", "run.sh")
+    if os.path.isfile(runsh):
+        try:
+            with open(runsh, "rb") as f:
+                manifest["scripts/run.sh"] = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            manifest["scripts/run.sh"] = "unreadable"
     return manifest
 
 
-def _check_contract_lock(before: dict[str, str], job: dict, turn: int) -> None:
-    """After each turn: a pre-existing test file that was MODIFIED or DELETED
-    is a contract_lock violation (replaces the chmod a-w freeze, W2.5).
-    New test files are allowed (a ticket may declare several)."""
+def _check_contract_lock(before: dict[str, str], job: dict, turn: int,
+                         declared_paths: list[str] | None = None) -> None:
+    """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
+    that was MODIFIED or DELETED is a contract_lock violation (replaces the
+    chmod a-w freeze, W2.5). New files are allowed (a ticket may declare
+    several). scripts/run.sh is exempt when the ticket declares it
+    (runner-update ticket, P2)."""
     after = _tests_manifest()
+    declared = set(declared_paths or [])
     violations = []
     for rel, digest in before.items():
+        if rel == "scripts/run.sh" and rel in declared:
+            continue
         if rel not in after:
             violations.append(f"DELETED: {rel}")
         elif after[rel] != digest:
@@ -746,8 +769,9 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     job["turns"] = turn
                     return 1
 
-                # contract_lock (W2.5): did the turn touch pre-existing tests?
-                _check_contract_lock(tests_manifest_before, job, turn)
+                # contract_lock (W2.5 + P2): did the turn touch pre-existing
+                # tests/ or scripts/run.sh?
+                _check_contract_lock(tests_manifest_before, job, turn, declared_paths)
 
                 # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
                 # spike in the turn's input_tokens (uncached re-send).
@@ -904,7 +928,6 @@ def build_summary(job: dict, elapsed_s: int) -> dict:
         "verifier": verifier,
         "probe_result": probe_result,
         "review_verdict": review_verdict,
-        "cloud_calls": 0,
         "c5": c5,
         "turns": turns,
         "elapsed_s": elapsed_s,

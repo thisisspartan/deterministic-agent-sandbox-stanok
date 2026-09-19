@@ -1,6 +1,6 @@
 """doctor — structural invariants of the claude machine (R5: pytest port of hooks/doctor.sh).
 
-15 checks: 10 static + 5 mock runner launches (rc=15/20/22/20/24).
+16 checks: 11 static + 5 mock runner launches (rc=15/20/22/20/24).
 Run via hooks/doctor.sh (thin wrapper) or directly:
     .venv/bin/python -m pytest launcher/tests_harness/test_doctor.py -q
 
@@ -112,7 +112,34 @@ def test_machine_image_built():
     ).returncode == 0
 
 
-# --- 11-15: mock runner launches --------------------------------------------
+def test_contract_lock_runsh():
+    # P2: scripts/run.sh is under contract_lock unless the ticket declares it
+    # (runner-update ticket) or it did not exist at start (bootstrap).
+    # Unit-level: snapshot the manifest, modify run.sh, expect a violation;
+    # with declared_paths=["scripts/run.sh"] — no violation.
+    sys.path.insert(0, str(REPO_ROOT / "launcher"))
+    import stanok
+    runsh = REPO_ROOT / "scripts" / "run.sh"
+    assert runsh.is_file()
+    orig = runsh.read_text(encoding="utf-8")
+    before = stanok._tests_manifest()
+    assert "scripts/run.sh" in before
+    try:
+        runsh.write_text(orig + "# contract-lock probe\n", encoding="utf-8")
+        job = {}
+        stanok._check_contract_lock(before, job, 1, [])
+        assert any("scripts/run.sh" in v
+                   for v in job.get("contract_lock_violations", [])), \
+            f"undeclared run.sh modification not flagged: {job}"
+        job2 = {}
+        stanok._check_contract_lock(before, job2, 1, ["scripts/run.sh"])
+        assert not job2.get("contract_lock_violations"), \
+            f"declared run.sh modification wrongly flagged: {job2}"
+    finally:
+        runsh.write_text(orig, encoding="utf-8")
+
+
+# --- 12-16: mock runner launches --------------------------------------------
 
 def test_runner_label_guard(tmp_path):
     # A label starting with '--' -> rc=15 BEFORE ticket resolution.

@@ -24,7 +24,7 @@ pluggable git submodule for any project.
 
 ```bash
 ./setup.sh                                   # .venv + claude-agent-sdk + CLI staging + docker image build
-bash hooks/doctor.sh                         # expected: 15 passed (pytest)
+bash hooks/doctor.sh                         # expected: 16 passed (pytest)
 ```
 
 ## Running
@@ -83,6 +83,7 @@ src/ tests/ docs/ scripts/    — the machine working directories (empty at star
 | `STANOK_LOCAL_RETRIES` | `2`                     | in-session retry turns on verifier FAIL |
 | `STANOK_REQUIRED_WINDOW` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from settings | preflight: minimal server `n_ctx` (rc=20 if less) |
 | `STANOK_SKIP_SERVER_CHECK` | unset                   | `1` — skip the preflight `/props` check entirely |
+| `STANOK_OPIK_URL`      | `http://localhost:8080` | Opik backend (trace-count check) |
 | `STANOK_DOCKER_IMAGE`| `stanok-machine:latest`   | the machine image                |
 | `STANOK_CONTAINER_MEM` | `4g`                    | container memory limit           |
 | `STANOK_CONTAINER_PIDS`| `512`                   | container pids limit             |
