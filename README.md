@@ -12,8 +12,9 @@ pluggable git submodule for any project.
 
 ## Requirements
 
-- Docker (the machine boundary), claude-code (the machine binary, bind-mounted
-  from the host), Node.js or whatever runtime the project's `scripts/run.sh` uses
+- Docker (the machine boundary; the image bakes in Node.js + Claude Code
+  CLI 2.1.88 — hermetic, no host bind-mounts), whatever runtime the
+  project's `scripts/run.sh` uses
 - A local llama-server, Anthropic-compatible (`STANOK_SERVER_URL`)
 - The parent repo must NOT contain a `CLAUDE.md` above this repo
   (the control-room role is set via `--append-system-prompt-file`,
@@ -22,7 +23,7 @@ pluggable git submodule for any project.
 ## Setup
 
 ```bash
-./setup.sh                                   # .venv + claude-agent-sdk + docker image build
+./setup.sh                                   # .venv + claude-agent-sdk + CLI staging + docker image build
 bash hooks/doctor.sh                         # expected: 15 ok, 0 fail
 ```
 
@@ -50,12 +51,12 @@ launcher/stanok.py            — THE single Runner (CLI run/status/stop,
                                 gates, Job/Attempt, typed summary.json)
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 Dockerfile                    — the machine image (debian + toolchain +
-                                claude-agent-sdk + bubblewrap + socat)
+                                claude-agent-sdk + Node.js + Claude Code
+                                CLI 2.1.88 + bubblewrap + socat)
 sandbox-run.sh                — Docker sandbox: repo mounted read-only with
                                 writable carve-outs (src/, tests/, docs/,
-                                scripts/, evidence/); .git read-only; host
-                                claude/node bind-mounted; cap-drop=ALL,
-                                no-new-privileges, resource limits
+                                scripts/, evidence/); .git read-only;
+                                cap-drop=ALL, no-new-privileges, resource limits
 hooks/                        — doctor, commit-msg (the TDD verifier is
                                 in-process in launcher/stanok.py, R1)
 .claude/settings.stanok.json  — the machine config (allow/deny,

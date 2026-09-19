@@ -18,10 +18,9 @@ SANDBOX="$DIR/sandbox-run.sh"
 LOG_DIR="${STANOK_LOG_DIR:-/tmp/stanok-logs}"
 mkdir -p "$LOG_DIR"
 
-# Pass the found claude, if it exists on the host
-if command -v claude &>/dev/null; then
-    export STANOK_CLAUDE_BIN="$(command -v claude)"
-fi
+# R4: no STANOK_CLAUDE_BIN export — the container resolves `claude` on PATH
+# (the baked-in /usr/local/bin/claude); host no-sandbox runs resolve it the
+# same way on the host PATH.
 
 cmd="${1:-}"
 

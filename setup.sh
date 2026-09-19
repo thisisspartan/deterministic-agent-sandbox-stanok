@@ -33,6 +33,19 @@ fi
 echo "--- SDK check ---"
 .venv/bin/python -c "from claude_agent_sdk import query; print('claude-agent-sdk OK')"
 
+echo "--- staging the Claude Code CLI into the build context (R4) ---"
+# The Dockerfile COPYs .build-context/claude-code-2.1.88/ — the CLI checkout
+# lives OUTSIDE the build context ($DIR), so stage only the two essential
+# files (cli.js + package.json; no .git/source/vendor/maps) here first.
+CLI_SRC="${STANOK_CLI_DIR:-/home/hermes/git/claude-code-2.1.88}"
+if [[ ! -f "$CLI_SRC/cli.js" || ! -f "$CLI_SRC/package.json" ]]; then
+    echo "ERROR: CLI staging source not found: $CLI_SRC (need cli.js + package.json)" >&2
+    echo "  Set STANOK_CLI_DIR to the validated claude-code 2.1.88 checkout." >&2
+    exit 1
+fi
+mkdir -p "$DIR/.build-context/claude-code-2.1.88"
+cp -f "$CLI_SRC/cli.js" "$CLI_SRC/package.json" "$DIR/.build-context/claude-code-2.1.88/"
+
 echo "--- building the machine image (Docker boundary) ---"
 # The .venv above is only the HOST-side python for launch.sh's check-dirty
 # gate; the run itself executes in the image (sandbox-run.sh remaps the

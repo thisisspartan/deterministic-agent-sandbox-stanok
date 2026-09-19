@@ -8,24 +8,26 @@
 # resource limits + external, unwritable verification" — see sandbox-run.sh
 # for the runtime side of that boundary.
 #
-# This image deliberately does NOT bake in claude-code or a matching Node
-# runtime for it. That binary is bind-mounted read-only from the HOST at
-# container start (sandbox-run.sh), pinned to whatever CLI version the
-# operator has already validated — throughout this project that has been
-# 2.1.88, grepped and verified directly, not assumed from docs. Baking a
-# second, independently-versioned claude-code inside the image would
-# reintroduce exactly the kind of drift this project has spent several
-# review rounds eliminating (README/CLAUDE.md disagreeing about what's
-# actually running). Bind-mount, don't reinstall. The SDK below is
-# installed from sdist (--no-binary) precisely so this statement stays
-# true: the wheel bundles a second CLI (_bundled/claude) that we do not
-# want in the image.
+# R4 (hermetic image, supersedes the old bind-mount decision): the image
+# NOW bakes in Node.js and the Claude Code CLI 2.1.88. The old rule was
+# "bind-mount the host CLI, don't reinstall" — the owner reversed it: a
+# self-contained image where `docker run --rm $IMAGE claude --version`
+# IS the version proof, with zero host coupling at container start.
+# The CLI is staged into .build-context/claude-code-2.1.88/ by setup.sh
+# from $STANOK_CLI_DIR (the operator's validated checkout) — only
+# cli.js + package.json, no .git/source/vendor/maps. Node comes from the
+# official nodejs.org tarball, NOT a copy of the host's /usr/bin/node
+# (a host ELF is dynamically linked against the host glibc and is not
+# portable into bookworm). The SDK below is still installed from sdist
+# (--no-binary): the wheel bundles a second CLI (_bundled/claude) that we
+# do not want in the image.
 #
-# What IS baked in: the launcher's own Python runtime (claude-agent-sdk) and
-# a minimal, generic toolchain so the MODEL can build/test ANY project stack
-# via native Bash — python3/pip/venv out of the box. Everything else (Go,
-# Rust, JVM, ...) is one apt-get/curl line added here the day a real ticket
-# actually needs it. Do not pre-guess every stack the project might ever use.
+# What IS baked in: the launcher's own Python runtime (claude-agent-sdk),
+# Node.js + the Claude Code CLI, and a minimal, generic toolchain so the
+# MODEL can build/test ANY project stack via native Bash — python3/pip/venv
+# out of the box. Everything else (Go, Rust, JVM, ...) is one apt-get/curl
+# line added here the day a real ticket actually needs it. Do not
+# pre-guess every stack the project might ever use.
 
 FROM debian:bookworm-slim
 
@@ -34,9 +36,10 @@ ARG STANOK_GID=10001
 # Pin deliberately. The SDK wheel bundles a second, independently-versioned
 # Claude Code CLI (_bundled/claude); we install from sdist (--no-binary) so
 # the image carries ONLY the *Python SDK* surface stanok.py imports against
-# (ClaudeAgentOptions, ClaudeSDKClient, message types). stanok.py points
-# cli_path at the bind-mounted HOST claude binary (see sandbox-run.sh);
-# without it the SDK has no bundled fallback and the launch fails closed.
+# (ClaudeAgentOptions, ClaudeSDKClient, message types). stanok.py's
+# cli_path resolves `claude` on PATH — inside the container that is the
+# baked-in /usr/local/bin/claude (Node.js + CLI section below); without it
+# the SDK has no bundled fallback and the launch fails closed.
 # Bump it deliberately when you upgrade, not by accident on a rebuild.
 ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 
@@ -89,6 +92,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --break-system-packages --no-cache-dir \
       --no-binary claude-agent-sdk \
       "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}"
+
+# --- Node.js + Claude Code CLI (R4: hermetic image) ------------------------
+# Node: official nodejs.org tarball, extracted over /usr/local (bin/node,
+# bin/npm, lib/node_modules/npm). NOT a COPY of the host's /usr/bin/node —
+# that ELF is dynamically linked against the host glibc and is not
+# portable into bookworm.
+# CLI: staged by setup.sh into .build-context/claude-code-2.1.88/ (only
+# cli.js + package.json from $STANOK_CLI_DIR). Bump both deliberately.
+ARG NODE_VERSION=22.22.3
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" \
+      | tar -xzf - --strip-components=1 -C /usr/local
+COPY .build-context/claude-code-2.1.88/ /opt/claude-code-2.1.88/
+RUN chmod +x /opt/claude-code-2.1.88/cli.js \
+    && ln -s /opt/claude-code-2.1.88/cli.js /usr/local/bin/claude
 
 # --- Non-root user -------------------------------------------------------
 # Mirrors stanok.py's own root_refusal() host-side check: the container must

@@ -33,49 +33,10 @@ fi
 
 IMAGE="${STANOK_DOCKER_IMAGE:-stanok-machine:latest}"
 
-# --- Pin the host's claude + node install, bind-mounted read-only ----------
-# Same reasoning as the bwrap version's host-binary discovery: the image does
-# NOT bundle its own claude-code, so whichever CLI the operator has already
-# validated (STANOK_CLAUDE_BIN, or `claude` on PATH) is what runs inside the
-# container too. Zero version drift between "what I greped" and "what ran".
-HOST_CLAUDE="${STANOK_CLAUDE_BIN:-$(command -v claude || true)}"
-if [ -z "$HOST_CLAUDE" ]; then
-    echo "ERROR: claude CLI not found (set STANOK_CLAUDE_BIN or add to PATH)" >&2
-    exit 1
-fi
-HOST_CLAUDE_SHIM_DIR="$(dirname "$HOST_CLAUDE")"
-
-# The claude install can be a MULTI-HOP symlink chain (verified on this
-# host: bin/claude -> .npm-global/lib/node_modules/.../cli.js ->
-# git/claude-code-2.1.88/cli.js). Every directory a hop lives in must be
-# bind-mounted, or an intermediate hop dangles inside the container and
-# `command -v claude` fails. Scope stays narrow: only the chain's own
-# directories — never a broader parent that could be a user's git checkout
-# root leaking unrelated repos.
-CLAUDE_MOUNT_DIRS=()
-_hop="$HOST_CLAUDE"
-while :; do
-    _d="$(dirname "$_hop")"
-    case " ${CLAUDE_MOUNT_DIRS[*]} " in *" $_d "*) : ;; *) CLAUDE_MOUNT_DIRS+=("$_d") ;; esac
-    [ -L "$_hop" ] || break
-    _next="$(readlink "$_hop")"
-    case "$_next" in /*) : ;; *) _next="$_d/$_next" ;; esac
-    _hop="$_next"
-done
-CLAUDE_MOUNTS=()
-for _d in "${CLAUDE_MOUNT_DIRS[@]}"; do
-    CLAUDE_MOUNTS+=(-v "$_d:$_d:ro")
-done
-
-HOST_NODE="$(command -v node || true)"
-NODE_MOUNTS=()
-if [ -n "$HOST_NODE" ]; then
-    HOST_NODE_REAL="$(readlink -f "$HOST_NODE")"
-    # File-level mount: a directory mount of the node dir (e.g. /usr/bin)
-    # would overlay the image's /usr/bin and break the image python3 and
-    # the venv python the launcher runs.
-    NODE_MOUNTS+=(-v "$HOST_NODE_REAL:/usr/local/bin/node:ro")
-fi
+# R4: the image bakes in Node.js + the Claude Code CLI 2.1.88
+# (/usr/local/bin/claude -> /opt/claude-code-2.1.88/cli.js) — no host
+# claude/node bind-mounts anymore; `docker run --rm $IMAGE claude --version`
+# is the version proof.
 
 mkdir -p "$REPO_ROOT/src" "$REPO_ROOT/tests" "$REPO_ROOT/docs" \
          "$REPO_ROOT/scripts" "$REPO_ROOT/evidence"
@@ -99,8 +60,6 @@ VOLUME_ARGS=(
   -v "$REPO_ROOT/scripts:$REPO_ROOT/scripts:rw"
   -v "$REPO_ROOT/evidence:$REPO_ROOT/evidence:rw"
   -v "$LOG_DIR:$LOG_DIR:rw"
-  "${CLAUDE_MOUNTS[@]}"
-  "${NODE_MOUNTS[@]}"
 )
 
 # --- Env passthrough -----------------------------------------------------
@@ -116,10 +75,9 @@ ENV_ARGS=()
 for var in $(compgen -v | grep '^STANOK_'); do
     ENV_ARGS+=(-e "${var}=${!var}")
 done
-# node is mounted at /usr/local/bin/node; the claude CLI is launched via an
-# absolute path (STANOK_CLAUDE_BIN), but both dirs go on PATH so the shim's
-# `#!/usr/bin/env node` shebang and any interactive use resolve.
-ENV_ARGS+=(-e "PATH=/usr/local/bin:${HOST_CLAUDE_SHIM_DIR}:/usr/bin:/bin")
+# node + claude are baked into the image at /usr/local/bin (R4) — the
+# CLI's `#!/usr/bin/env node` shebang and any interactive use resolve.
+ENV_ARGS+=(-e "PATH=/usr/local/bin:/usr/bin:/bin")
 # Ephemeral HOME on a tmpfs (decision §2.1): no host coupling, the CLI's
 # ~/.claude and ~/.claude.json live and die with the container.
 ENV_ARGS+=(-e "HOME=/home/stanok")
