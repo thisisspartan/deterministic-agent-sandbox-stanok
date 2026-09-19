@@ -24,7 +24,7 @@ pluggable git submodule for any project.
 
 ```bash
 ./setup.sh                                   # .venv + claude-agent-sdk + CLI staging + docker image build
-bash hooks/doctor.sh                         # expected: 15 ok, 0 fail
+bash hooks/doctor.sh                         # expected: 15 passed (pytest)
 ```
 
 ## Running
@@ -59,8 +59,10 @@ launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 Dockerfile                    — the machine image (debian + toolchain +
                                 claude-agent-sdk + Node.js + Claude Code
                                 CLI 2.1.88 + bubblewrap + socat)
-hooks/                        — doctor, commit-msg (the TDD verifier is
+hooks/                        — doctor (thin pytest wrapper, R5),
+                                commit-msg (the TDD verifier is
                                 in-process in launcher/stanok.py, R1)
+launcher/tests_harness/       — the doctor checks as pytest (R5)
 .claude/settings.stanok.json  — the machine config (allow/deny,
                                 native sandbox + allowedDomains)
 CLAUDE.md                     — the machine role (auto-loaded inside the repo)
