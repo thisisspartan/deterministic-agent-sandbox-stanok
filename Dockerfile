@@ -16,7 +16,10 @@
 # second, independently-versioned claude-code inside the image would
 # reintroduce exactly the kind of drift this project has spent several
 # review rounds eliminating (README/CLAUDE.md disagreeing about what's
-# actually running). Bind-mount, don't reinstall.
+# actually running). Bind-mount, don't reinstall. The SDK below is
+# installed from sdist (--no-binary) precisely so this statement stays
+# true: the wheel bundles a second CLI (_bundled/claude) that we do not
+# want in the image.
 #
 # What IS baked in: the launcher's own Python runtime (claude-agent-sdk) and
 # a minimal, generic toolchain so the MODEL can build/test ANY project stack
@@ -28,11 +31,12 @@ FROM debian:bookworm-slim
 
 ARG STANOK_UID=10001
 ARG STANOK_GID=10001
-# Pin deliberately. Each claude-agent-sdk release bundles a specific Claude
-# Code CLI build (0.2.139 -> CLI 2.1.233, at time of writing) but stanok.py
-# points cli_path at the bind-mounted HOST claude binary instead (see
-# sandbox-run.sh), so this pin only fixes the *Python SDK* surface stanok.py
-# imports against (ClaudeAgentOptions, ClaudeSDKClient, message types).
+# Pin deliberately. The SDK wheel bundles a second, independently-versioned
+# Claude Code CLI (_bundled/claude); we install from sdist (--no-binary) so
+# the image carries ONLY the *Python SDK* surface stanok.py imports against
+# (ClaudeAgentOptions, ClaudeSDKClient, message types). stanok.py points
+# cli_path at the bind-mounted HOST claude binary (see sandbox-run.sh);
+# without it the SDK has no bundled fallback and the launch fails closed.
 # Bump it deliberately when you upgrade, not by accident on a rebuild.
 ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 
@@ -66,6 +70,10 @@ ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 #                           the sandbox's HTTP/SOCKS bridge sockets via socat;
 #                           the CLI hard-fails at startup without it (verified:
 #                           "dependencies are missing: socat not installed").
+# jq                      — hooks/verifier.sh parses the hook's JSON input and
+#                           emits hookSpecificOutput with jq; without it the
+#                           hook silently no-ops and the RED CONFIRMED feedback
+#                           never reaches the model (D1, arch review 2026-09-19).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ca-certificates \
@@ -73,13 +81,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
       bubblewrap \
       socat \
+      jq \
       python3 \
       python3-pip \
       python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Launcher runtime ---------------------------------------------------
+# --no-binary: build from sdist, NOT the wheel — the wheel ships
+# _bundled/claude (a second CLI, ~300 MB). The sdist build has no _bundled
+# dir; cli_path (stanok.py) always points at the host binary.
 RUN pip install --break-system-packages --no-cache-dir \
+      --no-binary claude-agent-sdk \
       "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}"
 
 # --- Non-root user -------------------------------------------------------
