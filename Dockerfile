@@ -14,8 +14,10 @@
 # self-contained image where `docker run --rm $IMAGE claude --version`
 # IS the version proof, with zero host coupling at container start.
 # The CLI is staged into .build-context/claude-code-2.1.88/ by setup.sh
-# from $STANOK_CLI_DIR (the operator's validated checkout) — only
-# cli.js + package.json, no .git/source/vendor/maps. Node comes from the
+# from $STANOK_CLI_DIR (the operator's validated checkout) — cli.js +
+# package.json + the vendored ripgrep binary (vendor/ripgrep/x64-linux/rg,
+# required by the CLI's native sandbox at startup), no .git/source/
+# other-platforms/maps. Node comes from the
 # official nodejs.org tarball, NOT a copy of the host's /usr/bin/node
 # (a host ELF is dynamically linked against the host glibc and is not
 # portable into bookworm). The SDK below is still installed from sdist
@@ -98,8 +100,9 @@ RUN pip install --break-system-packages --no-cache-dir \
 # bin/npm, lib/node_modules/npm). NOT a COPY of the host's /usr/bin/node —
 # that ELF is dynamically linked against the host glibc and is not
 # portable into bookworm.
-# CLI: staged by setup.sh into .build-context/claude-code-2.1.88/ (only
-# cli.js + package.json from $STANOK_CLI_DIR). Bump both deliberately.
+# CLI: staged by setup.sh into .build-context/claude-code-2.1.88/ (cli.js +
+# package.json + vendor/ripgrep/x64-linux/rg from $STANOK_CLI_DIR).
+# Bump both deliberately.
 ARG NODE_VERSION=22.22.3
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" \
       | tar -xzf - --strip-components=1 -C /usr/local
