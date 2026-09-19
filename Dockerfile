@@ -70,10 +70,6 @@ ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 #                           the sandbox's HTTP/SOCKS bridge sockets via socat;
 #                           the CLI hard-fails at startup without it (verified:
 #                           "dependencies are missing: socat not installed").
-# jq                      — hooks/verifier.sh parses the hook's JSON input and
-#                           emits hookSpecificOutput with jq; without it the
-#                           hook silently no-ops and the RED CONFIRMED feedback
-#                           never reaches the model (D1, arch review 2026-09-19).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ca-certificates \
@@ -81,7 +77,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
       bubblewrap \
       socat \
-      jq \
       python3 \
       python3-pip \
       python3-venv \

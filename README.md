@@ -56,10 +56,9 @@ sandbox-run.sh                — Docker sandbox: repo mounted read-only with
                                 scripts/, evidence/); .git read-only; host
                                 claude/node bind-mounted; cap-drop=ALL,
                                 no-new-privileges, resource limits
-hooks/                        — verifier (PostToolUse Write|Edit: runs the
-                                matching test, injects RED/GREEN), doctor,
-                                commit-msg
-.claude/settings.stanok.json  — the machine config (allow/deny, hooks,
+hooks/                        — doctor, commit-msg (the TDD verifier is
+                                in-process in launcher/stanok.py, R1)
+.claude/settings.stanok.json  — the machine config (allow/deny,
                                 native sandbox + allowedDomains)
 CLAUDE.md                     — the machine role (auto-loaded inside the repo)
 setup.sh                      — environment deployment (.venv + docker image)
@@ -106,8 +105,9 @@ src/ tests/ docs/ scripts/    — the machine working directories (empty at star
    `allowedDomains`); subagents (Agent/Task) are denied.
 3. Monolithic TDD in a single session: the model writes the test first
    (red), then the implementation (green), then docs. After every Write/Edit
-   under `tests/`: verifier.sh (PostToolUse) runs the matching test through
-   `scripts/run.sh` and injects the verdict (RED CONFIRMED / GREEN) into the
+   under `tests/`: the in-process PostToolUse hook (launcher/stanok.py,
+   SDK `hooks` option — no shell command) runs the matching test through
+   `scripts/run.sh` and injects the verdict (RED CONFIRMED) into the
    session — the TDD red phase is harness-provided, not model discipline.
 4. On verifier FAIL the Runner appends an in-session retry turn
    (`--local-retries`, default 2) with the failure block.

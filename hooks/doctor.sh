@@ -20,7 +20,7 @@ chk() { # chk <name> <cmd...>
 
 chk "settings.stanok.json exists"     test -f "$REPO_ROOT/.claude/settings.stanok.json"
 chk "settings.stanok.json valid JSON" python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$REPO_ROOT/.claude/settings.stanok.json"
-chk "PostToolUse verifier hook present" grep -q '"PostToolUse"' "$REPO_ROOT/.claude/settings.stanok.json"
+chk "PostToolUse verifier hook (in-process)" grep -q '_verifier_hook' "$REPO_ROOT/launcher/stanok.py"
 chk "commit-msg executable"           test -x "$REPO_ROOT/hooks/commit-msg"
 HOOKS_DIR="$(git -C "$REPO_ROOT" rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
 chk "commit-msg hook"                 test -L "$REPO_ROOT/$HOOKS_DIR/commit-msg"   # FINDING-5: a broken symlink disables the TASK-ID gate

@@ -64,12 +64,5 @@
         "security.debian.org"
       ]
     }
-  },
-  "hooks": {
-    "PostToolUse": [
-      { "matcher": "Write|Edit", "hooks": [
-          { "type": "command", "command": "bash hooks/verifier.sh" }
-      ] }
-    ]
   }
 }

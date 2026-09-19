@@ -1,6 +1,6 @@
 'use strict';
 // src/smoke.js — harness smoke module (TASK-STANOK-SMOKE-01).
-// Exports add(a, b) -> a + b (numeric sum).
+// Contract: add(a, b) returns the numeric sum a + b.
 
 function add(a, b) {
   return a + b;

@@ -535,8 +535,74 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
     return (turn_total or live_window), live_window, writes, turn_error
 
 
+# R1 (Phase 2): in-process replacement for hooks/verifier.sh.
+# PostToolUse on Write|Edit: if the written file is a test under tests/ and it
+# runs RED through the project entrypoint, inject "VERIFY: RED CONFIRMED" so
+# the model goes straight to the implementation.
+#
+# Runs as an SDK hook callback (CLI hook_callback control channel), NOT a
+# shell command: no jq, no bash hook process in the trace. The subprocess is
+# asyncio.create_subprocess_exec — a sync subprocess here would block the
+# event loop that also runs the turn watchdog. Fail-open, exactly like the
+# old shell hook: ANY error in this callback yields a no-op, never a failed
+# turn (the external verifier is the fail-closed gate; this is feedback only).
+_HOOK_TEST_TIMEOUT_S = 75  # mirrors the old `timeout 75` in verifier.sh
+
+
+async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -> dict:
+    try:
+        tool_input = hook_input.get("tool_input") or {}
+        fp = tool_input.get("file_path")
+        if not fp:
+            return {}
+        if not fp.startswith("/"):
+            fp = os.path.join(REPO_ROOT, fp)
+        abs_path = os.path.realpath(fp)
+        tests_dir = os.path.join(REPO_ROOT, "tests")
+        if not abs_path.startswith(tests_dir + os.sep):
+            return {}
+        if not os.path.isfile(abs_path):
+            return {}
+        run_sh = os.path.join(REPO_ROOT, "scripts", "run.sh")
+        if not os.path.isfile(run_sh):
+            return {}
+        rel = os.path.relpath(abs_path, REPO_ROOT)
+        proc = await asyncio.create_subprocess_exec(
+            "bash", run_sh, "test", rel,
+            cwd=REPO_ROOT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=_HOOK_TEST_TIMEOUT_S)
+            rc = proc.returncode
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            rc, out = 124, b""
+        # rc=0: GREEN (implementation exists) — stay silent.
+        # rc=2: runner refused the path (not a test in its terms) — not our concern.
+        if rc in (0, 2):
+            return {}
+        text = out.decode("utf-8", "replace")
+        tail = "\n".join(text.splitlines()[-25:])
+        log(f"VERIFIER HOOK: RED CONFIRMED ({rel} rc={rc})")
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": (
+                    f"VERIFY: RED CONFIRMED ({rel} rc={rc}). "
+                    f"Implement src/ to make it GREEN.\n{tail}"
+                ),
+            }
+        }
+    except Exception as e:
+        log(f"VERIFIER HOOK: no-op (error: {e})")
+        return {}
+
+
 async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, declared_paths: list[str]) -> int:
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 
     local_run_id = str(uuid.uuid4())[:8]
     stream_out_path = os.path.join(_live_dir, f"session-{local_run_id}.jsonl")
@@ -552,6 +618,14 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         # allowed_tools is kept as the permission-allow side of the same set.
         tools=CURATED_TOOLS,
         allowed_tools=CURATED_TOOLS,
+        # R1: in-process PostToolUse verifier (replaces hooks/verifier.sh).
+        # timeout > _HOOK_TEST_TIMEOUT_S so the hook's own 75 s test timeout
+        # is the deterministic verdict, not the SDK's hook timeout.
+        hooks={
+            "PostToolUse": [
+                HookMatcher(matcher="Write|Edit", hooks=[_verifier_hook], timeout=90)
+            ]
+        },
         max_turns=30,
         model=LOCAL_MODEL,
         env=build_agent_env(),
