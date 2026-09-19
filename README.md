@@ -48,15 +48,17 @@ bash hooks/doctor.sh                         # expected: 15 ok, 0 fail
 
 ```
 launcher/stanok.py            — THE single Runner (CLI run/status/stop,
-                                gates, Job/Attempt, typed summary.json)
+                                gates, background self-spawn, Job/Attempt,
+                                typed summary.json)
+launcher/sandbox.py           — the Docker boundary (R2, former sandbox-run.sh):
+                                repo mounted read-only with writable carve-outs
+                                (src/, tests/, docs/, scripts/, evidence/);
+                                .git read-only; cap-drop=ALL, no-new-privileges,
+                                resource limits
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 Dockerfile                    — the machine image (debian + toolchain +
                                 claude-agent-sdk + Node.js + Claude Code
                                 CLI 2.1.88 + bubblewrap + socat)
-sandbox-run.sh                — Docker sandbox: repo mounted read-only with
-                                writable carve-outs (src/, tests/, docs/,
-                                scripts/, evidence/); .git read-only;
-                                cap-drop=ALL, no-new-privileges, resource limits
 hooks/                        — doctor, commit-msg (the TDD verifier is
                                 in-process in launcher/stanok.py, R1)
 .claude/settings.stanok.json  — the machine config (allow/deny,
@@ -86,19 +88,22 @@ src/ tests/ docs/ scripts/    — the machine working directories (empty at star
 
 ## How it works (briefly)
 
-1. `launch.sh run` (shim → Runner) passes the fail-closed gates in this order:
-   shim check-dirty (rc=22, host side) -> label-guard (rc=15) ->
-   ROLE-LEAK (rc=24) -> ticket (rc=13) -> dirty-tree (rc=22, uncommitted
-   changes — start forbidden) -> lock (rc=21) -> ticket header (rc=13: an
-   `impl:`/`test:`/`docs:` line or `reset: none` is required — the
-   ticket-scoped invariant, W2.1; literal paths are validated: relative,
-   no `..`, top-level dir inside src/tests/docs/scripts) -> pre-flight
-   `/props` of the server (rc=20; fail-closed also when the server `n_ctx`
-   is below the required window).
+1. `launch.sh` (thin shim → Runner) — the Runner passes the fail-closed
+   gates in this order: label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
+   ticket (rc=13) -> dirty-tree (rc=22, uncommitted changes — start
+   forbidden) -> then: `--background` spawns a detached self-run, or sync
+   runs either in-process (host no-sandbox / container side — the lock
+   (rc=21) is taken there) or as a supervised `docker run`
+   (`launcher/sandbox.py`; the container-side Runner re-runs the gates and
+   takes the lock) -> ticket header (rc=13: an `impl:`/`test:`/`docs:` line
+   or `reset: none` is required — the ticket-scoped invariant, W2.1; literal
+   paths are validated: relative, no `..`, top-level dir inside
+   src/tests/docs/scripts) -> pre-flight `/props` of the server (rc=20;
+   fail-closed also when the server `n_ctx` is below the required window).
    The dirty-tree gate is fail-closed: no destructive reset/clean — the
    operator commits before launch.
 2. The Runner opens ONE Claude session (cwd = repo) inside the Docker
-   container (`sandbox-run.sh`): settings from `.claude/settings.stanok.json`,
+   container (`launcher/sandbox.py`): settings from `.claude/settings.stanok.json`,
    tools Read/Write/Edit/Grep/Glob/Bash — Bash is native and UNRESTRICTED;
    the boundary is the container (cap-drop=ALL, no-new-privileges,
    resource limits) plus the claude-code native sandbox (bwrap per Bash

@@ -47,9 +47,9 @@ mkdir -p "$DIR/.build-context/claude-code-2.1.88"
 cp -f "$CLI_SRC/cli.js" "$CLI_SRC/package.json" "$DIR/.build-context/claude-code-2.1.88/"
 
 echo "--- building the machine image (Docker boundary) ---"
-# The .venv above is only the HOST-side python for launch.sh's check-dirty
-# gate; the run itself executes in the image (sandbox-run.sh remaps the
-# venv python to the image system python, which carries the SDK).
+# The .venv above is only the HOST-side python for the Runner's host-side
+# gates; the run itself executes in the image (launcher/sandbox.py runs the
+# image system python, which carries the SDK).
 docker build -t "${STANOK_DOCKER_IMAGE:-stanok-machine:latest}" -f "$DIR/Dockerfile" "$DIR"
 
 echo

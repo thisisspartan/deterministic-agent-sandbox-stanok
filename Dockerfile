@@ -5,7 +5,7 @@
 # Design decision (replaces bwrap + bash-gate + read-guard + custom `run` MCP
 # tool from waves 1-3): the model gets native Bash back. The security boundary
 # moves from "approve every command in advance" to "one strong container +
-# resource limits + external, unwritable verification" — see sandbox-run.sh
+# resource limits + external, unwritable verification" — see launcher/sandbox.py
 # for the runtime side of that boundary.
 #
 # R4 (hermetic image, supersedes the old bind-mount decision): the image
@@ -46,7 +46,7 @@ ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 # --- OS packages -------------------------------------------------------------
 # git                     — model needs read access to history/blame; real
 #                           work often needs `git log`/`git blame`, and write
-#                           access is blocked at the mount layer (sandbox-run.sh),
+#                           access is blocked at the mount layer (launcher/sandbox.py),
 #                           not by withholding the binary — see SEC-01 note there.
 # ca-certificates, curl   — outbound goes through http(s)_proxy/no_proxy env
 #                           vars set at `docker run`, same policy as before.
@@ -55,7 +55,7 @@ ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 #                           reachability to the local llama-server, exactly
 #                           matching what bwrap already did (it never
 #                           unshared the network namespace either — see
-#                           sandbox-run.sh comment on --network).
+#                           launcher/sandbox.py comment on --network).
 # build-essential         — most "curl | sh" language installers and native
 #                           npm/pip packages with C extensions need a compiler.
 # python3/pip/venv        — (a) runs the launcher itself, (b) gives
@@ -67,7 +67,7 @@ ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 #                           the CLI at startup. Runs INSIDE the container (B1
 #                           hybrid): needs --security-opt seccomp=unconfined +
 #                           apparmor=unconfined at docker run (see
-#                           sandbox-run.sh) and enableWeakerNestedSandbox=true
+#                           launcher/sandbox.py) and enableWeakerNestedSandbox=true
 #                           (skips --proc /proc, which EPERMs in a container).
 # socat                   — the CLI's network bridge (allowedDomains) forwards
 #                           the sandbox's HTTP/SOCKS bridge sockets via socat;
@@ -111,7 +111,7 @@ RUN chmod +x /opt/claude-code-2.1.88/cli.js \
 # Mirrors stanok.py's own root_refusal() host-side check: the container must
 # not run the model as root either, or a container escape and a host-level
 # root compromise become the same bug instead of two separate ones.
-# sandbox-run.sh additionally passes --user "$(id -u):$(id -g)" at runtime so
+# launcher/sandbox.py additionally passes --user "$(id -u):$(id -g)" at runtime so
 # files written into the bind-mounted src/tests/docs/scripts/evidence land
 # owned by the invoking host user, not this baked-in UID; this UID is only
 # the sane default for anyone who runs the image directly/interactively
@@ -122,7 +122,7 @@ RUN groupadd -g "$STANOK_GID" stanok \
 WORKDIR /work
 USER stanok
 
-# No ENTRYPOINT/CMD on purpose. sandbox-run.sh always passes the full command
+# No ENTRYPOINT/CMD on purpose. launcher/sandbox.py always passes the full command
 # explicitly (python3 launcher/stanok.py run ...). An implicit default here
 # would be a second, easy-to-forget place the launch command could drift
 # from what launch.sh actually invokes — the same class of bug as the

@@ -31,6 +31,8 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import sandbox  # R2: the Docker boundary (former sandbox-run.sh)
+
 # --- Circuit constants -------------------------------------------------------------
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 # If STANOK_REPO is not set, we go up one level (stanok/launcher -> stanok)
@@ -955,7 +957,10 @@ def cmd_run(args) -> int:
     start_ts = int(time.time())
     recorded_pid = os.getpid()
 
-    # Preserve the host PID if it was already set by launch.sh
+    # R2: the marker is written by the host-side supervisor (run_sandboxed /
+    # launch_background) with ITS pid — inside the container os.getpid() is
+    # not visible from the host. If the marker already exists, preserve its
+    # start_ts/pid; only a fresh in-process run (no-sandbox) writes its own.
     if os.path.exists(_marker_path):
         try:
             parts = open(_marker_path, "r", encoding="utf-8").read().split()
@@ -963,11 +968,6 @@ def cmd_run(args) -> int:
                 start_ts = int(parts[0])
                 recorded_pid = int(parts[1])
         except (ValueError, OSError):
-            pass
-    elif os.environ.get("STANOK_HOST_PID"):
-        try:
-            recorded_pid = int(os.environ["STANOK_HOST_PID"])
-        except ValueError:
             pass
 
     with open(_marker_path, "w", encoding="utf-8") as f:
@@ -1150,6 +1150,72 @@ def cmd_stop(label: str) -> int:
 
 
 # ==================================================================================
+# Launch orchestration (R2: the former launch.sh + sandbox-run.sh, in Python)
+# ==================================================================================
+def _inner_run_argv(args) -> list:
+    """The container-side / child-side `run` argv (single source)."""
+    inner = ["run", args.ticket]
+    if args.direct:
+        inner.append("--direct")
+    if args.local_retries != DEFAULT_RETRIES:
+        inner += ["--local-retries", str(args.local_retries)]
+    inner += ["--", args.label, *args.extra]
+    return inner
+
+
+def run_sandboxed(args) -> int:
+    """Host-side sync run: supervise the Docker container (replaces
+    sandbox-run.sh). The marker carries THIS process's pid — cmd_stop's
+    killpg lands here, and the try/finally stops the container and removes
+    the marker on every exit path (normal return, crash, signal)."""
+    evidence_dir, _ = label_paths(args.label)
+    os.makedirs(evidence_dir, exist_ok=True)
+    # Mount points must exist before `docker run` (else Docker creates them
+    # root-owned).
+    for d in ("src", "tests", "docs", "scripts", "evidence"):
+        os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
+
+    marker = os.path.join(evidence_dir, ".running")
+    with open(marker, "w", encoding="utf-8") as f:
+        f.write(f"{int(time.time())} {os.getpid()}\n")
+
+    _install_signal_handlers()
+    image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
+    # The container runs the IMAGE's system python (the SDK is baked in);
+    # the host venv python is only for the host-side gates.
+    name, argv = sandbox.sandbox_argv(
+        REPO_ROOT, LOG_DIR, image,
+        ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args))
+    log(f"SANDBOX: docker container {name}")
+    try:
+        proc = subprocess.Popen(argv, start_new_session=True)
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        rc = _INTERRUPTED_RC or 130
+    finally:
+        sandbox.docker_stop(name)
+        try:
+            os.remove(marker)
+        except OSError:
+            pass
+    return rc
+
+
+def launch_background(args) -> int:
+    """Background run (replaces launch.sh's nohup branch): a detached
+    self-spawn executes the sync path — the child writes the marker with its
+    own pid and supervises the container (or runs in-process under
+    STANOK_NO_SANDBOX). The parent exits 0 immediately."""
+    log_path = os.path.join(LOG_DIR, f"{args.label}.launch.log")
+    child_argv = [sys.executable, os.path.abspath(__file__)] + _inner_run_argv(args)
+    with open(log_path, "a", encoding="utf-8") as lf:
+        child = subprocess.Popen(child_argv, stdout=lf, stderr=subprocess.STDOUT,
+                                 start_new_session=True, cwd=REPO_ROOT)
+    log(f"Machine launched in the background (PID {child.pid}). Log: {log_path}")
+    return 0
+
+
+# ==================================================================================
 # CLI entry point
 # ==================================================================================
 def _resolve_ticket(arg: str, direct: bool = False) -> str:
@@ -1173,11 +1239,17 @@ def main() -> int:
     p = argparse.ArgumentParser(prog="stanok", description="Stanok 4.2 Runner")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # R2: argparse is the single source of the CLI (the former launch.sh flag
+    # parsing is gone). `--` separates the label from extra positionals — a
+    # label starting with `--` stays positional (the label-guard test relies
+    # on it: `run <ticket> -- --background` -> label="--background" -> rc=15).
     r = sub.add_parser("run")
     r.add_argument("ticket")
     r.add_argument("label")
+    r.add_argument("extra", nargs="*", default=[])
     r.add_argument("--direct", action="store_true")
     r.add_argument("--local-retries", type=int, default=DEFAULT_RETRIES)
+    r.add_argument("--background", action="store_true")
 
     s = sub.add_parser("status")
     s.add_argument("label")
@@ -1242,16 +1314,31 @@ def main() -> int:
         if dirty_tree_gate():
             return early_abort(22, "ERROR: the machine repo contains uncommitted changes (rc=22)")
 
-        # Background mode is owned by launch.sh (host-side nohup): inside the
-        # container a self-re-spawn would bypass the lock and the host gates.
-        lock_path = os.path.join(LOG_DIR, f"stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock")
-        lf = open(lock_path, "w")
-        try:
-            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return early_abort(21, f"LOCK: the repo is already busy with another run ({lock_path})")
+        # R2: launch orchestration (the former launch.sh branches, in Python).
+        in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
+        no_sandbox = os.environ.get("STANOK_NO_SANDBOX") == "1"
 
-        return cmd_run(args)
+        if args.background:
+            # The child re-runs these gates and takes the lock itself; the
+            # parent must not hold the lock (flock would deadlock the child).
+            return launch_background(args)
+
+        if in_container or no_sandbox:
+            # In-process session (container-side Runner, or host no-sandbox):
+            # the lock serializes runs of this repo.
+            lock_path = os.path.join(LOG_DIR, f"stanok-{hashlib.md5(REPO_ROOT.encode()).hexdigest()[:12]}.lock")
+            lf = open(lock_path, "w")
+            try:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return early_abort(21, f"LOCK: the repo is already busy with another run ({lock_path})")
+            return cmd_run(args)
+
+        # Host sync: supervise the Docker container (launcher/sandbox.py).
+        # The container-side Runner re-runs the gates and takes the lock.
+        if shutil.which("docker") is None:
+            return early_abort(1, "ERROR: docker not found on PATH")
+        return run_sandboxed(args)
 
     return 0
 
