@@ -48,7 +48,7 @@ MAX_TEST_BYTES = 4096
 DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))
 
 API_TIMEOUT_S = max(1.0, float(os.environ.get("STANOK_API_TIMEOUT_S", "600")))
-TURN_TIMEOUT_S = float(os.environ.get("STANOK_TURN_TIMEOUT_S", "1200"))
+TURN_TIMEOUT_S = float(os.environ.get("STANOK_TURN_TIMEOUT_S", "1800"))
 
 if TURN_TIMEOUT_S <= API_TIMEOUT_S:
     TURN_TIMEOUT_S = API_TIMEOUT_S + max(15.0, API_TIMEOUT_S * 0.2)
@@ -204,6 +204,26 @@ def preflight_server() -> bool:
         return False
     log(f"PREFLIGHT: server n_ctx={n_ctx} >= required window {required} — OK")
     return True
+
+
+def _opik_trace_count() -> int | None:
+    """Total trace count in the 'stanok' Opik project, or None if Opik is
+    unreachable. The machine exports OTLP spans to the host Opik backend
+    (network=host -> localhost:8080). We sample the count before and after a
+    run: the delta is this run's exported traces. A delta of 0 (or an
+    unreachable backend) means the run left no traces — surfaced loudly so a
+    silent 'no traces' can never happen again."""
+    if os.environ.get("STANOK_SKIP_OPIK_CHECK") == "1":
+        return None
+    url = "http://localhost:8080/v1/private/traces?project_name=stanok&limit=1"
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(urllib.request.Request(url), timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        total = data.get("total")
+        return total if isinstance(total, int) else None
+    except Exception:
+        return None
 
 
 def _validate_declared_path(rel: str) -> bool:
@@ -459,7 +479,7 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> tuple[dict, dict, int]:
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> tuple[dict, dict, int, str]:
     """Returns (turn_total, live_window, writes).
 
     turn_total  — ResultMessage.usage: cumulative across the turn's API calls
@@ -475,6 +495,7 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
     live_window = {}
     turn_total = {}
     writes = 0
+    turn_error = ""
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
         if not sid and hasattr(msg, "data") and isinstance(msg.data, dict):
@@ -489,6 +510,21 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
             else:
                 live_window = u
 
+        # A ResultMessage with is_error=True (e.g. "API Error: terminated" or
+        # "API Error: 503 Loading model") means the SDK session is dead: further
+        # queries on it return a stale 0-token result instantly. Capture the
+        # reason so the caller can stop instead of burning the remaining turns
+        # on a dead session. is_error/result are direct dataclass fields.
+        if isinstance(msg, ResultMessage):
+            is_err = getattr(msg, "is_error", None)
+            res = getattr(msg, "result", None)
+            data = getattr(msg, "data", None)
+            if isinstance(data, dict):
+                is_err = is_err or data.get("is_error")
+                res = res or data.get("result")
+            if is_err:
+                turn_error = str(res or "unknown API error")
+
         content = getattr(msg, "content", None)
         if isinstance(content, list):
             for block in content:
@@ -496,7 +532,7 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
                     writes += 1
 
         _write_stream_msg(stream_f, turn, msg)
-    return (turn_total or live_window), live_window, writes
+    return (turn_total or live_window), live_window, writes, turn_error
 
 
 async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, declared_paths: list[str]) -> int:
@@ -545,7 +581,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 )
 
                 try:
-                    turn_usage, live_window, turn_writes = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
+                    turn_usage, live_window, turn_writes, turn_error = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
                 except asyncio.TimeoutError:
                     log(f"TIMEOUT: turn {turn} exceeded {TURN_TIMEOUT_S:.0f}s (silent stall) -> interrupt")
                     try:
@@ -616,6 +652,19 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     "turn_hit_rate": round(turn_hit_rate, 1),
                     "writes": turn_writes,
                 })
+
+                # A turn that ended with an SDK API error (e.g. "API Error:
+                # terminated" — the model server dropped the connection) leaves
+                # the session dead: subsequent fix prompts return a stale
+                # 0-token result instantly and waste the remaining turns. Stop
+                # the run now with a clear error; the supervisor relaunches.
+                if turn_error:
+                    log(f"TURN {turn} ended with API error: {turn_error!r} — "
+                        f"session dead, stopping (no fix prompt)")
+                    job["error"] = f"TURN-{turn} API ERROR: {turn_error}"
+                    job["verifier"] = "FAIL"
+                    job["turns"] = turn
+                    return 1
 
                 # contract_lock (W2.5): did the turn touch pre-existing tests?
                 _check_contract_lock(tests_manifest_before, job, turn)
@@ -787,6 +836,7 @@ def build_summary(job: dict, elapsed_s: int) -> dict:
         "contract_lock_violations": job.get("contract_lock_violations", []),
         "errors": [job["error"]] if job.get("error") else [],
         "failures": job.get("failures", []),
+        "opik_traces": job.get("opik_traces"),
     }
 
 
@@ -900,6 +950,15 @@ def cmd_run(args) -> int:
             except OSError: pass
         return 14
 
+    # Opik trace verification (baseline): sample the project trace count before
+    # the run. The delta after the run is this run's exported traces — one run
+    # at a time (the lock guarantees no concurrent stanok run to pollute it).
+    opik_before = _opik_trace_count()
+    if opik_before is None:
+        log("OPIK: backend unreachable — traces will NOT be recorded for this run")
+    else:
+        log(f"OPIK: backend reachable (project trace baseline={opik_before})")
+
     rc = 1
     try:
         rc = asyncio.run(run_continuous_session(job, ticket_prompt, args.local_retries, declared_paths))
@@ -911,6 +970,27 @@ def cmd_run(args) -> int:
         rc = 1
     finally:
         job["rc"] = rc
+        # Post-run Opik check: how many traces did this run export? OTLP export
+        # is batched/async, so if the count has not moved yet, give it a short
+        # settle and re-sample once before concluding.
+        opik_after = _opik_trace_count()
+        if opik_before is None or opik_after is None:
+            job["opik_traces"] = None
+            log("OPIK: post-run trace count unavailable (backend unreachable)")
+        else:
+            if opik_after <= opik_before:
+                time.sleep(3)
+                resample = _opik_trace_count()
+                if resample is not None:
+                    opik_after = resample
+            delta = opik_after - opik_before
+            job["opik_traces"] = delta
+            if delta <= 0:
+                log(f"OPIK WARNING: 0 traces exported for this run "
+                    f"(before={opik_before}, after={opik_after}) — OTLP export may have failed")
+            else:
+                log(f"OPIK: {delta} traces exported for this run "
+                    f"(before={opik_before}, after={opik_after})")
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try:
