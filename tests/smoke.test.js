@@ -5,14 +5,14 @@ const assert = require('node:assert/strict');
 
 const { add } = require('../src/smoke.js');
 
-test('add(2, 3) === 5', () => {
-  assert.equal(add(2, 3), 5);
+test('add sums two numbers', () => {
+  assert.strictEqual(add(2, 3), 5);
 });
 
-test('add(-1, 1) === 0', () => {
-  assert.equal(add(-1, 1), 0);
+test('add handles negative values', () => {
+  assert.strictEqual(add(-1, 1), 0);
 });
 
-test('add(0, 0) === 0', () => {
-  assert.equal(add(0, 0), 0);
+test('add handles zero', () => {
+  assert.strictEqual(add(0, 0), 0);
 });

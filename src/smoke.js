@@ -1,11 +1,7 @@
 'use strict';
-// src/smoke.js — harness smoke module (TASK-STANOK-SMOKE-01).
+// Smoke module (TASK-STANOK-SMOKE-01): minimal contract for harness smoke.
+// Exports add(a, b) -> the numeric sum of a and b.
 
-/**
- * @param {number} a
- * @param {number} b
- * @returns {number} the numeric sum a + b
- */
 function add(a, b) {
   return a + b;
 }
