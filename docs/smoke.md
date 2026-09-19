@@ -1,7 +1,8 @@
-# smoke (src/smoke.js)
+# src/smoke.js — sandbox/env smoke (TASK-STANOK-SMOKE-01)
 
-A minimal harness smoke module (TASK-STANOK-SMOKE-01), not a product feature.
-It exports a single function `add(a, b)` that returns the numeric sum `a + b`;
-no other behavior, state, or dependencies are part of the contract. Its tests
-(`tests/smoke.test.js`) exercise the full machine pipeline (model turn → Bash
-tool → sandbox layers → external verifier) with an expected rc=0 / PASS.
+`src/smoke.js` is a minimal harness smoke module, not a product feature. It exports
+a single function `add(a, b)` that returns the numeric sum `a + b` (works for
+integers, floats, and negatives). The reference contract is enforced by
+`tests/smoke.test.js` (node:test + node:assert/strict), asserting at least
+`add(2, 3) === 5`, `add(-1, 1) === 0`, and `add(0, 0) === 0`. Run it with
+`bash scripts/run.sh test tests/smoke.test.js` (exit 0 = pass).
