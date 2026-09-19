@@ -769,6 +769,20 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
                 verify_ok, failures = verify_gate(declared_paths)
 
+                # STRESS-TEST HOOK (temporary, user-approved 2026-09-19): force
+                # the external verifier to FAIL so the retry loop (turns
+                # 2..max_turns) is exercised synthetically. Enable with
+                # STANOK_FORCE_VERIFIER_FAIL=1. Rollback: tag pre-verifier-break.
+                if os.environ.get("STANOK_FORCE_VERIFIER_FAIL") == "1" and verify_ok:
+                    log("STRESS-TEST: STANOK_FORCE_VERIFIER_FAIL=1 — forcing verifier FAIL (synthetic)")
+                    verify_ok = False
+                    failures = [("(synthetic)",
+                                 "STANOK_FORCE_VERIFIER_FAIL=1: this failure was injected by the "
+                                 "launcher for a retry-loop stress test. The real test suite PASSED. "
+                                 "Do NOT modify tests/ or weaken anything to satisfy this block — "
+                                 "re-run `bash scripts/run.sh test <path>` to confirm the suite is green, "
+                                 "then finish the turn.")]
+
                 if verify_ok:
                     # NO-OP assert (W2.4): a turn-1 pass with zero Write/Edit
                     # tool_use means the machine did no work — the artifacts
