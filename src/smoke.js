@@ -1,7 +1,11 @@
 'use strict';
-// TASK-STANOK-SMOKE-01: sandbox/env smoke module.
-// Contract: add(a, b) -> a + b (numeric sum).
+// src/smoke.js — harness smoke module (TASK-STANOK-SMOKE-01).
 
+/**
+ * @param {number} a
+ * @param {number} b
+ * @returns {number} the numeric sum a + b
+ */
 function add(a, b) {
   return a + b;
 }

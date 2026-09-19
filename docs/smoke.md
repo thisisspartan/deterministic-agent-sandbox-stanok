@@ -1,9 +1,7 @@
-# src/smoke.js — sandbox/env smoke
+# smoke — harness smoke module
 
-Harness smoke module (not a product feature). It exists to force a complete
-machine run — model turn → Bash tool → both sandbox layers → external verifier.
-
-Contract: the module exports `add(a, b)`, which returns the numeric sum `a + b`.
-Reference tests live in `tests/smoke.test.js` (node:test + node:assert/strict)
-and assert `add(2, 3) === 5`, `add(-1, 1) === 0`, and `add(0, 0) === 0`.
-Run via `bash scripts/run.sh test tests/smoke.test.js`.
+`src/smoke.js` exports a single function `add(a, b)` which returns the numeric
+sum of its two arguments. This is a sandbox/env smoke module, not a product
+feature: it exists to exercise the full machine pipeline (model turn → Bash
+tool → sandbox layers → external verifier) with a minimal, deterministic
+contract, verified by `tests/smoke.test.js` (`node --test`).
