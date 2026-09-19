@@ -1,16 +1,17 @@
-# `src/udiff.py` — unified diff generator
+# src/udiff.py
 
 `diff(old: list[str], new: list[str], context: int = 3) -> str` computes the
-unified diff of two lists of lines (lines compared exactly, stdlib only).
-Lines are aligned by their longest common subsequence: LCS lines are
-unchanged context, remaining old lines are deletions, remaining new lines are
-insertions, and within one change block all deletions are emitted before all
-insertions. Change blocks are expanded by `context` unchanged lines on each
-side (clamped at file boundaries) and merged into a single hunk when at most
-`2 * context` unchanged lines separate them. Output is one
-`@@ -<os>,<oc> +<ns>,<nc> @@` header per hunk (counts always printed, even 0;
-start index of a pure-insertion/pure-deletion hunk is the 1-based index of
-the line immediately before the change point, or 0 at the file start)
-followed by body lines prefixed with ` `/`-`/`+`, every line including the
-last ending in `\n`. If the inputs are identical the function returns `""`.
-The module is import-safe (no side effects) and exposes exactly `diff`.
+unified diff of two lists of lines (stdlib only, no dependencies, import-safe).
+The lists are aligned by their longest common subsequence (LCS): LCS lines are
+emitted as context (` ` prefix), old lines outside the LCS as deletions (`-`),
+and new lines outside the LCS as insertions (`+`); within each change block all
+deletions are emitted before all insertions. Each change block is expanded by
+`context` unchanged lines on each side (clamped at file boundaries), and
+neighbouring change blocks merge into one hunk when the unchanged run between
+them is `<= 2 * context` lines long. Each hunk starts with a header
+`@@ -<os>,<oc> +<ns>,<nc> @@` where `<os>`/`<ns>` are the 1-based positions of
+the first old/new line in the hunk (or `0` when the hunk has no old/new lines
+and the change point is at file start) and `<oc>`/`<nc>` are the old/new line
+counts, always printed even when 0 or 1; every output line, including the last,
+ends with `\n`, hunks appear in file order with no blank line between them, and
+the function returns `""` when the two lists are identical.

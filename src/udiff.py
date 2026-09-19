@@ -1,133 +1,140 @@
-"""Unified diff generator (LCS-based, exact output format).
+"""Unified diff generator (LCS-based, stdlib only).
 
-Stdlib only. Exposes exactly one function: diff(old, new, context=3).
+Exposes exactly one function: diff(old, new, context=3) -> str.
+The exact output string is the contract; see docs/udiff.md.
 """
 
 
-def _lcs_matches(old, new):
-    """Return the list of (old_idx, new_idx) pairs of the LCS alignment,
-    in file order (strictly increasing indices on both sides)."""
-    m, n = len(old), len(new)
-    dp = [[0] * (n + 1) for _ in range(m + 1)]
-    for i in range(1, m + 1):
-        oi = old[i - 1]
-        row = dp[i]
-        prev = dp[i - 1]
-        for j in range(1, n + 1):
-            if oi == new[j - 1]:
-                row[j] = prev[j - 1] + 1
-            else:
-                row[j] = prev[j] if prev[j] >= row[j - 1] else row[j - 1]
-    matches = []
-    i, j = m, n
-    while i > 0 and j > 0:
-        if old[i - 1] == new[j - 1] and dp[i][j] == dp[i - 1][j - 1] + 1:
-            matches.append((i - 1, j - 1))
-            i -= 1
-            j -= 1
-        elif dp[i - 1][j] >= dp[i][j - 1]:
-            i -= 1
-        else:
-            j -= 1
-    matches.reverse()
-    return matches
+def diff(old: list[str], new: list[str], context: int = 3) -> str:
+    """Return the unified diff of two line lists.
 
-
-def diff(old: list, new: list, context: int = 3) -> str:
-    """Compute the unified diff of two line lists.
-
-    Lines are compared exactly (no trailing-newline semantics). Changed
-    lines are aligned by their longest common subsequence; within one
-    change block all deletions are emitted before all insertions. Change
-    blocks are expanded by `context` unchanged lines on each side and
-    merged into one hunk when <= 2*context unchanged lines separate them.
-    Returns "" when the lists are identical.
+    Lines are compared exactly (the inputs are already split lines).
+    Returns "" when the two lists are identical.
     """
-    # Segments alternate between unchanged lines and change blocks:
-    #   ("eq", old_idx, new_idx)
-    #   ("chg", old_start, old_end, new_start, new_end)  (half-open ranges)
-    segments = []
-    poi = pni = -1
-    for oi, ni in _lcs_matches(old, new):
-        if oi > poi + 1 or ni > pni + 1:
-            segments.append(("chg", poi + 1, oi, pni + 1, ni))
-        segments.append(("eq", oi, ni))
-        poi, pni = oi, ni
-    if poi + 1 < len(old) or pni + 1 < len(new):
-        segments.append(("chg", poi + 1, len(old), pni + 1, len(new)))
+    n, m = len(old), len(new)
 
-    block_idx = [i for i, s in enumerate(segments) if s[0] == "chg"]
-    if not block_idx:
+    # dp[i][j] = length of the LCS of old[i:] and new[j:].
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        row = dp[i]
+        nxt = dp[i + 1]
+        for j in range(m - 1, -1, -1):
+            if old[i] == new[j]:
+                row[j] = nxt[j + 1] + 1
+            else:
+                a = nxt[j]
+                b = row[j + 1]
+                row[j] = a if a >= b else b
+
+    # Walk the LCS alignment, producing an event stream:
+    # ("eq", line) | ("del", old line) | ("ins", new line).
+    events = []
+    i = j = 0
+    while i < n or j < m:
+        if i < n and j < m and old[i] == new[j]:
+            events.append(("eq", old[i]))
+            i += 1
+            j += 1
+        elif i == n:
+            events.append(("ins", new[j]))
+            j += 1
+        elif j == m:
+            events.append(("del", old[i]))
+            i += 1
+        elif dp[i + 1][j] >= dp[i][j + 1]:
+            events.append(("del", old[i]))
+            i += 1
+        else:
+            events.append(("ins", new[j]))
+            j += 1
+
+    # Split the stream into segments, which strictly alternate:
+    #   ("eq", count)
+    #   ("chg", old_first, del_count, new_first, ins_count, dels, ins)
+    # where old_first/new_first are the 0-based indices of the first
+    # deleted/inserted line. A change block is a maximal run of
+    # deletions/insertions between two consecutive LCS matches.
+    segs = []
+    i = j = 0
+    k = 0
+    while k < len(events):
+        if events[k][0] == "eq":
+            count = 0
+            while k < len(events) and events[k][0] == "eq":
+                k += 1
+                i += 1
+                j += 1
+                count += 1
+            segs.append(("eq", count))
+        else:
+            old_first, new_first = i, j
+            dels, ins = [], []
+            while k < len(events) and events[k][0] != "eq":
+                op, line = events[k]
+                if op == "del":
+                    dels.append(line)
+                    i += 1
+                else:
+                    ins.append(line)
+                    j += 1
+                k += 1
+            segs.append(("chg", old_first, len(dels), new_first, len(ins),
+                        dels, ins))
+
+    # Indices (into segs) of the change blocks.
+    chg_idx = [idx for idx, s in enumerate(segs) if s[0] == "chg"]
+    if not chg_idx:
         return ""
 
-    # Expand each change block by up to `context` unchanged lines per side
-    # (clamped at file boundaries and at neighboring blocks).
-    ranges = []
-    for i in block_idx:
-        j = i - 1
-        k = 0
-        while j >= 0 and segments[j][0] == "eq" and k < context:
-            j -= 1
-            k += 1
-        left = j + 1
-        j = i + 1
-        k = 0
-        while j < len(segments) and segments[j][0] == "eq" and k < context:
-            j += 1
-            k += 1
-        right = j
-        ranges.append([left, right])
+    # For each change block, how many unchanged lines sit immediately
+    # before / after it (equal runs are 1:1, so the count is the same
+    # in both files).
+    eq_before = [0] * len(segs)
+    eq_after = [0] * len(segs)
+    for idx in chg_idx:
+        eq_before[idx] = segs[idx - 1][1] if idx > 0 else 0
+        eq_after[idx] = segs[idx + 1][1] if idx + 1 < len(segs) else 0
 
-    # Merge blocks whose ranges touch or overlap: that is exactly the case
-    # where <= 2*context unchanged lines separate them.
-    merged = [ranges[0]]
-    for r in ranges[1:]:
-        if r[0] <= merged[-1][1]:
-            if r[1] > merged[-1][1]:
-                merged[-1][1] = r[1]
-        else:
-            merged.append(r)
+    # Group change blocks into hunks: two blocks merge when the
+    # unchanged run between them is <= 2 * context lines long.
+    groups = []
+    cur = []
+    for idx in chg_idx:
+        if cur and segs[idx - 1][1] > 2 * context:
+            groups.append(cur)
+            cur = []
+        cur.append(idx)
+    groups.append(cur)
 
+    # Emit the hunks.
     out = []
-    for left, right in merged:
-        oc = nc = 0
-        old_first = new_first = None
-        body = []
-        for seg in segments[left:right]:
-            if seg[0] == "eq":
-                oi, ni = seg[1], seg[2]
-                if old_first is None:
-                    old_first = oi
-                if new_first is None:
-                    new_first = ni
-                oc += 1
-                nc += 1
-                body.append(" " + old[oi] + "\n")
-            else:
-                _, os_, oe_, ns_, ne_ = seg
-                if old_first is None and os_ < oe_:
-                    old_first = os_
-                if new_first is None and ns_ < ne_:
-                    new_first = ns_
-                oc += oe_ - os_
-                nc += ne_ - ns_
-                for k in range(os_, oe_):
-                    body.append("-" + old[k] + "\n")
-                for k in range(ns_, ne_):
-                    body.append("+" + new[k] + "\n")
-        if oc > 0:
-            os = old_first + 1
-        else:
-            # Hunk has no old lines at all (pure insertion with zero old
-            # context): the 1-based index of the old line immediately
-            # before the insertion point, or 0 if at the very start.
-            # With zero old context the hunk is a single pure-insertion
-            # block, so its old range start is exactly that index.
-            os = segments[left][2]
-        if nc > 0:
-            ns = new_first + 1
-        else:
-            ns = segments[left][3]
-        out.append("@@ -%d,%d +%d,%d @@\n" % (os, oc, ns, nc))
-        out.extend(body)
+    for idxs in groups:
+        first, last = segs[idxs[0]], segs[idxs[-1]]
+        # The equal runs are 1:1, so the context clamping is identical
+        # on the old and new side.
+        old_start = first[1] - min(context, eq_before[idxs[0]])
+        old_end = last[1] + last[2] + min(context, eq_after[idxs[-1]])
+        new_start = first[3] - min(context, eq_before[idxs[0]])
+        new_end = last[3] + last[4] + min(context, eq_after[idxs[-1]])
+        old_count = old_end - old_start
+        new_count = new_end - new_start
+        # For a hunk with no old (new) lines at all, the start index is
+        # the 0-based count of lines before the change point.
+        os_ = old_start + 1 if old_count > 0 else old_start
+        ns_ = new_start + 1 if new_count > 0 else new_start
+        out.append("@@ -%d,%d +%d,%d @@\n" % (os_, old_count, ns_, new_count))
+
+        pos = old_start
+        for bi in idxs:
+            _, b_old_first, b_d, _, b_s, b_dels, b_ins = segs[bi]
+            for idx in range(pos, b_old_first):
+                out.append(" " + old[idx] + "\n")
+            for line in b_dels:
+                out.append("-" + line + "\n")
+            for line in b_ins:
+                out.append("+" + line + "\n")
+            pos = b_old_first + b_d
+        for idx in range(pos, old_end):
+            out.append(" " + old[idx] + "\n")
+
     return "".join(out)
