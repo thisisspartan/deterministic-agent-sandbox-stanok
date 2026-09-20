@@ -32,8 +32,10 @@ JS_FAIL = (
     "const assert = require('node:assert');\n"
     "test('bad', () => { assert.strictEqual(1, 2); });\n"
 )
-PY_PASS = "assert 1 == 1\n"
-PY_FAIL = "assert 1 == 2\n"
+# pytest-style: the py test-runner is `python3 -m pytest -q`, so a bare
+# module-level assert would give rc=5 ("no tests ran") even when true.
+PY_PASS = "def test_ok():\n    assert 1 == 1\n"
+PY_FAIL = "def test_bad():\n    assert 1 == 2\n"
 
 
 @pytest.fixture

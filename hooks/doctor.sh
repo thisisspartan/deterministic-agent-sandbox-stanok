@@ -7,4 +7,4 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$DIR")"
 PY="${STANOK_PY:-$REPO/.venv/bin/python}"
 cd "$REPO"
-exec "$PY" -m pytest launcher/tests_harness/test_doctor.py -q
+exec "$PY" -m pytest launcher/tests_harness/ -q
