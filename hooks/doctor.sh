@@ -5,6 +5,4 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$DIR")"
-PY="${STANOK_PY:-$REPO/.venv/bin/python}"
-cd "$REPO"
-exec "$PY" -m pytest launcher/tests_harness/ -q
+exec uv run --directory "$REPO" pytest launcher/tests_harness/ -q

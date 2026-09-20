@@ -209,6 +209,84 @@ def preflight_server() -> bool:
     return True
 
 
+def _stack_preflights() -> list[str]:
+    """The 6th (preflight) field of each STACKS registry line in
+    scripts/run.sh — the cheap per-stack runner-availability probe
+    (e.g. `uv run --no-project pytest --version`)."""
+    try:
+        with open(os.path.join(REPO_ROOT, "scripts", "run.sh"), encoding="utf-8") as f:
+            src = f.read()
+    except OSError:
+        return []
+    m = re.search(r"^STACKS='(.*?)'$", src, re.M | re.S)
+    if not m:
+        return []
+    preflights = []
+    for line in m.group(1).splitlines():
+        parts = line.split("|")
+        if len(parts) >= 6 and parts[5].strip():
+            preflights.append(parts[5].strip())
+    return preflights
+
+
+def _image_digest() -> str:
+    """sha256 over the image-defining sources: Dockerfile + scripts/run.sh
+    (the STACKS registry). setup.sh bakes this into the image LABEL
+    stanok.digest at build time; preflight_image() re-computes it at launch."""
+    h = hashlib.sha256()
+    for rel in ("Dockerfile", "scripts/run.sh"):
+        with open(os.path.join(REPO_ROOT, rel), "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()
+
+
+def preflight_image(image: str) -> bool:
+    """Host-side image provenance + runner preflight (rc=25 on any miss).
+    1. The image LABEL stanok.digest must equal sha256(Dockerfile + run.sh)
+       — an image older than the Dockerfile/registry is a launch failure,
+       not a mid-run ENV-FAIL.
+    2. Each stack's preflight command must succeed INSIDE the image
+       (docker run --rm) — the runner is available where the tests run.
+    Fail-closed: any docker error, missing label, or failed probe returns
+    False (the caller aborts with rc=25)."""
+    try:
+        want = _image_digest()
+    except OSError as e:
+        log(f"PREFLIGHT-IMAGE: cannot compute image digest: {e} (rc=25)")
+        return False
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", "--format",
+             '{{index .Config.Labels "stanok.digest"}}', image],
+            capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            log(f"PREFLIGHT-IMAGE: image {image} not found (rc=25)")
+            return False
+        got = out.stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"PREFLIGHT-IMAGE: docker inspect failed: {e} (rc=25)")
+        return False
+    if got != want:
+        log(f"PREFLIGHT-IMAGE: digest mismatch — image label {got!r} != "
+            f"sha256(Dockerfile+run.sh) {want!r}; rebuild via ./setup.sh (rc=25)")
+        return False
+    log(f"PREFLIGHT-IMAGE: digest OK ({want[:12]}…)")
+    for pre in _stack_preflights():
+        try:
+            p = subprocess.run(
+                ["docker", "run", "--rm", image, "/bin/sh", "-c", pre],
+                capture_output=True, text=True, timeout=60)
+            if p.returncode != 0:
+                log(f"PREFLIGHT-IMAGE: runner unavailable in image: {pre!r} "
+                    f"(probe rc={p.returncode}) (rc=25)")
+                return False
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"PREFLIGHT-IMAGE: docker run failed for {pre!r}: {e} (rc=25)")
+            return False
+    log("PREFLIGHT-IMAGE: all stack runners available in the image — OK")
+    return True
+
+
 def _opik_trace_count() -> int | None:
     """Total trace count in the 'stanok' Opik project, or None if Opik is
     unreachable. The machine exports OTLP spans to the host Opik backend
@@ -362,6 +440,11 @@ def _run_one_test(rel: str) -> tuple[str, str] | None:
     try:
         p = subprocess.run(["bash", "scripts/run.sh", "test", rel],
                            cwd=REPO_ROOT, capture_output=True, text=True, timeout=90)
+        if p.returncode == 6:
+            # ENV-FAIL: the runner is unavailable in the image — tagged so
+            # verify_gate can fail-closed WITHOUT a fix prompt (rc=16).
+            raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
+            return (rel, "ENV-FAIL: " + _extract_smart_diff(raw_err))
         if p.returncode != 0:
             raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
             return (rel, _extract_smart_diff(raw_err))
@@ -372,12 +455,16 @@ def _run_one_test(rel: str) -> tuple[str, str] | None:
     return None
 
 
-def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tuple[str, str]]]:
+def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tuple[str, str]], bool]:
     """Verdict = positive contract on the ticket's declared paths (W2.3)
     + every test the project's runner declares (D3).
 
     Discovery goes through the project entrypoint too (run.sh list), so the
     machine no longer hardcodes the *.test.js convention.
+    Returns (ok, failures, env_fail): env_fail is True when any failure is
+    an ENV-FAIL (run.sh rc=6, runner unavailable) — an environment defect
+    the model cannot fix from src/, so the caller must stop fail-closed
+    (rc=16) instead of sending a fix prompt.
     """
     failures: list[tuple[str, str]] = []
     # Positive contract: every artifact the ticket declares must exist.
@@ -390,12 +477,12 @@ def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tup
         lp = subprocess.run(["bash", "scripts/run.sh", "list"],
                             cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
     except Exception as e:
-        return (False, [("(no tests)", f"run.sh list failed: {e}")])
+        return (False, [("(no tests)", f"run.sh list failed: {e}")], False)
     tests = [ln.strip() for ln in (lp.stdout or "").splitlines() if ln.strip()]
     if not tests:
         if failures:
-            return (False, failures)
-        return (False, [("(no tests)", "The project runner declares no tests")])
+            return (False, failures, False)
+        return (False, [("(no tests)", "The project runner declares no tests")], False)
 
     with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
         futures = {ex.submit(_run_one_test, t): t for t in tests}
@@ -404,7 +491,8 @@ def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tup
             if res is not None:
                 failures.append(res)
     failures.sort(key=lambda x: x[0])
-    return (len(failures) == 0, failures)
+    env_fail = any(msg.startswith("ENV-FAIL:") for _, msg in failures)
+    return (len(failures) == 0, failures, env_fail)
 
 
 def _tests_manifest() -> dict[str, str]:
@@ -607,7 +695,12 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
             rc, out = 124, b""
         # rc=0: GREEN (implementation exists) — stay silent.
         # rc=2: runner refused the path (not a test in its terms) — not our concern.
-        if rc in (0, 2):
+        # rc=6: ENV-FAIL (runner unavailable in the image) — an environment
+        #       failure, NOT a red test; emitting RED here is what burned a
+        #       whole turn on CC-081 ("fix" the environment from src/).
+        if rc in (0, 2, 6):
+            if rc == 6:
+                log(f"VERIFIER HOOK: ENV-FAIL ({rel} rc=6) — runner unavailable, no RED")
             return {}
         text = out.decode("utf-8", "replace")
         tail = "\n".join(text.splitlines()[-25:])
@@ -791,7 +884,21 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
                         f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
 
-                verify_ok, failures = verify_gate(declared_paths)
+                verify_ok, failures, env_fail = verify_gate(declared_paths)
+
+                if env_fail:
+                    # ENV-FAIL (run.sh rc=6): the test runner is unavailable
+                    # in the image — an environment defect, not a code
+                    # defect. The model cannot fix the image from src/; a
+                    # fix prompt here is what burned turn 2 on CC-081. Stop
+                    # fail-closed before the next turn (run-level rc=16).
+                    log("ENV-FAIL: test runner unavailable (run.sh rc=6) — "
+                        "no fix prompt, stopping (fail-closed)")
+                    job["verifier"] = "FAIL"
+                    job["error"] = "ENV-FAIL: test runner unavailable (run.sh rc=6)"
+                    job["failures"] = failures
+                    job["turns"] = turn
+                    return 16
 
                 if verify_ok:
                     # NO-OP assert (W2.4): a turn-1 pass with zero Write/Edit
@@ -877,6 +984,10 @@ def _status_fields(rc: int, verifier: str, turns: int) -> tuple[str, str, str]:
     if rc == 0 and verifier == "PASS":
         probe_result = "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
         return probe_result, "PASS", "CLEAN"
+    if rc == 16:
+        # ENV-FAIL: the image lacks the test runner — an infrastructure
+        # failure (rebuild the image), neither a defect nor a NO-OP.
+        return "ENV-FAIL", "FAIL", "ENV-FAIL"
     return "VERIFY-FAIL", "FAIL", "DEFECT"
 
 
@@ -1361,6 +1472,12 @@ def main() -> int:
         # The container-side Runner re-runs the gates and takes the lock.
         if shutil.which("docker") is None:
             return early_abort(1, "ERROR: docker not found on PATH")
+        # Image provenance + runner preflight (rc=25): the image must match
+        # the current Dockerfile/STACKS registry and carry every stack's
+        # runner — otherwise the run would die mid-session with ENV-FAIL.
+        image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
+        if not preflight_image(image):
+            return early_abort(25, "ERROR: image preflight failed (digest mismatch or runner unavailable) (rc=25)")
         return run_sandboxed(args)
 
     return 0

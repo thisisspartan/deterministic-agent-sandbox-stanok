@@ -26,7 +26,7 @@
 #
 # What IS baked in: the launcher's own Python runtime (claude-agent-sdk),
 # Node.js + the Claude Code CLI, and a minimal, generic toolchain so the
-# MODEL can build/test ANY project stack via native Bash — python3/pip/venv
+# MODEL can build/test ANY project stack via native Bash — python3/uv
 # out of the box. Everything else (Go, Rust, JVM, ...) is one apt-get/curl
 # line added here the day a real ticket actually needs it. Do not
 # pre-guess every stack the project might ever use.
@@ -45,6 +45,15 @@ ARG STANOK_GID=10001
 # Bump it deliberately when you upgrade, not by accident on a rebuild.
 ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 
+# Image provenance: setup.sh computes sha256(Dockerfile + scripts/run.sh)
+# and passes it as --build-arg STANOK_DIGEST. The launcher's host-side
+# preflight (stanok.py preflight_image, rc=25) re-computes the same digest
+# at launch and fails closed on a mismatch — an image older than the
+# Dockerfile/STACKS registry becomes a 1-second launch failure instead of
+# a mid-run ENV-FAIL.
+ARG STANOK_DIGEST=
+LABEL stanok.digest="${STANOK_DIGEST}"
+
 # --- OS packages -------------------------------------------------------------
 # git                     — model needs read access to history/blame; real
 #                           work often needs `git log`/`git blame`, and write
@@ -60,9 +69,10 @@ ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 #                           launcher/sandbox.py comment on --network).
 # build-essential         — most "curl | sh" language installers and native
 #                           npm/pip packages with C extensions need a compiler.
-# python3/pip/venv        — (a) runs the launcher itself, (b) gives
+# python3/venv            — (a) runs the launcher itself, (b) gives
 #                           Python-stack tickets a working interpreter with
-#                           zero extra setup.
+#                           zero extra setup. Package management is uv
+#                           (baked in below), not pip.
 # bubblewrap              — the claude-code NATIVE sandbox (settings.stanok.json
 #                           sandbox.enabled=true) shells out to `bwrap` per Bash
 #                           command. Without it failIfUnavailable=true hard-fails
@@ -83,21 +93,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       bubblewrap \
       socat \
       python3 \
-      python3-pip \
       python3-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# --- uv (the image's package manager AND the py stack runner) -----------
+# Pinned binary from the official uv image. UV_SYSTEM_PYTHON=1 installs
+# into the system python; UV_PYTHON_PREFERENCE=only-system forbids
+# downloading a managed python (no GitHub fetches at build or run time);
+# UV_NO_CACHE=1 keeps builds and runs hermetic.
+# UV_BREAK_SYSTEM_PACKAGES=1: bookworm's system python is PEP 668
+# "externally managed" — without this, uv refuses the system install.
+COPY --from=ghcr.io/astral-sh/uv:0.5.24 /uv /usr/local/bin/uv
+ENV UV_SYSTEM_PYTHON=1 \
+    UV_PYTHON_PREFERENCE=only-system \
+    UV_NO_CACHE=1 \
+    UV_BREAK_SYSTEM_PACKAGES=1
 
 # --- Launcher runtime ---------------------------------------------------
 # --no-binary: build from sdist, NOT the wheel — the wheel ships
 # _bundled/claude (a second CLI, ~300 MB). The sdist build has no _bundled
 # dir; cli_path (stanok.py) always points at the host binary.
-RUN pip install --break-system-packages --no-cache-dir \
-      --no-binary claude-agent-sdk \
-      "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}"
-
 # pytest — the py stack's test-runner in scripts/run.sh is
-# `python3 -m pytest -q`; Python-stack tickets run their suites with it.
-RUN pip install --break-system-packages --no-cache-dir pytest
+# `uv run --no-project pytest -q -p no:cacheprovider`; Python-stack tickets
+# run their suites with it. Pin deliberately (same rule as the SDK): an
+# unpinned install drifts on every rebuild, and a missing pytest in the
+# image is exactly the ENV-FAIL class that run.sh's rc=6 and the launcher's
+# rc=25 image preflight exist to catch.
+RUN uv pip install --no-binary claude-agent-sdk \
+      "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}" \
+      "pytest==8.3.3"
 
 # --- Node.js + Claude Code CLI (R4: hermetic image) ------------------------
 # Node: official nodejs.org tarball, extracted over /usr/local (bin/node,
