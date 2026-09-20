@@ -2,4 +2,6 @@
 # claude-agent-sdk — Claude Agent SDK (runs claude-code via the API).
 claude-agent-sdk==0.2.139
 # pytest — the doctor harness (launcher/tests_harness/test_doctor.py, R5).
-pytest
+# Pinned to the image's version (Dockerfile) — one version on host and in
+# the container.
+pytest==8.3.3
