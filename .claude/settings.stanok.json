@@ -52,6 +52,7 @@
     "enabled": true,
     "failIfUnavailable": true,
     "enableWeakerNestedSandbox": true,
+    "allowUnsandboxedCommands": false,
     "network": {
       "allowedDomains": [
         "192.168.8.131",

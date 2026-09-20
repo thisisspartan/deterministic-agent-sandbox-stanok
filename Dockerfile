@@ -45,6 +45,15 @@ ARG STANOK_GID=10001
 # Bump it deliberately when you upgrade, not by accident on a rebuild.
 ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 
+# Image provenance: setup.sh computes sha256(Dockerfile + scripts/run.sh)
+# and passes it as --build-arg STANOK_DIGEST. The launcher's host-side
+# preflight (stanok.py preflight_image, rc=25) re-computes the same digest
+# at launch and fails closed on a mismatch — an image older than the
+# Dockerfile/STACKS registry becomes a 1-second launch failure instead of
+# a mid-run ENV-FAIL.
+ARG STANOK_DIGEST=
+LABEL stanok.digest="${STANOK_DIGEST}"
+
 # --- OS packages -------------------------------------------------------------
 # git                     — model needs read access to history/blame; real
 #                           work often needs `git log`/`git blame`, and write
@@ -96,8 +105,13 @@ RUN pip install --break-system-packages --no-cache-dir \
       "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}"
 
 # pytest — the py stack's test-runner in scripts/run.sh is
-# `python3 -m pytest -q`; Python-stack tickets run their suites with it.
-RUN pip install --break-system-packages --no-cache-dir pytest
+# `python3 -s -m pytest -q -p no:cacheprovider`; Python-stack tickets run
+# their suites with it. Pin deliberately (same rule as the SDK): an
+# unpinned `pip install pytest` drifts on every rebuild, and a missing
+# pytest in the image is exactly the ENV-FAIL class that run.sh's rc=6
+# and the launcher's rc=25 image preflight exist to catch.
+ARG PYTEST_VERSION=9.1.1
+RUN pip install --break-system-packages --no-cache-dir "pytest==${PYTEST_VERSION}"
 
 # --- Node.js + Claude Code CLI (R4: hermetic image) ------------------------
 # Node: official nodejs.org tarball, extracted over /usr/local (bin/node,

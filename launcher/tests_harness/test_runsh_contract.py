@@ -12,8 +12,10 @@ pins the fixed contract:
 Run: .venv/bin/python -m pytest launcher/tests_harness/test_runsh_contract.py -q
 """
 
+import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -48,9 +50,14 @@ def repo(tmp_path):
 
 
 def run(repo, *args, timeout=90):
+    # The py stack's runner is `python3 -s -m pytest ...`: the hermetic repo
+    # must provide a python that HAS pytest. The venv that runs this suite
+    # carries it (the host system python may not) — prepend its bin dir.
+    env = dict(os.environ)
+    env["PATH"] = f"{os.path.dirname(sys.executable)}:{env.get('PATH', '')}"
     return subprocess.run(
         ["bash", "scripts/run.sh", *args],
-        cwd=repo, capture_output=True, text=True, timeout=timeout,
+        cwd=repo, env=env, capture_output=True, text=True, timeout=timeout,
     )
 
 
