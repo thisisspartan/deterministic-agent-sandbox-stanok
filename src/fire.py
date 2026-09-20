@@ -1,255 +1,273 @@
-"""Multicolored animated terminal fire.
+"""Terminal fire — max-propagation (tropical) heat simulation.
 
-Four separated concerns:
-  * simulation — pure tick(): 2D heat field (injection, upward diffusion,
-    cooling, turbulence), base-zone flags, rising smoke particles;
-  * palette    — pure palette(heat, is_base) -> (r, g, b) | None with a
-    multi-stop hot->cool gradient, a blue combustion-base gradient and a
-    seeded per-cell jitter to break color banding;
-  * renderer   — pure render_frame(): grid + particles -> one ANSI frame
-    using half-block (U+2580) cells;
-  * loop       — IO only, runs ONLY under `if __name__ == "__main__"`.
+Four layers:
+  1. simulation  -- FireSimulation: pure state update, seeded PRNG
+  2. palette     -- heat + zone -> RGB: pure
+  3. renderer    -- grid -> ANSI truecolor frame string: pure
+  4. loop        -- IO only (terminal, ~30 FPS, SIGINT); __main__ guard
 
-Run:  python3 src/fire.py      Stop: Ctrl-C (cursor restored, ANSI reset, exit 0)
+Model: a h x w grid, y = 0 is the TOP. Fuel is injected in the bottom
+rows (y >= h - BASE_ROWS). Each tick every cell takes the MAX of the
+three cells one row below it (the row closer to the fuel) minus a small
+seeded random decay. This makes a sharp, multi-tongued front rise with
+a slow height gradient, so the whole flame column stays hot and the
+full palette (white-hot -> yellow -> orange -> red) is exercised.
 """
-import os
+
 import random
 import shutil
 import signal
 import sys
 import time
 
-BLOCK = "\u2580"  # half-block: doubles vertical resolution
-ZERO = None
+# --- tuning constants ------------------------------------------------------
 
-_PALETTE_STOPS = (  # (heat, r, g, b) — hottest first
-    (1.00, 255, 255, 240),  # white-hot core
-    (0.65, 255, 220, 80),   # yellow
-    (0.45, 255, 140, 0),    # orange
-    (0.25, 220, 60, 20),    # red-orange
-    (0.15, 160, 30, 10),    # red tips
-    (0.05, 90, 15, 8),      # dark red
-    (0.00, 0, 0, 0),        # -> None (empty cell)
-)
-_BASE_STOPS = ((1.0, 120, 180, 255), (0.0, 80, 120, 255))  # blue combustion base
-_SMOKE_RGB = (60, 60, 65)                                  # faint gray smoke
+DEFAULT_WIDTH = 64        # ~60-80: wide flame
+DEFAULT_HEIGHT = 32       # ~30-40: tall flame
+BASE_ROWS = 3             # fuel (combustion) rows at the bottom
+MAX_DECAY = 0.12          # per-row max-propagation decay, uniform in [0, MAX_DECAY]
+FUEL_MIN = 0.85           # base fuel floor (white-hot base)
+FUEL_MAX = 1.0
+FPS = 30
+JITTER = 6                # seeded per-cell RGB jitter to break banding
+SMOKE_COLOR = (60, 60, 65)
+SMOKE_MAX = 120
 
-BASE_ROWS = 2   # combustion zone height (bottom rows)
-BASE_MIN_HEAT = 0.25
+# Fire heat stops, hot -> cool
+_FIRE_STOPS = [
+    (1.00, (255, 255, 240)),  # white-hot
+    (0.75, (255, 220, 80)),   # yellow
+    (0.50, (255, 140, 0)),    # orange
+    (0.30, (220, 60, 20)),    # red-orange
+    (0.15, (160, 30, 10)),    # red
+    (0.05, (90, 15, 8)),      # dark red
+]
 
-
-def _interp(stops, t):
-    """Linear interpolation over (t, r, g, b) stops, ordered hot->cool."""
-    t = min(1.0, max(0.0, t))
-    for (t1, r1, g1, b1), (t2, r2, g2, b2) in zip(stops, stops[1:]):
-        if t1 >= t >= t2:
-            if t1 == t2:
-                f = 0.0
-            else:
-                f = (t1 - t) / (t1 - t2)
-            return (
-                int(round(r1 + (r2 - r1) * f)),
-                int(round(g1 + (g2 - g1) * f)),
-                int(round(b1 + (b2 - b1) * f)),
-            )
-    return stops[-1][1:]
+# Blue-dominant combustion zone: cool -> hot (always b > r)
+_BASE_COOL = (80, 120, 255)
+_BASE_HOT = (120, 180, 255)
 
 
-def _jitter(x, y, seed):
-    """Deterministic per-cell color jitter in [-2, 2], independent of frames."""
-    h = (x * 374761393 + y * 668265263 + seed * 974634561) & 0xFFFFFFFF
-    h = ((h ^ (h >> 13)) * 1274126177) & 0xFFFFFFFF
-    return ((h & 7) - 3)
+def _clamp(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
 
 
-def palette(heat, is_base):
-    """(heat in [0,1], is_base) -> (r, g, b) with jitter, or None when cold."""
-    heat = min(1.0, max(0.0, float(heat)))
-    if heat <= 0.0:
-        return None
-    if is_base:
-        rgb = _interp(_BASE_STOPS, heat)
-    else:
-        rgb = _interp(_PALETTE_STOPS, heat)
-    return tuple(max(0, min(255, ch)) for ch in rgb)
+def _lerp(a, b, t):
+    return a + (b - a) * t
 
 
-def _step_state(grid, base, particles, rng, base_x0, base_x1):
-    """One deterministic simulation tick. Returns (grid, base, particles,
-    base_x0, base_x1) — the new state; inputs are untouched."""
-    h = len(grid)
-    w = len(grid[0])
-    old = grid
-
-    # global flicker: frame-level intensity noise
-    flicker = min(1.15, max(0.82, 1.0 + rng.uniform(-0.18, 0.18)))
-
-    # fuel sways horizontally: random walk of the injection band
-    step = rng.choice((-1, 1))
-    base_x0 = min(max(1, base_x0 + step), w // 2 - 3)
-    base_x1 = min(w - 2, base_x1 + rng.choice((-1, 1)))
-    base_w = base_x1 - base_x0 + 1
-
-    # turbulence: per-column horizontal shift (value-noise style)
-    turb = [rng.choice((-1, 0, 0, 0, 1)) for _ in range(w)]
-    # occasional "lick": a patch of columns gets boosted sideways
-    if rng.random() < 0.30:
-        cx = rng.randrange(w)
-        boost = rng.choice((-1, 1)) * rng.choice((1, 2))
-        for i in range(w):
-            d = abs(i - cx)
-            if d < 5:
-                turb[i] = max(-2, min(2, turb[i] + (boost * (5 - d) // 5)))
-
-    # inject fuel at the base, per-column strength varies (multiple tongues)
-    inj = [rng.uniform(0.65, 1.0) * flicker for _ in range(w)]
-
-    # NOTE: y = 0 is the TOP of the grid; heat rises toward smaller y,
-    # fuel is injected in the bottom rows (y >= h - BASE_ROWS).
-    new = [[0.0] * w for _ in range(h)]
-    for y in range(h):
-        for x in range(w):
-            v = old[y][x]
-            # turbulence: pull a fraction of this cell's heat from sideways
-            t = turb[x]
-            if t and 0 <= x + t < w and old[y][x + t] > v:
-                v = v + (old[y][x + t] - v) * 0.25
-            # diffusion upward (heat rises from the row below) with lateral spread
-            down = old[y + 1][x] if y + 1 < h else 0.0
-            l = old[y][x - 1] if x > 0 else 0.0
-            r = old[y][x + 1] if x + 1 < w else 0.0
-            v = v * 0.68 + 0.17 * down + 0.075 * (l + r)
-            # fresh fuel meets air at the combustion base
-            if h - BASE_ROWS <= y < h and base_x0 <= x < base_x1:
-                v = max(v, min(1.0, inj[x - base_x0]))
-            # cooling
-            v *= 0.90
-            new[y][x] = min(1.0, max(0.0, v))
-
-    # combustion zone: the bottom rows where fuel actually burns
-    new_base = [[False] * w for _ in range(h)]
-    for y in range(h - BASE_ROWS, h):
-        for x in range(w):
-            if new[y][x] >= BASE_MIN_HEAT:
-                new_base[y][x] = True
-
-    # smoke: sparse deterministic particles, rise + fade above the flame top
-    parts = []
-    for p in particles:
-        ny = p["y"] - 1
-        no = p["o"] - 0.016
-        if ny >= 0 and no > 0.04:
-            parts.append({
-                "x": min(w - 1, max(0, p["x"] + rng.choice((-1, 0, 0, 1)))),
-                "y": ny,
-                "o": no,
-            })
-    heat_ys = [y for y in range(h) if any(v > 0.0 for v in new[y])]
-    if heat_ys:
-        top = min(heat_ys)
-        spawn = len(particles) == 0 or rng.random() < 0.55
-        if spawn and top > 2:
-            parts.append({
-                "x": min(w - 1, max(0, rng.randrange(base_x0, base_x1 + 1))),
-                "y": min(h - 1, top - 1),
-                "o": 1.0,
-            })
-
-    return new, new_base, parts, flicker, base_x0, base_x1
+# --- layer 1: simulation (pure) ---------------------------------------------
 
 
-def render_frame(grid, base, particles, flicker, seed=0):
-    """grid (h x w heat) + base flags + smoke particles -> one ANSI frame.
+class FireSimulation:
+    """Max-propagation fire on a height x width grid (y = 0 is the top)."""
 
-    Frame dimensions match the grid: w characters per line, h lines.
-    Zero heat -> plain space, no escape sequence. A small deterministic
-    seeded per-cell jitter breaks color banding.
-    """
-    h = len(grid)
-    w = len(grid[0])
-    rows = []
-    for y in range(h):
-        cells = []
-        for x in range(w):
-            v = grid[y][x]
-            col = palette(v * flicker, base[y][x]) if v > 0 else None
-            if col is not None:
-                j = _jitter(x, y, seed)
-                col = tuple(max(0, min(255, ch + j // 3)) for ch in col)
-                cells.append("\x1b[38;2;%d;%d;%d m%s" % (col[0], col[1], col[2], BLOCK))
-            else:
-                cells.append(" ")
-        rows.append(cells)
-    for p in particles:
-        if 0 <= p["y"] < h and 0 <= p["x"] < w:
-            rows[p["y"]][p["x"]] = "\x1b[38;2;%d;%d;%d m%s" % (_SMOKE_RGB + (BLOCK,))
-    return "\n".join("".join(cells) for cells in rows)
-
-
-class Fire:
-    """Seeded deterministic fire: .step() advances, .frame() renders."""
-
-    def __init__(self, width=40, height=30, seed=7):
-        self.w = width
-        self.h = height
+    def __init__(self, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
+                 base_rows=BASE_ROWS, seed=1):
+        self.width = width
+        self.height = height
+        self.base_rows = base_rows
         self.seed = seed
         self.rng = random.Random(seed)
-        self.grid = [[0.0] * width for _ in range(height)]
-        self.base = [[False] * width for _ in range(height)]
-        self.particles = []
-        self.flicker = 1.0
-        self.base_x0 = width // 4
-        self.base_x1 = width // 2 + width // 8
-        self.step_count = 0
+        self.heat = [[0.0] * width for _ in range(height)]
+        self.smoke = []  # list of [x, y, life]
+        self._fuel = [self.rng.uniform(FUEL_MIN, FUEL_MAX) for _ in range(width)]
+        self._sway = 0
 
-    def step(self):
-        self.grid, self.base, self.particles, self.flicker, \
-            self.base_x0, self.base_x1 = _step_state(
-                self.grid, self.base, self.particles,
-                self.rng, self.base_x0, self.base_x1)
-        self.step_count += 1
+    @property
+    def base_top(self):
+        """Topmost row index of the fuel band."""
+        return self.height - self.base_rows
 
-    def frame(self):
-        return render_frame(self.grid, self.base, self.particles, self.flicker)
+    def column_top(self, x, threshold=0.3):
+        """Topmost lit row of the flame in column x, or None."""
+        for y in range(self.height):
+            if self.heat[y][x] >= threshold:
+                return y
+        return None
+
+    def tick(self):
+        """Advance the simulation by one frame."""
+        w, h = self.width, self.height
+        old = self.heat
+        new = [[0.0] * w for _ in range(h)]
+
+        # Max propagation: each cell takes the max of the three cells one
+        # row below it (out-of-range neighbors count as 0), minus seeded
+        # random decay. Heat decays only slowly going up, so the flame
+        # column stays hot all the way to the tip.
+        for y in range(h - 1):
+            below = old[y + 1]
+            row = new[y]
+            for x in range(w):
+                m = below[x]
+                if x > 0 and below[x - 1] > m:
+                    m = below[x - 1]
+                if x + 1 < w and below[x + 1] > m:
+                    m = below[x + 1]
+                v = m - self.rng.uniform(0.0, MAX_DECAY)
+                row[x] = v if v > 0.0 else 0.0
+
+        # Base injection: drive the fuel band hot with per-column variation;
+        # the band center sways slowly (random walk) for a living flame.
+        self._sway += self.rng.choice((-1, 0, 1))
+        limit = max(1, w // 8)
+        if self._sway > limit:
+            self._sway = limit
+        elif self._sway < -limit:
+            self._sway = -limit
+        center = w // 2 + self._sway
+        span = max(1, (w - 1) / 2)
+        for y in range(self.base_top, h):
+            row = new[y]
+            for x in range(w):
+                d = abs(x - center) / span
+                fuel = _clamp(self._fuel[x] * (1.0 - 0.12 * d * d), 0.0, 1.0)
+                if fuel > row[x]:
+                    row[x] = fuel
+
+        # Smoke: spawn a particle above a random flame tongue, then drift
+        # the existing particles up with a slight horizontal wander.
+        tops = []
+        for x in range(w):
+            t = self.column_top(x)
+            if t is not None and t >= 1:
+                tops.append((x, t))
+        if tops and self.rng.random() < 0.7:
+            x, t = self.rng.choice(tops)
+            self.smoke.append([x, t - 1, 8 + self.rng.randrange(12)])
+        alive = []
+        for p in self.smoke:
+            p[1] -= 1  # rise
+            p[0] += self.rng.choice((-1, 0, 0, 1))
+            p[2] -= 1  # fade
+            if 0 <= p[1] < h and 0 <= p[0] < w and p[2] > 0:
+                alive.append(p)
+        self.smoke = alive[:SMOKE_MAX]
+
+        self.heat = new
 
 
-def _run():
+# --- layer 2: palette (pure) -------------------------------------------------
+
+
+def palette(heat, is_base=False, seed=0):
+    """Map heat in [0, 1] (+ combustion-zone flag) to (r, g, b) or None.
+
+    Fire gradient, hot -> cool: white-hot -> yellow -> orange -> red-orange
+    -> red -> dark red.  Combustion-zone cells render a blue-dominant
+    gradient by heat (always b > r).  A small SEEDED per-cell jitter
+    (deterministic in `seed`) breaks banding.  All channels clamp to
+    0..255.  Zero heat -> None (renders as a plain space).
+    """
+    if heat <= 0.0:
+        return None
+    heat = _clamp(heat, 0.0, 1.0)
+
+    if is_base:
+        r = _lerp(_BASE_COOL[0], _BASE_HOT[0], heat)
+        g = _lerp(_BASE_COOL[1], _BASE_HOT[1], heat)
+        b = float(_BASE_HOT[2])
+    else:
+        stops = _FIRE_STOPS
+        if heat >= stops[0][0]:
+            r, g, b = stops[0][1]
+        elif heat <= stops[-1][0]:
+            r, g, b = stops[-1][1]
+        else:
+            for (h1, c1), (h2, c2) in zip(stops, stops[1:]):
+                if h2 <= heat <= h1:
+                    t = (heat - h2) / (h1 - h2)
+                    r = _lerp(c2[0], c1[0], t)
+                    g = _lerp(c2[1], c1[1], t)
+                    b = _lerp(c2[2], c1[2], t)
+                    break
+
+    jr = random.Random(seed).uniform(-JITTER, JITTER)
+    jg = random.Random(seed + 1).uniform(-JITTER, JITTER)
+    jb = random.Random(seed + 2).uniform(-JITTER, JITTER)
+    return (int(_clamp(r + jr, 0.0, 255.0)),
+            int(_clamp(g + jg, 0.0, 255.0)),
+            int(_clamp(b + jb, 0.0, 255.0)))
+
+
+# --- layer 3: renderer (pure) --------------------------------------------------
+
+
+def render(heat, smoke, width, height, base_rows, seed=1):
+    """Render the frame as `height` lines of `width` display cells each.
+
+    Lit cells are solid full-block characters (the whole cell is filled),
+    smoke cells are faint gray, zero-heat cells are plain spaces (no
+    escape).  Color is emitted as 24-bit truecolor ANSI
+    (\\x1b[38;2;R;G;B m), only when it changes.
+    """
+    smoke_set = {(p[0], p[1]) for p in smoke}
+    lines = []
+    for y in range(height):
+        is_base = y >= height - base_rows
+        prev = None
+        out = []
+        for x in range(width):
+            hval = heat[y][x]
+            if hval > 0.0:
+                color = palette(hval, is_base, seed + y * width + x)
+                char = "\u2588"  # full block: solid flame
+            elif (x, y) in smoke_set:
+                color = SMOKE_COLOR
+                char = "\u2591"  # light shade: smoke
+            else:
+                color = None
+                char = " "
+            if color is not None and color != prev:
+                out.append("\x1b[38;2;%d;%d;%d m" % color)
+                prev = color
+            out.append(char)
+        lines.append("".join(out))
+    return "\n".join(lines)
+
+
+# --- layer 4: loop (IO only) -----------------------------------------------------
+
+
+def main():
+    """Animate the fire on a TTY at ~30 FPS; headless/pipe: no animation."""
     if not sys.stdout.isatty():
-        # headless (pipe / CI smoke): load is enough, no animation
         return
-    size = shutil.get_terminal_size((80, 24))
-    fd = sys.stdout.fileno()
 
-    def emit(s):
-        # os.write: no Python-level buffering, safe from a signal handler
-        os.write(fd, s.encode("utf-8"))
+    term_w, term_h = shutil.get_terminal_size((80, 24))
+    width = _clamp(term_w - 8, 24, 72)
+    height = _clamp(term_h - 4, 16, 36)
+    sim = FireSimulation(int(width), int(height),
+                         seed=int(time.monotonic() * 1000) % (2 ** 31))
 
-    def _sigint(signum, frame):
-        emit("\x1b[?25h\x1b[0m\n")  # restore cursor, reset ANSI state
+    def _restore(*_):
+        # SIGINT: restore cursor, reset ANSI, exit 0.
+        sys.stdout.write("\x1b[?25h\x1b[0m\n")
+        sys.stdout.flush()
         sys.exit(0)
 
-    signal.signal(signal.SIGINT, _sigint)
+    signal.signal(signal.SIGINT, _restore)
 
-    f = Fire(width=40, height=24, seed=int(time.time() * 1000) & 0x7FFFFFFF)
-    x_off = max(0, (size.columns - f.w) // 2)
-    y_off = max(0, (size.lines - f.h) // 2)
-
-    emit("\x1b[?25l")  # hide cursor
-    for line in f.frame().split("\n"):
-        emit(" " * x_off + line + "\n")
-
-    fps = 30
-    dt = 1.0 / fps
-    while True:
-        time.sleep(dt)
-        f.step()
-        buf = ["\x1b[H"]  # clear screen / home cursor
-        for y, line in enumerate(f.frame().split("\n")):
-            row = y_off + y
-            if 0 <= row < size.lines:
-                buf.append("\x1b[%d;%dH%s\n" % (row + 1, x_off + 1, line))
-        emit("".join(buf))
+    frame_dt = 1.0 / FPS
+    sys.stdout.write("\x1b[?25l")  # hide cursor
+    sys.stdout.flush()
+    try:
+        while True:
+            t0 = time.monotonic()
+            sim.tick()
+            frame = render(sim.heat, sim.smoke, sim.width, sim.height,
+                           sim.base_rows, seed=sim.seed)
+            left = " " * (max(0, term_w - sim.width) // 2)
+            top = "\n" * max(0, (term_h - sim.height) // 2)
+            sys.stdout.write("\x1b[2J\x1b[H" + top
+                             + "\n".join(left + line for line in frame.split("\n")))
+            sys.stdout.flush()
+            time.sleep(max(0.0, frame_dt - (time.monotonic() - t0)))
+    finally:
+        sys.stdout.write("\x1b[?25h\x1b[0m")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":
-    _run()
+    main()

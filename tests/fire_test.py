@@ -1,119 +1,165 @@
-"""Reference tests for src/fire.py — multicolored terminal fire.
+"""Reference tests for the terminal fire (max-propagation simulation).
 
-Run via: bash scripts/run.sh test tests/fire_test.py
+Stdlib unittest. Covers the ticket contract:
+  - determinism (same seed -> identical rendered frame)
+  - heat field (values in [0, 1]; changes between ticks)
+  - palette (0-255 channels; hot brighter than cool; zero heat -> None)
+  - multicolor frame (>= 4 color families: blue, yellow, orange, red)
+  - blue-dominant combustion base zone (b > r)
+  - renderer (ANSI escapes present; frame dimensions match the grid)
+  - smoke (fixed seed: particles above the flame top in some frame)
+  - headless load (module import / main() without animation)
 """
+
 import os
 import re
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import fire  # noqa: E402
 
-ANSI_RE = re.compile(r"\x1b\[38;2;(\d{1,3});(\d{1,3});(\d{1,3}) m")
-
-W, H, SEED = 40, 30, 7
-
-
-def decoded_colors(frame):
-    """All distinct (r, g, b) emitted by a rendered frame."""
-    return {tuple(map(int, m)) for m in ANSI_RE.findall(frame)}
+_TRUECOLOR_RE = re.compile(r"\x1b\[38;2;(\d+);(\d+);(\d+) m")
+_ANY_ESCAPE_RE = re.compile(r"\x1b\[[0-9; ]*[A-Za-z]")
 
 
-def color_family_count(rgbs):
-    """How many of the four required color families are present."""
-    n = 0
-    if any(b > r for r, g, b in rgbs):
-        n += 1  # blue combustion base
-    if any(r >= 200 and g >= 160 and b < 140 for r, g, b in rgbs):
-        n += 1  # yellow
-    if any(r >= 200 and g < 160 for r, g, b in rgbs):
-        n += 1  # orange
-    if any(140 <= r < 200 and g < 80 for r, g, b in rgbs):
-        n += 1  # red / red-orange
-    return n
+def _rgb_colors(frame):
+    """Decode every emitted 24-bit truecolor RGB triple from a frame."""
+    return [(int(r), int(g), int(b)) for r, g, b in _TRUECOLOR_RE.findall(frame)]
 
 
-class FireTest(unittest.TestCase):
-    def test_determinism_same_seed_identical_frames(self):
-        f1, f2 = fire.Fire(W, H, SEED), fire.Fire(W, H, SEED)
-        for _ in range(20):
-            f1.step()
-            f2.step()
-        self.assertEqual(f1.frame(), f2.frame())
+def _families(frame):
+    """Classify decoded colors into color families."""
+    fams = set()
+    for r, g, b in _rgb_colors(frame):
+        if b > r + 40:
+            fams.add("blue")
+        elif r >= 230 and g >= 180 and b <= 110:
+            fams.add("yellow")
+        elif r >= 230 and 60 <= g <= 185 and b <= 40:
+            fams.add("orange")
+        elif 100 <= r <= 245 and 5 <= g <= 100 and b <= 50:
+            fams.add("red")
+    return fams
 
-    def test_heat_field_bounds_and_changes(self):
-        f = fire.Fire(W, H, SEED)
-        f.step()
-        flat = [v for row in f.grid for v in row]
-        self.assertTrue(all(0.0 <= v <= 1.0 for v in flat))
-        s1 = list(map(list, f.grid))
-        f.step()
-        s2 = list(map(list, f.grid))
-        self.assertNotEqual(s1, s2)
-        # also non-trivially hot somewhere
-        self.assertTrue(max(flat) > 0.5)
 
-    def test_palette_component_range_and_ordering(self):
-        hot = fire.palette(0.95, False)
-        cool = fire.palette(0.3, False)
-        for c in (hot, cool):
-            self.assertIsNotNone(c)
-            for ch in c:
-                self.assertTrue(0 <= ch <= 255)
-        self.assertGreater(sum(hot), sum(cool))  # hot core brighter than cool edge
-        self.assertIsNone(fire.palette(0.0, False))
+def _hot_frame(seed=1, ticks=40):
+    """Run a default-size simulation to a bright steady state and render it."""
+    sim = fire.FireSimulation(seed=seed)
+    for _ in range(ticks):
+        sim.tick()
+    frame = fire.render(sim.heat, sim.smoke, sim.width, sim.height,
+                        sim.base_rows, seed=sim.seed)
+    return sim, frame
+
+
+class TestDeterminism(unittest.TestCase):
+    def test_same_seed_same_frame(self):
+        a = fire.FireSimulation(seed=42)
+        b = fire.FireSimulation(seed=42)
+        for _ in range(12):
+            a.tick()
+            b.tick()
+        self.assertEqual(a.heat, b.heat)
+        fa = fire.render(a.heat, a.smoke, a.width, a.height, a.base_rows, seed=a.seed)
+        fb = fire.render(b.heat, b.smoke, b.width, b.height, b.base_rows, seed=b.seed)
+        self.assertEqual(fa, fb)
+
+
+class TestHeatField(unittest.TestCase):
+    def test_values_in_unit_range_and_field_changes(self):
+        sim = fire.FireSimulation(width=48, height=28, seed=7)
+        for _ in range(15):
+            sim.tick()
+            for row in sim.heat:
+                for v in row:
+                    self.assertGreaterEqual(v, 0.0)
+                    self.assertLessEqual(v, 1.0)
+        prev = [row[:] for row in sim.heat]
+        sim.tick()
+        self.assertNotEqual(sim.heat, prev, "field must change between ticks")
+
+
+class TestPalette(unittest.TestCase):
+    def test_components_in_range(self):
+        for heat in (1.0, 0.95, 0.9, 0.75, 0.6, 0.5, 0.4, 0.3, 0.2, 0.15, 0.1, 0.06, 0.05):
+            for seed in (0, 1, 999):
+                color = fire.palette(heat, False, seed)
+                self.assertIsNotNone(color)
+                self.assertEqual(len(color), 3)
+                for ch in color:
+                    self.assertGreaterEqual(ch, 0)
+                    self.assertLessEqual(ch, 255)
+
+    def test_hot_core_brighter_than_cool_edge(self):
+        core = fire.palette(0.95)
+        edge = fire.palette(0.2)
+        self.assertGreater(sum(core), sum(edge))
+
+    def test_zero_heat_is_none(self):
+        self.assertIsNone(fire.palette(0.0))
         self.assertIsNone(fire.palette(0.0, True))
 
-    def test_rendered_frame_multicolor(self):
-        f = fire.Fire(W, H, SEED)
-        rgbs = set()
-        for _ in range(30):
-            f.step()
-            rgbs |= decoded_colors(f.frame())
-        self.assertGreaterEqual(color_family_count(rgbs), 4)
 
-    def test_blue_base_zone_blue_dominant(self):
-        f = fire.Fire(W, H, SEED)
-        for _ in range(15):
-            f.step()
-            for y in range(H):
-                for x in range(W):
-                    if f.base[y][x] and f.grid[y][x] > 0.0:
-                        r, g, b = fire.palette(f.grid[y][x] * f.flicker, True)
-                        self.assertIsNotNone(r)
-                        self.assertGreater(b, r)
-            if any(any(f.base[y]) for y in range(H)):
-                break
-        self.assertTrue(any(any(row) for row in f.base))
+class TestMulticolor(unittest.TestCase):
+    def test_frame_has_at_least_four_color_families(self):
+        _, frame = _hot_frame()
+        fams = _families(frame)
+        for needed in ("blue", "yellow", "orange", "red"):
+            self.assertIn(needed, fams,
+                          "missing family %r; saw %s" % (needed, sorted(fams)))
+        self.assertGreaterEqual(len(fams), 4)
 
-    def test_renderer_ansi_and_dimensions(self):
-        f = fire.Fire(W, H, SEED)
-        f.step()
-        frame = f.frame()
-        self.assertIn("\x1b[38;2;", frame)
-        # display dimensions (ANSI codes are cell attributes, not columns)
-        plain = re.sub(r"\x1b\[[0-9;]+ ?m", "", frame)
+
+class TestBlueBase(unittest.TestCase):
+    def test_base_zone_cells_are_blue_dominant(self):
+        sim, frame = _hot_frame()
+        lines = frame.split("\n")
+        base_top = sim.height - sim.base_rows
+        found = 0
+        for y in range(base_top, sim.height):
+            for r, g, b in _rgb_colors(lines[y]):
+                self.assertGreater(b, r, "base zone must be blue-dominant")
+                found += 1
+        self.assertGreater(found, 0, "expected lit base-zone cells")
+
+
+class TestRenderer(unittest.TestCase):
+    def test_ansi_escapes_and_dimensions_match_grid(self):
+        sim = fire.FireSimulation(width=40, height=22, seed=3)
+        for _ in range(20):
+            sim.tick()
+        frame = fire.render(sim.heat, sim.smoke, sim.width, sim.height,
+                            sim.base_rows, seed=sim.seed)
+        self.assertIn("\x1b[", frame, "frame must contain ANSI escapes")
+        plain = _ANY_ESCAPE_RE.sub("", frame)
         lines = plain.split("\n")
-        self.assertEqual(len(lines), H)
-        self.assertTrue(all(len(line) == W for line in lines))
+        self.assertEqual(len(lines), sim.height)
+        for line in lines:
+            self.assertEqual(len(line), sim.width)
 
-    def test_smoke_particles_above_flame_top(self):
-        f = fire.Fire(W, H, SEED)
+
+class TestSmoke(unittest.TestCase):
+    def test_smoke_above_flame_top_in_some_frame(self):
+        sim = fire.FireSimulation(seed=11)
         seen = False
-        for _ in range(30):
-            f.step()
-            heat_top = min(
-                (y for y in range(H) if any(v > 0.0 for v in f.grid[y])),
-                default=None,
-            )
-            if heat_top is not None and any(
-                p["y"] < heat_top for p in f.particles
-            ):
-                seen = True
+        for _ in range(40):
+            sim.tick()
+            for x, y, _life in sim.smoke:
+                top = sim.column_top(x)
+                if top is not None and y < top:
+                    seen = True
+                    break
+            if seen:
                 break
-        self.assertTrue(seen)
+        self.assertTrue(seen, "smoke must appear above the flame top in some frame")
+
+
+class TestHeadless(unittest.TestCase):
+    def test_main_is_noop_without_tty(self):
+        self.assertFalse(sys.stdout.isatty())
+        self.assertIsNone(fire.main())
 
 
 if __name__ == "__main__":

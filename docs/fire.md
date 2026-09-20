@@ -1,45 +1,72 @@
-# Terminal fire (`src/fire.py`)
+# Fire — terminal flame (max-propagation simulation)
 
-Multicolored animated flame for the terminal, Python 3 stdlib only.
+A bright, tall, genuinely multicolored terminal fire rendered with 24-bit
+truecolor ANSI. Pure Python stdlib, no dependencies.
 
-## Run / stop
+## Run
 
 ```
-python3 src/fire.py        # animate at ~30 FPS, flame centered in the terminal
-# Ctrl-C stops cleanly: cursor restored (\x1b[?25h), ANSI state reset (\x1b[0m), exit 0
+python3 src/fire.py
 ```
 
-When stdout is not a TTY (pipe, CI) the module loads without animating —
-this is how `scripts/run.sh smoke src/fire.py` works.
+- Requires a TTY; when stdout is a pipe or redirected (headless), the module
+  loads and does nothing (no animation, no output).
+- Stop with **Ctrl-C** (SIGINT): the cursor is restored (`\x1b[?25h`), ANSI
+  is reset (`\x1b[0m`), and the process exits with status 0.
+- Renders at **~30 FPS**, clearing and homing the screen per frame, with the
+  flame centered in `shutil.get_terminal_size()` (fallback 80x24).
+
+## Tests
+
+- `bash scripts/run.sh test tests/fire_test.py` — full suite (stdlib unittest)
+- `bash scripts/run.sh smoke src/fire.py` — sanity-load without animating
 
 ## How it works
 
-1. **Simulation** (`_step_state`, seeded `random.Random`) — a 2D heat field
-   in `[0, 1]` where y=0 is the top. Each tick: fuel is injected across a
-   swaying band in the two bottom rows (per-column strength → multiple
-   tongues), heat diffuses upward (`0.17` from the row below) with lateral
-   spread, cools (`×0.9`), and is perturbed by per-column turbulence with
-   occasional "lick" bursts. A global flicker factor (0.82–1.15) is applied
-   per frame. The bottom rows with heat ≥ 0.25 are flagged as the
-   **base zone** (combustion). Sparse deterministic **smoke particles**
-   spawn just above the flame top, rise one row per tick and fade out.
-2. **Palette** (`palette(heat, is_base)`) — pure multi-stop gradient,
-   hot → cool: white-hot (255,255,240) → yellow (255,220,80) → orange
-   (255,140,0) → red-orange (220,60,20) → red (160,30,10) → dark red
-   (90,15,8) → `None` (zero heat = empty cell). Base-zone cells use a
-   **blue** gradient (120,180,255 → 80,120,255).
-3. **Renderer** (`render_frame`) — one ANSI frame per grid: 24-bit truecolor
-   `\x1b[38;2;R;G;B m` + half-block `▀` (doubles vertical resolution), plain
-   space for zero heat, faint gray (60,60,65) for smoke, and a small seeded
-   per-cell jitter to break color banding. Frame dimensions match the grid.
-4. **Loop** — only under `if __name__ == "__main__"`: hides the cursor,
-   animates at 30 FPS, clears per frame, flame centered via
-   `shutil.get_terminal_size()` (fallback 80×24), all output via `os.write`
-   so the SIGINT handler can restore cursor/ANSI state safely.
+Four layers (layers 1–3 pure, layer 4 IO only under `__main__`):
 
-## Color model (like a real flame)
+1. **Simulation** (`FireSimulation`) — a `height x width` grid (~64 x 32),
+   `y = 0` is the TOP. Each tick every cell takes the **max of the three
+   cells one row below it** (the row closer to the fuel; out-of-range
+   neighbors count as 0) minus a small SEEDED random decay
+   (`rng.uniform(0, 0.12)`). This max-propagation ("tropical") model raises a
+   sharp, multi-tongued front instead of a flat cone, and heat decays only
+   slowly going up, so the whole flame column stays hot from base to tip.
+   The bottom `BASE_ROWS = 3` rows are the fuel band: driven hot with
+   per-column variation (`uniform(0.85, 1.0)`) around a slowly
+   random-walking (swaying) center, so the base is white-hot and the tongues
+   are uneven. All heat is clamped to `[0, 1]`; the PRNG is
+   `random.Random(seed)`, so a given seed produces deterministic frames.
+   Smoke particles spawn above random flame tongues and drift upward with a
+   slight horizontal wander while fading.
+2. **Palette** (`palette(heat, is_base, seed)`) — hot to cool:
+   white-hot (255,255,240) -> yellow (255,220,80) -> orange (255,140,0) ->
+   red-orange (220,60,20) -> red (160,30,10) -> dark red (90,15,8);
+   zero heat -> `None` (plain space). Combustion-zone (base) cells render a
+   **blue-dominant** gradient by heat (120,180,255 -> 80,120,255, always
+   `b > r`). A small SEEDED per-cell jitter (±6) breaks banding; all
+   channels clamp to 0–255.
+3. **Renderer** (`render(...)`) — a frame of exactly `height` lines x
+   `width` cells. Every lit cell is a SOLID full-block character (`█`), so the
+   flame reads as one solid bright mass (no dotted/striped look); smoke cells
+   are faint gray (`░`, ~60,60,65); zero-heat cells are plain spaces with no
+   escape. Color is emitted as 24-bit truecolor ANSI
+   (`\x1b[38;2;R;G;B m`) whenever it changes.
+4. **Loop** (`main()`) — IO only: TTY guard, cursor hide, 30 FPS pacing,
+   clear/home per frame, terminal centering, SIGINT restore + exit 0.
 
-- **Blue base** — the combustion zone where fresh fuel meets air;
-- **White-hot core** — hottest cells just above the base;
-- **Yellow → orange → red body** — cooling upward, red tips;
-- **Faint gray smoke** — particles drifting above the flame.
+## Color model (bottom to top)
+
+| Zone | Heat | Color |
+|------|------|-------|
+| Combustion base (bottom 3 rows) | 0.7–1.0 | blue-dominant (b > r) |
+| Core, just above the base | ~0.9–1.0 | white-hot (255,255,240) |
+| Upper body | ~0.5–0.9 | yellow (255,220,80) |
+| Mid body | ~0.3–0.5 | orange (255,140,0) |
+| Tips | ~0.15–0.3 | red (160,30,10) |
+| Flickering tips | ~0.05–0.15 | dark red (90,15,8) |
+| Above the flame | — | faint gray smoke (60,60,65) |
+
+The slow upward decay keeps every column of the flame hot enough that the
+full gradient — blue base, white-hot core, yellow/orange/red body, dark-red
+tips — is visible in a single frame.
