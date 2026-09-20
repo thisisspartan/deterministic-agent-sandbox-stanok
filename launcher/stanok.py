@@ -212,7 +212,7 @@ def preflight_server() -> bool:
 def _stack_preflights() -> list[str]:
     """The 6th (preflight) field of each STACKS registry line in
     scripts/run.sh — the cheap per-stack runner-availability probe
-    (e.g. `python3 -s -m pytest --version`)."""
+    (e.g. `uv run --no-project pytest --version`)."""
     try:
         with open(os.path.join(REPO_ROOT, "scripts", "run.sh"), encoding="utf-8") as f:
             src = f.read()

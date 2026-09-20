@@ -57,8 +57,8 @@ launcher/sandbox.py           — the Docker boundary (R2, former sandbox-run.sh
                                 resource limits
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 Dockerfile                    — the machine image (debian + toolchain +
-                                claude-agent-sdk + Node.js + Claude Code
-                                CLI 2.1.88 + bubblewrap + socat)
+                                uv + claude-agent-sdk + pytest + Node.js +
+                                Claude Code CLI 2.1.88 + bubblewrap + socat)
 hooks/                        — doctor (thin pytest wrapper, R5),
                                 commit-msg (the TDD verifier is
                                 in-process in launcher/stanok.py, R1)

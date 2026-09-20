@@ -7,16 +7,19 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
-PY="${PYTHON_BIN:-python3}"
-
-if [[ ! -x ".venv/bin/python" ]]; then
-    echo "--- creating .venv ---"
-    "$PY" -m venv .venv
+if ! command -v uv >/dev/null 2>&1; then
+    echo "ERROR: uv not found on PATH. Install it with:" >&2
+    echo "  curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    exit 1
 fi
 
-echo "--- installing dependencies ---"
-.venv/bin/pip install --upgrade pip >/dev/null
-.venv/bin/pip install -r requirements.txt
+if [[ ! -x ".venv/bin/python" ]]; then
+    echo "--- creating .venv (uv) ---"
+    uv venv "$DIR/.venv"
+fi
+
+echo "--- installing dependencies (uv) ---"
+uv pip install --no-binary claude-agent-sdk -r "$DIR/requirements.txt"
 
 echo "--- commit-msg hook (the machine's TASK-ID gate) ---"
 # git-path: works in a plain repo (.git dir) AND in a submodule (.git file ->
