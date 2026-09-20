@@ -27,6 +27,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_ROOT"
 
+# Python interpreter for the py stack's `python3` token: an active venv
+# wins, then the repo's .venv, then the system python3. Inside the machine
+# container (STANOK_IN_CONTAINER=1) the repo's .venv is the HOST's venv
+# (read-only mount) — skip it there and use the image's system python.
+if [ -z "${STANOK_IN_CONTAINER:-}" ]; then
+  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+    PATH="$VIRTUAL_ENV/bin:$PATH"
+  elif [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+    PATH="$REPO_ROOT/.venv/bin:$PATH"
+  fi
+  export PATH
+fi
+
 # py runner: `python3 -s` (isolated mode — no user site-packages, no
 # PYTHONPATH) so a pip-installed package in ~/.local cannot shadow the
 # image's pytest; `-p no:cacheprovider` keeps pytest from writing .pytest_cache

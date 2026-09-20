@@ -39,9 +39,10 @@ echo "--- staging the Claude Code CLI into the build context (R4) ---"
 # here first: cli.js + package.json, plus the vendored ripgrep binary for
 # x64-linux (the CLI's native sandbox hard-fails at startup without
 # vendor/ripgrep/x64-linux/rg). No .git/source/other-platforms/maps.
-# No default: a hardcoded host path would silently stage whatever happens
-# to live there on another machine. STANOK_CLI_DIR is mandatory.
-CLI_SRC="${STANOK_CLI_DIR:?ERROR: set STANOK_CLI_DIR to the validated claude-code 2.1.88 checkout}"
+# Default: the standard validated checkout on this host; override with
+# STANOK_CLI_DIR. The SHA-256 check below stays hard: a missing or tampered
+# checkout fails the build (exit 1) — it never silently ships.
+CLI_SRC="${STANOK_CLI_DIR:-/home/hermes/git/claude-code-2.1.88}"
 # Pinned hashes of the validated claude-code 2.1.88 staging sources —
 # a tampered or wrong checkout must fail the build, not silently ship.
 CLI_JS_SHA="a5f461302c9a10185f2ccb6100daf6836577d3e72b5df61732fba985bdc07994"
