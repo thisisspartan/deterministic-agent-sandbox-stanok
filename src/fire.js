@@ -1,20 +1,25 @@
 'use strict';
-/*
- * src/fire.js — a realistic terminal fire, zero dependencies.
- *
- * Four separated concerns:
- *   1. Simulation — pure heat-field step (seeded PRNG, deterministic)
- *   2. Palette    — heat value -> 24-bit truecolor (or null for empty)
- *   3. Renderer   — grid -> one ANSI frame string (half-block ▀, 2x vertical)
- *   4. Loop       — IO only, starts only when run as main on a TTY
- *
- * Run:  node src/fire.js          Stop: Ctrl-C (cursor restored, ANSI reset, exit 0)
- */
+// fire.js — a realistic burning flame rendered in the terminal.
+//
+// Four separated concerns:
+//   1. Simulation — 2D heat-field grid, ticked by pure functions (seeded).
+//   2. Palette    — heat value [0,1] -> 24-bit truecolor ANSI SGR string.
+//   3. Renderer   — field -> one ANSI frame string (half-block ▀, 2 lines per row).
+//   4. Loop       — IO only; runs ONLY when executed as main.
+//
+// Zero dependencies (node built-ins only), CommonJS.
+//
+//   node src/fire.js          — run the animation (Ctrl-C stops it cleanly)
 
-// ---------- seeded PRNG (mulberry32) ----------
-function mulberry32(seed) {
+// ---------------------------------------------------------------------------
+// 1. Deterministic randomness: seeded PRNG + value noise
+// ---------------------------------------------------------------------------
+
+// mulberry32 — small fast seeded PRNG, returns floats in [0, 1).
+function createRng(seed) {
   let a = seed >>> 0;
   return function next() {
+    a |= 0;
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
@@ -22,225 +27,219 @@ function mulberry32(seed) {
   };
 }
 
-// ---------- 1D value noise (smooth, deterministic) ----------
-function makeNoise1D(seed) {
-  const rng = mulberry32((seed ^ 0x9e3779b9) >>> 0);
-  const TABLE = 1024;
-  const table = new Float64Array(TABLE);
-  for (let i = 0; i < TABLE; i++) table[i] = rng();
-  return function noise(t) {
-    const i0 = Math.floor(t);
-    const f = t - i0;
-    const a = table[((i0 % TABLE) + TABLE) % TABLE];
-    const b = table[(((i0 + 1) % TABLE) + TABLE) % TABLE];
-    const u = f * f * (3 - 2 * f); // smoothstep
-    return a + (b - a) * u;
+// 3D value noise: lattice of random values (from a seeded PRNG),
+// smoothstep interpolation. Returns values in [0, 1].
+function makeValueNoise(rng) {
+  const table = new Float32Array(512);
+  for (let i = 0; i < 512; i++) table[i] = rng();
+
+  function lat(ix, iy, iz) {
+    let h = (Math.imul(ix, 374761393) ^
+             Math.imul(iy, 668265263) ^
+             Math.imul(iz, 1440662683)) >>> 0;
+    h = (h ^ (h >>> 13)) >>> 0;
+    return table[h & 511];
+  }
+  const fade = (t) => t * t * (3 - 2 * t);
+  const lerp = (a, b, t) => a + (b - a) * t;
+
+  return function noise3(x, y, z) {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const u = fade(x - xi), v = fade(y - yi), w = fade(z - zi);
+    const x00 = lerp(lat(xi, yi, zi), lat(xi + 1, yi, zi), u);
+    const x10 = lerp(lat(xi, yi + 1, zi), lat(xi + 1, yi + 1, zi), u);
+    const x01 = lerp(lat(xi, yi, zi + 1), lat(xi + 1, yi, zi + 1), u);
+    const x11 = lerp(lat(xi, yi + 1, zi + 1), lat(xi + 1, yi + 1, zi + 1), u);
+    return lerp(lerp(x00, x10, v), lerp(x01, x11, v), w);
   };
 }
 
-// ---------- 1. Simulation ----------
+// ---------------------------------------------------------------------------
+// Simulation: 2D heat field, normalized to [0, 1]
+// ---------------------------------------------------------------------------
 
-// Create a heat-field grid. `rows` is the number of HEAT rows (the renderer
-// draws rows/2 terminal lines with half-blocks). Rows are forced even.
-function createFire(cols, rows, seed) {
-  const width = Math.max(4, cols);
-  const height = Math.max(2, (rows % 2 === 0 ? rows : rows + 1));
-  const s = (seed === undefined || seed === null) ? 1 : seed >>> 0;
+function createField(cols, rows, seed = 1337) {
+  const rng = createRng(seed >>> 0);
   return {
-    cols: width,
-    rows: height,
-    heat: new Float64Array(width * height),
-    smoke: new Float64Array(width * height),
-    time: 0,
-    rng: mulberry32(s),
-    noise: makeNoise1D(s),
+    cols,
+    rows,
+    heat: new Float32Array(cols * rows),
+    smoke: new Float32Array(cols * rows),
+    noise: makeValueNoise(rng),
+    tickCount: 0,
   };
 }
 
-// One tick: diffuse upward, cool, sway with turbulence, inject at the base,
-// spawn and advect smoke. All values clamped to [0, 1]. Deterministic.
-function step(fire) {
-  const cols = fire.cols;
-  const rows = fire.rows;
-  const heat = fire.heat;
-  const smoke = fire.smoke;
-  const { rng, noise } = fire;
-  fire.time += 1;
-  const t = fire.time;
+const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
-  const next = new Float64Array(cols * rows);
-  const nextSmoke = new Float64Array(cols * rows);
+// Advance the field by one tick (pure w.r.t. its inputs: field + its state).
+// Heat is injected at the base, diffuses upward, cools per row, and is
+// perturbed by turbulence (value noise) so the flame sways and licks.
+function tick(field) {
+  const { cols: W, rows: H, heat, noise } = field;
+  const t = field.tickCount++;
+  const next = new Float32Array(W * H);
+  const cx = (W - 1) / 2;
 
-  // Flicker: global per-frame intensity noise.
-  const flicker = 0.75 + 0.5 * noise(t * 0.23 + 7.7); // ~[0.75, 1.25]
+  // Flicker: slow global intensity noise, 0.85..1.0 per frame.
+  const flicker = 0.85 + 0.15 * noise(t * 0.11, 7.3, 2.1);
+  // Flame base: wide, width wobbles over time (not a static cone).
+  const baseHalf = W * (0.16 + 0.05 * noise(t * 0.13, 4.5, 9.2));
 
-  // Turbulence: per-row horizontal sway so the flame licks and sways.
-  const sway = (y) => Math.round((noise(t * 0.11 + y * 0.19) - 0.5) * 3);
-
-  // 1) Heat rises with turbulent perturbation and cools.
-  for (let y = 0; y < rows; y++) {
-    const dx = sway(y);
-    for (let x = 0; x < cols; x++) {
-      const v = heat[y * cols + x];
-      if (v <= 0.001) continue;
-      const cooled = v * 0.95;
-      // Occasional extra kick makes the flame lick sideways.
-      const kick = rng() < 0.18 ? (rng() < 0.5 ? -1 : 1) : 0;
-      const nx = Math.max(0, Math.min(cols - 1, x + dx + kick));
-      if (y > 0) next[(y - 1) * cols + nx] += cooled * 0.9;
-      next[y * cols + x] += cooled * 0.1;
-    }
-  }
-
-  // 2) Inject at the base: wide base tapering upward, flickering width.
-  const cx = (cols - 1) / 2;
-  const half = Math.max(2, Math.round(cols * 0.22 * flicker));
-  for (let y = rows - 3; y < rows; y++) {
-    const rowFade = (y - (rows - 3)) / 2; // 0.5..1, strongest at the bottom
-    const w = Math.max(1, Math.round(half * (0.4 + 0.6 * rowFade)));
-    const x0 = Math.max(0, Math.round(cx - w));
-    const x1 = Math.min(cols - 1, Math.round(cx + w));
-    for (let x = x0; x <= x1; x++) {
-      const d = Math.abs(x - cx) / w;
-      if (d > 1) continue;
-      const j = (1 - d * d) * (0.55 + 0.45 * noise(t * 0.31 + x * 0.17)) * flicker * rowFade;
-      next[y * cols + x] += j;
-    }
-  }
-
-  // 3) Smoke: spawn faint particles just above the hot tip, rise, decay.
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const s = smoke[y * cols + x];
-      if (s > 0.01) {
-        if (y > 0) nextSmoke[(y - 1) * cols + x] += s * 0.9;
-        nextSmoke[y * cols + x] += s * 0.4;
+  for (let y = 0; y < H; y++) {
+    const fromBottom = H - 1 - y;
+    for (let x = 0; x < W; x++) {
+      let h = 0;
+      const below = y + 1;
+      if (below < H) {
+        // Turbulence: sample the row below with a per-cell noisy offset
+        // so the flame sways and licks.
+        const sway = Math.round((noise(x * 0.22, t * 0.17, y * 0.05) - 0.5) * 4);
+        const x0 = clamp(x + sway, 0, W - 1);
+        const xL = clamp(x + sway - 1, 0, W - 1);
+        const xR = clamp(x + sway + 1, 0, W - 1);
+        h = (heat[below * W + x0] + heat[below * W + xL] + heat[below * W + xR]) / 3;
+        // Cooling: heat decays as it rises (flame tapers upward).
+        h *= 0.85;
       }
-      if (y > 2 && heat[y * cols + x] > 0.25 &&
-          heat[(y - 1) * cols + x] < 0.08 && rng() < 0.3) {
-        nextSmoke[(y - 1) * cols + x] += 0.08 + 0.12 * rng();
+      if (y === H - 1) {
+        // Base injection: hot, with a noisy ragged edge.
+        const edge = baseHalf + (noise(x * 0.3, t * 0.29, 1.1) - 0.5) * 4;
+        if (Math.abs(x - cx) <= edge) h = Math.max(h, 1);
+      }
+      next[y * W + x] = clamp(h * flicker, 0, 1);
+    }
+  }
+
+  // Smoke: faint particles above the flame — only where a hot column
+  // feeds the cell from below (within a few rows of flame height) and the
+  // noise field invites a puff.
+  const smokeNext = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    if (H - 1 - y < H * 0.45) continue; // smoke zone: upper 45% only
+    for (let x = 0; x < W; x++) {
+      const h = next[y * W + x];
+      if (h >= 0.12) continue;
+      let belowHeat = 0;
+      for (let dy = 1; dy <= 12 && y + dy < H; dy++) {
+        belowHeat = Math.max(belowHeat, next[(y + dy) * W + x]);
+      }
+      if (belowHeat <= 0.25) continue;
+      const n = noise(x * 0.35, y * 0.35, t * 0.21);
+      if (n > 0.62) {
+        smokeNext[y * W + x] = 0.15 + 0.5 * (n - 0.62) / 0.38;
       }
     }
   }
 
-  // 4) Clamp to [0, 1].
-  for (let i = 0; i < next.length; i++) {
-    next[i] = next[i] > 1 ? 1 : next[i] < 0 ? 0 : next[i];
-    nextSmoke[i] = nextSmoke[i] > 1 ? 1 : nextSmoke[i] < 0 ? 0 : nextSmoke[i];
-  }
-  fire.heat = next;
-  fire.smoke = nextSmoke;
-  return fire;
+  field.heat = next;
+  field.smoke = smokeNext;
+  return field;
 }
 
-// ---------- 2. Palette ----------
+// ---------------------------------------------------------------------------
+// 2. Palette: heat [0,1] -> 24-bit truecolor ANSI SGR (or ' ' for zero)
+// ---------------------------------------------------------------------------
 
-// Gradient stops: white-hot core -> yellow -> orange -> red -> dark red.
+// Multi-stop gradient, hot -> cool:
+//   white-hot core -> yellow -> orange -> red -> dark red -> (zero: empty)
 const STOPS = [
-  [0.0, 10, 5, 5],       // near-black (interpolation base)
-  [0.1, 70, 12, 0],      // dark red
-  [0.35, 170, 30, 8],    // red
-  [0.6, 255, 120, 25],   // orange
-  [0.85, 255, 210, 90],  // yellow
-  [1.0, 255, 255, 235],  // white-hot core
+  { h: 1.0,  c: [255, 255, 255] }, // white-hot core
+  { h: 0.75, c: [255, 214, 80]  }, // yellow
+  { h: 0.5,  c: [255, 120, 20]  }, // orange
+  { h: 0.3,  c: [215, 45, 10]   }, // red
+  { h: 0.15, c: [120, 12, 5]    }, // dark red
+  { h: 0.05, c: [45, 4, 2]      }, // embers
+  { h: 0.0,  c: [0, 0, 0]       },
 ];
 
-// heat value in [0,1] -> {r,g,b} in 0..255, or null for an empty cell.
-function palette(t) {
-  if (t <= 0) return null;
-  if (t >= 1) t = 1;
-  for (let i = 1; i < STOPS.length; i++) {
-    if (t <= STOPS[i][0]) {
-      const [t0, r0, g0, b0] = STOPS[i - 1];
-      const [t1, r1, g1, b1] = STOPS[i];
-      const u = (t - t0) / (t1 - t0);
-      return {
-        r: Math.round(r0 + (r1 - r0) * u),
-        g: Math.round(g0 + (g1 - g0) * u),
-        b: Math.round(b0 + (b1 - b0) * u),
-      };
+function palette(h) {
+  if (h <= 0) return ' ';
+  if (h >= 1) h = 1;
+  let i = 0;
+  while (i < STOPS.length - 1 && STOPS[i + 1].h >= h) i++;
+  const top = STOPS[i];
+  const bot = STOPS[i + 1] || top;
+  const span = top.h - bot.h || 1;
+  const f = (top.h - h) / span;
+  const r = Math.round(top.c[0] + (bot.c[0] - top.c[0]) * f);
+  const g = Math.round(top.c[1] + (bot.c[1] - top.c[1]) * f);
+  const b = Math.round(top.c[2] + (bot.c[2] - top.c[2]) * f);
+  return `\x1b[38;2;${r};${g};${b} m`;
+}
+
+// Faint gray smoke color, intensity in [0, 1].
+function smokeColor(s) {
+  const v = Math.round(30 + 70 * clamp(s, 0, 1));
+  return `\x1b[38;2;${v};${v};${v} m`;
+}
+
+// ---------------------------------------------------------------------------
+// 3. Renderer: field -> one ANSI frame string
+// ---------------------------------------------------------------------------
+
+// Half-block (▀) rendering: each grid row becomes 2 terminal rows, so the
+// frame is rows*2 lines, each line exactly `cols` characters long.
+function renderFrame(field) {
+  const { cols: W, rows: H, heat, smoke } = field;
+  const lines = new Array(2 * H);
+  for (let y = 0; y < H; y++) {
+    const top = new Array(W);
+    const bot = new Array(W);
+    for (let x = 0; x < W; x++) {
+      const h = heat[y * W + x];
+      const s = smoke[y * W + x];
+      const cell = h > 0 ? '▀' : s > 0 ? '▀' : ' ';
+      const color = h > 0 ? palette(h) : s > 0 ? smokeColor(s) : ' ';
+      top[x] = cell === ' ' ? ' ' : color + '▀';
+      bot[x] = top[x];
     }
+    lines[2 * y] = top.join('');
+    lines[2 * y + 1] = bot.join('');
   }
-  const last = STOPS[STOPS.length - 1];
-  return { r: last[1], g: last[2], b: last[3] };
+  return lines.join('\n');
 }
 
-// Faint warm gray for smoke.
-function smokeColor(v) {
-  const g = Math.min(150, Math.round(50 + 100 * v));
-  return { r: g - 10, g: g, b: g + 5 };
-}
+// ---------------------------------------------------------------------------
+// 4. Loop: IO only — runs only when executed as main
+// ---------------------------------------------------------------------------
 
-// ---------- 3. Renderer ----------
+function run() {
+  // Headless (piped stdout, e.g. `run.sh smoke`) never animates.
+  if (!process.stdout.isTTY) return;
+  const termW = (process.stdout.columns && process.stdout.columns > 0) ? process.stdout.columns : 80;
+  const termH = (process.stdout.rows && process.stdout.rows > 0) ? process.stdout.rows : 24;
+  const cols = Math.max(10, termW - 4);
+  const rows = Math.max(5, Math.floor((termH - 2) / 2));
 
-const ESC = (c) => `\x1b[38;2;${c.r};${c.g};${c.b}m`;
+  const field = createField(cols, rows);
+  for (let i = 0; i < 12; i++) tick(field); // pre-warm so the flame is already lit
 
-// grid -> one ANSI frame string. rows/2 terminal lines; each cell is two
-// half-block chars: colored '▀' (top heat half) + colored ' ' (bottom half).
-// Zero heat -> plain space, no escape.
-function render(fire) {
-  const cols = fire.cols;
-  const rows = fire.rows;
-  const heat = fire.heat;
-  const smoke = fire.smoke || null;
-  const lines = Math.floor(rows / 2);
-  const out = [];
-  for (let r = 0; r < lines; r++) {
-    let line = '';
-    for (let x = 0; x < cols; x++) {
-      const top = heat[r * 2 * cols + x];
-      const bot = heat[(r * 2 + 1) * cols + x];
-      const st = smoke ? smoke[r * 2 * cols + x] : 0;
-      const sb = smoke ? smoke[(r * 2 + 1) * cols + x] : 0;
-      const ct = palette(top);
-      const cb = palette(bot);
-      line += ct ? ESC(ct) + '▀' : (st > 0.02 ? ESC(smokeColor(st)) + '▀' : ' ');
-      line += cb ? ESC(cb) + ' ' : (sb > 0.02 ? ESC(smokeColor(sb)) + ' ' : ' ');
-    }
-    out.push(line);
-  }
-  return out.join('\n');
-}
-
-// ---------- 4. Loop (IO only) ----------
-
-function start() {
-  const cols = (process.stdout.columns && process.stdout.columns > 10)
-    ? process.stdout.columns : 80;
-  const rows = (process.stdout.rows && process.stdout.rows > 8)
-    ? process.stdout.rows : 24;
-  // Heat grid is twice the terminal height; flame is centered by the
-  // base-injection profile (cx = cols/2).
-  const fire = createFire(cols, rows * 2, 1337);
-
-  let timer = null;
-  const quit = () => {
-    if (timer) clearInterval(timer);
-    timer = null;
-    process.stdout.write('\x1b[0m\x1b[?25h\n'); // reset ANSI, restore cursor
-    process.exit(0);
-  };
-  process.on('SIGINT', quit);
+  const padLeft = Math.max(0, Math.floor((termW - cols) / 2));
+  const frameLines = 2 * rows;
+  const padTop = Math.max(0, Math.floor((termH - frameLines) / 2));
+  const prefix = '\x1b[2J\x1b[H' +
+    Array(padTop).fill(' '.repeat(padLeft) + ' '.repeat(cols)).join('\n') + '\n';
+  const pad = ' '.repeat(padLeft);
 
   process.stdout.write('\x1b[?25l'); // hide cursor
-  timer = setInterval(() => {
-    step(fire);
-    process.stdout.write('\x1b[2J\x1b[H' + render(fire));
+
+  const timer = setInterval(() => {
+    tick(field);
+    const body = renderFrame(field)
+      .split('\n')
+      .map((l) => pad + l)
+      .join('\n');
+    process.stdout.write(prefix + body);
   }, 33); // ~30 FPS
+
+  process.on('SIGINT', () => {
+    clearInterval(timer);
+    process.stdout.write('\x1b[?25h\x1b[0m\n'); // restore cursor, reset ANSI
+    process.exit(0);
+  });
 }
 
-// Animate only when executed directly in an interactive terminal; as a module
-// (require) or with piped stdout (smoke/test) this stays inert.
-if (require.main === module && process.stdout.isTTY) {
-  start();
-}
+if (require.main === module) run();
 
-module.exports = {
-  mulberry32,
-  makeNoise1D,
-  createFire,
-  step,
-  palette,
-  smokeColor,
-  render,
-};
+module.exports = { createRng, makeValueNoise, createField, tick, palette, smokeColor, renderFrame, run };
