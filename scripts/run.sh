@@ -25,7 +25,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_ROOT"
 
 STACKS='js|*.test.js|[A-Za-z0-9_-]+\.test\.js|node --test --test-force-exit|node
-py|*_test.py|[A-Za-z0-9_-]+_test\.py|python3|python3'
+py|*_test.py|[A-Za-z0-9_-]+_test\.py|python3 -m pytest -q|python3'
 
 # Generate the usage alternatives from the registry (single source).
 stack_alts() {
@@ -102,10 +102,12 @@ case "$cmd" in
   smoke)
     [ $# -eq 1 ] || usage
     f="$1"
+    SRC_ROOT="$(realpath "$REPO_ROOT/src")"
     while IFS='|' read -r ext _ _ _ scmd; do
       case "$f" in
         src/*."$ext")
-          [ -f "$f" ] || { echo "run.sh: no such file: $f" >&2; exit 2; }
+          # SEC-01: file exists, no symlinks, no traversal out of src/.
+          validate_path "$f" "$SRC_ROOT"
           # shellcheck disable=SC2086  # registry command line, word-split on purpose
           exec timeout 10 $scmd "$f" < /dev/null
           ;;
@@ -115,6 +117,7 @@ case "$cmd" in
     exit 2
     ;;
   list)
+    [ -d tests ] || { echo "run.sh: no tests/ directory" >&2; exit 1; }
     {
       while IFS='|' read -r _ glob _ _ _; do
         find tests -name "$glob"

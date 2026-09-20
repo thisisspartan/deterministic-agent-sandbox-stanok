@@ -95,6 +95,10 @@ RUN pip install --break-system-packages --no-cache-dir \
       --no-binary claude-agent-sdk \
       "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}"
 
+# pytest — the py stack's test-runner in scripts/run.sh is
+# `python3 -m pytest -q`; Python-stack tickets run their suites with it.
+RUN pip install --break-system-packages --no-cache-dir pytest
+
 # --- Node.js + Claude Code CLI (R4: hermetic image) ------------------------
 # Node: official nodejs.org tarball, extracted over /usr/local (bin/node,
 # bin/npm, lib/node_modules/npm). NOT a COPY of the host's /usr/bin/node —

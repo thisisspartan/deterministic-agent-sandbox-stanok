@@ -40,9 +40,21 @@ echo "--- staging the Claude Code CLI into the build context (R4) ---"
 # x64-linux (the CLI's native sandbox hard-fails at startup without
 # vendor/ripgrep/x64-linux/rg). No .git/source/other-platforms/maps.
 CLI_SRC="${STANOK_CLI_DIR:-/home/hermes/git/claude-code-2.1.88}"
+# Pinned hashes of the validated claude-code 2.1.88 staging sources —
+# a tampered or wrong checkout must fail the build, not silently ship.
+CLI_JS_SHA="a5f461302c9a10185f2ccb6100daf6836577d3e72b5df61732fba985bdc07994"
+RG_SHA="55c2b8dd910f390b06b3a7c620603489b83fdfb647665e4d4bb32f3f54f09ea1"
 if [[ ! -f "$CLI_SRC/cli.js" || ! -f "$CLI_SRC/package.json" || ! -f "$CLI_SRC/vendor/ripgrep/x64-linux/rg" ]]; then
     echo "ERROR: CLI staging source not found: $CLI_SRC (need cli.js + package.json + vendor/ripgrep/x64-linux/rg)" >&2
     echo "  Set STANOK_CLI_DIR to the validated claude-code 2.1.88 checkout." >&2
+    exit 1
+fi
+actual_cli="$(sha256sum "$CLI_SRC/cli.js" | cut -d' ' -f1)"
+actual_rg="$(sha256sum "$CLI_SRC/vendor/ripgrep/x64-linux/rg" | cut -d' ' -f1)"
+if [[ "$actual_cli" != "$CLI_JS_SHA" || "$actual_rg" != "$RG_SHA" ]]; then
+    echo "ERROR: CLI staging source hash mismatch (tampered or wrong checkout):" >&2
+    echo "  cli.js: got $actual_cli want $CLI_JS_SHA" >&2
+    echo "  rg:     got $actual_rg want $RG_SHA" >&2
     exit 1
 fi
 mkdir -p "$DIR/.build-context/claude-code-2.1.88/vendor/ripgrep/x64-linux"
