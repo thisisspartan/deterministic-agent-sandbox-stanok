@@ -64,6 +64,14 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list) -> 
     for var in ("http_proxy", "https_proxy", "no_proxy", "NO_PROXY"):
         if os.environ.get(var):
             env[var] = os.environ[var]
+    # Diagnostic passthrough (CC-082 T6 capture): CLI debug log file + SDK HTTP
+    # logging + NODE_OPTIONS (abort()/fetch forensic preload, --require).
+    # Forwarded ONLY when set on the host (opt-in per launch); logging
+    # only — never alters transport behavior.
+    for var in ("DEBUG_SDK", "ANTHROPIC_LOG", "CLAUDE_CODE_DEBUG_LOGS_DIR",
+                "CLAUDE_CODE_DEBUG_LOG_LEVEL", "NODE_OPTIONS"):
+        if os.environ.get(var):
+            env[var] = os.environ[var]
     for k, v in env.items():
         argv += ["-e", f"{k}={v}"]
 
