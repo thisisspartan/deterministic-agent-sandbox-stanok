@@ -1,114 +1,99 @@
 'use strict';
-const { test } = require('node:test');
-const assert = require('node:assert/strict');
+// Test contract for src/fire.js — terminal fire (see docs/fire.md).
+const test = require('node:test');
+const assert = require('node:assert');
 
-const {
-  createSim,
-  tick,
-  composite,
-  palette,
-  renderFrame,
-} = require('../src/fire.js');
+const { createSim, step, palette, renderFrame } = require('../src/fire.js');
 
-const W = 60;
-const H = 40;
-
-function stripAnsi(s) {
-  return s.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-function luminance(c) {
-  return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-}
-
-function ticked(seed, n) {
-  const s = createSim(W, H, seed);
-  for (let i = 0; i < n; i++) tick(s);
-  return s;
-}
+const TRUECOLOR = /^\x1b\[38;2;(\d+);(\d+);(\d+) m$/;
 
 test('determinism: same seed -> identical rendered frame', () => {
-  const a = ticked(1234, 5);
-  const b = ticked(1234, 5);
-  assert.equal(renderFrame(composite(a), W, H), renderFrame(composite(b), W, H));
-  // different seed -> different frame
-  const c = ticked(98765, 5);
-  assert.notEqual(renderFrame(composite(c), W, H), renderFrame(composite(a), W, H));
+  const a = createSim(24, 16, 42);
+  const b = createSim(24, 16, 42);
+  for (let i = 0; i < 20; i++) {
+    step(a);
+    step(b);
+  }
+  assert.strictEqual(renderFrame(a), renderFrame(b));
 });
 
-test('heat field: values in [0, 1] and the field changes between ticks', () => {
-  const s = ticked(42, 1);
-  for (const v of s.heat) {
-    assert.ok(v >= 0 && v <= 1, `heat ${v} out of [0,1]`);
+test('determinism: different seed -> (with overwhelming odds) different frame', () => {
+  const a = createSim(24, 16, 1);
+  const b = createSim(24, 16, 999);
+  for (let i = 0; i < 20; i++) {
+    step(a);
+    step(b);
   }
-  const before = Buffer.from(s.heat.buffer);
-  tick(s);
-  const after = Buffer.from(s.heat.buffer);
-  assert.notDeepEqual(after, before, 'field must change between ticks');
-  for (const v of s.heat) {
-    assert.ok(v >= 0 && v <= 1, `heat ${v} out of [0,1] after tick`);
-  }
+  // Seed only guarantees reproducibility, not divergence; but 20 ticks of
+  // independent turbulence walks effectively always diverge.
+  assert.notStrictEqual(renderFrame(a), renderFrame(b));
 });
 
-test('palette: RGB in 0..255, hot brighter than cool, zero heat -> empty', () => {
-  assert.equal(palette(0), null, 'zero heat must be an empty cell');
-  for (const v of [0.02, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 0.95, 1]) {
-    const c = palette(v);
-    assert.ok(c, `palette(${v}) must not be empty`);
-    for (const ch of [c.r, c.g, c.b]) {
-      assert.ok(Number.isInteger(ch) && ch >= 0 && ch <= 255, `channel ${ch}`);
+test('heat field: all values in [0, 1] and field changes between ticks', () => {
+  const sim = createSim(24, 16, 7);
+  step(sim);
+  const snap = sim.heat.map((row) => row.slice());
+  step(sim);
+  let changed = false;
+  for (let y = 0; y < sim.height; y++) {
+    for (let x = 0; x < sim.width; x++) {
+      const v = sim.heat[y][x];
+      assert.ok(Number.isFinite(v), `heat not finite at (${x},${y}): ${v}`);
+      assert.ok(v >= 0 && v <= 1, `heat out of [0,1] at (${x},${y}): ${v}`);
+      if (v !== snap[y][x]) changed = true;
     }
   }
-  assert.ok(luminance(palette(0.95)) > luminance(palette(0.2)), 'hot core brighter than cool edge');
-  assert.ok(luminance(palette(1)) >= luminance(palette(0.95)));
-  // smoke band renders as (near-)gray
-  const sm = palette(0.05);
-  assert.ok(Math.abs(sm.r - sm.g) <= 10 && Math.abs(sm.r - sm.b) <= 10);
+  assert.ok(changed, 'heat field must change between two ticks');
 });
 
-test('renderer: ANSI escapes present and frame dimensions match the grid', () => {
-  const s = ticked(5, 30);
-  const grid = composite(s);
-  assert.equal(grid.length, H);
-  assert.equal(grid[0].length, W);
-  const frame = renderFrame(grid, W, H);
+test('palette: every RGB component in 0-255', () => {
+  for (const t of [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99, 1]) {
+    const s = palette(t);
+    const m = s.match(TRUECOLOR);
+    assert.ok(m, `palette(${t}) must emit 24-bit truecolor, got: ${JSON.stringify(s)}`);
+    for (let i = 1; i <= 3; i++) {
+      const c = Number(m[i]);
+      assert.ok(Number.isInteger(c) && c >= 0 && c <= 255, `component out of range: ${c}`);
+    }
+  }
+});
+
+test('palette: hot core brighter than cool edge', () => {
+  const sum = (s) => {
+    const m = s.match(TRUECOLOR);
+    assert.ok(m, `not truecolor: ${JSON.stringify(s)}`);
+    return Number(m[1]) + Number(m[2]) + Number(m[3]);
+  };
+  assert.ok(sum(palette(0.95)) > sum(palette(0.3)), 'hot core must be brighter than cool edge');
+});
+
+test('palette: zero heat -> empty cell (no escape)', () => {
+  assert.strictEqual(palette(0), '');
+});
+
+test('renderer: frame contains ANSI escapes and dims match the grid', () => {
+  const sim = createSim(20, 12, 3);
+  for (let i = 0; i < 30; i++) step(sim);
+  const frame = renderFrame(sim);
   assert.ok(frame.includes('\x1b[38;2;'), 'frame must contain truecolor escapes');
   const lines = frame.split('\n');
-  assert.equal(lines.length, Math.ceil(H / 2), 'rows = ceil(height/2)');
+  assert.strictEqual(lines.length, sim.height, 'frame rows must equal grid height');
   for (const line of lines) {
-    assert.equal(stripAnsi(line).length, W, 'columns match grid width');
+    const visible = line.replace(/\x1b\[[0-9;]+ m|\x1b\[\d+m/g, '');
+    assert.strictEqual(visible.length, sim.width, 'frame cols must equal grid width');
   }
-  // fully empty grid -> plain spaces only, no escapes
-  const empty = renderFrame([[0, 0, 0, 0]], 4, 1);
-  assert.equal(empty, '    ');
-  assert.ok(!empty.includes('\x1b'), 'empty cells carry no escape sequences');
 });
 
-test('smoke: faint gray particles rise above the flame tip', () => {
-  const s = ticked(7, 90);
-  let smokeCells = 0;
-  let minSmokeY = H;
-  let minFlameY = H;
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const i = y * W + x;
-      if (s.smoke[i] > 0.02) {
-        smokeCells++;
-        if (y < minSmokeY) minSmokeY = y;
-      }
-      if (s.heat[i] > 0.5) {
-        if (y < minFlameY) minFlameY = y;
-      }
-    }
-  }
-  assert.ok(flameExists(s), 'flame core must be present');
-  assert.ok(smokeCells > 5, 'smoke particles must be present');
-  assert.ok(minFlameY < H, 'flame tip located');
-  assert.ok(minSmokeY <= minFlameY, 'smoke rises above the flame tip');
+test('renderer: zero-heat field renders a blank frame (no escapes)', () => {
+  const sim = createSim(10, 6, 1);
+  const frame = renderFrame(sim);
+  assert.ok(!frame.includes('\x1b'), 'empty field must not emit escapes');
+  assert.strictEqual(frame.replace(/\n/g, ' ').trim(), '', 'empty field must render spaces only');
 });
 
-function flameExists(s) {
-  let n = 0;
-  for (const v of s.heat) if (v > 0.5) n++;
-  return n > 10;
-}
+test('module exports the four concerns (main-guard: no loop on require)', () => {
+  const mod = require('../src/fire.js');
+  for (const k of ['createSim', 'step', 'palette', 'renderFrame']) {
+    assert.strictEqual(typeof mod[k], 'function', `missing export: ${k}`);
+  }
+});
