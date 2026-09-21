@@ -124,13 +124,14 @@ ENV UV_SYSTEM_PYTHON=1 \
 # --- Launcher runtime ---------------------------------------------------
 # --no-binary: build from sdist, NOT the wheel — the wheel ships
 # _bundled/claude (a second CLI, ~300 MB). The sdist build has no _bundled
-# dir; cli_path (stanok.py) always points at the host binary.
+# dir; cli_path (stanok.py) resolves `claude` on PATH — inside the
+# container that is the baked-in /usr/local/bin/claude.
 # pytest — the py stack's test-runner in scripts/run.sh is
-# `uv run --no-project pytest -q -p no:cacheprovider`; Python-stack tickets
-# run their suites with it. Pin deliberately (same rule as the SDK): an
-# unpinned install drifts on every rebuild, and a missing pytest in the
-# image is exactly the ENV-FAIL class that run.sh's rc=6 and the launcher's
-# rc=25 image preflight exist to catch.
+# `env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest -q -p no:cacheprovider`;
+# Python-stack tickets run their suites with it. Pin deliberately (same rule
+# as the SDK): an unpinned install drifts on every rebuild, and a missing
+# pytest in the image is exactly the ENV-FAIL class that run.sh's rc=6 and
+# the launcher's rc=25 image preflight exist to catch.
 RUN uv pip install --no-binary claude-agent-sdk \
       "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}" \
       "pytest==8.3.3"

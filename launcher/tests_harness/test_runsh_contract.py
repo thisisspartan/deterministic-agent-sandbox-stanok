@@ -1,4 +1,4 @@
-"""run.sh contract suite — 26 hermetic cases against the REAL scripts/run.sh.
+"""run.sh contract suite — hermetic cases against the REAL scripts/run.sh.
 
 Copies the live run.sh into a tmpdir repo (scripts/ + tests/ + src/) and
 pins the fixed contract:
@@ -224,6 +224,27 @@ def test_smoke_multiple_args(repo):
     write(repo / "src" / "b.js", "console.log(2);\n")
     p = run(repo, "smoke", "src/a.js", "src/b.js")
     assert p.returncode == 2
+
+
+# --- jq stack (JSON validation) ---------------------------------------------
+
+def test_test_json_valid_passes(repo):
+    # The jq registry line is a real validation stack: `jq empty` exits 0
+    # on well-formed JSON (the preflight `command -v jq` runs via sh -c).
+    write(repo / "tests" / "data_test.json", '{"a": 1}\n')
+    p = run(repo, "test", "tests/data_test.json")
+    assert p.returncode == 0
+    assert "=== tests/data_test.json ===" in p.stdout
+
+
+def test_test_json_invalid_fails(repo):
+    # Malformed JSON: jq exits 5 (parse error). 5 is not in run.sh's own
+    # namespace (0/1/2/6/7/124), so it passes through unremapped — the same
+    # class as pytest's 5 ("no tests ran"): the test did not pass.
+    write(repo / "tests" / "bad_test.json", '{a: 1}\n')
+    p = run(repo, "test", "tests/bad_test.json")
+    assert p.returncode == 5
+    assert "parse error" in p.stderr
 
 
 # --- W12: unregistered test-like files in `list` ---------------------------

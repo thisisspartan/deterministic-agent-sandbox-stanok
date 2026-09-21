@@ -9,8 +9,8 @@
 #   bash scripts/run.sh list                           — list the test files (sorted, unique)
 #
 # RC TABLE (W12) — run.sh's own codes are DISJOINT from every runner's codes
-# (pytest 0-5, node --test 0/1), so a caller never has to guess who produced
-# the code:
+# (pytest 0-5, node --test 0/1, jq 0/5), so a caller never has to guess who
+# produced the code:
 #   0    pass (all tests green)
 #   1    a test FAILED (runner failure; a runner that itself exits 2 or 6
 #        is remapped to 1 — pytest 2 = interrupted, 6 is outside its range);
@@ -22,9 +22,10 @@
 #   7    SECURITY: symlink in a path component, or the resolved path
 #        escapes tests/ (test) or src/ (smoke)
 #   124  timeout (test: 60s, smoke: 10s)
-#   3,4,5  pytest's own codes, passed through unremapped: 3 = internal
+#   3,4,5  runner codes passed through unremapped: pytest 3 = internal
 #        error, 4 = usage error, 5 = no tests ran (a bare assert-script is
-#        NOT a test — see CLAUDE.md "Test forms")
+#        NOT a test — see CLAUDE.md "Test forms"); jq's parse error also
+#        exits 5 (same class: the test did not pass)
 #
 # STACK REGISTRY — the single stack extension point: exactly ONE line per
 # stack, format:
@@ -45,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_ROOT"
 
-# py runner: `env PYTHONDONTWRITEBYTECODE=1 uv run --no-project pytest ...` —
+# py runner: `env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest ...` —
 # uv resolves the environment itself (host: the repo's .venv; image: the
 # system python, UV_SYSTEM_PYTHON=1 + UV_PYTHON_PREFERENCE=only-system).
 # --no-project keeps uv from hunting for a pyproject.toml; -p no:cacheprovider
@@ -131,8 +132,9 @@ case "$cmd" in
       pre="${PREFLIGHT[$f]}"
       if [ -z "${PREFLIGHT_DONE[$pre]:-}" ]; then
         PREFLIGHT_DONE["$pre"]=1
-        # shellcheck disable=SC2086  # registry command line, word-split on purpose
-        timeout 10 $pre < /dev/null > /dev/null 2>&1 || {
+        # The registry field is a command LINE (it may hold shell builtins
+        # like `command -v jq`), so it runs through sh -c, not a direct exec.
+        timeout 10 sh -c "$pre" < /dev/null > /dev/null 2>&1 || {
           echo "run.sh: ENV-FAIL: test runner unavailable: $pre" >&2
           exit 6
         }
@@ -167,8 +169,9 @@ case "$cmd" in
           validate_path "$f" "$SRC_ROOT"
           # ENV-FAIL (rc=6): the smoke runner must be available (same
           # contract as `test` — environment failure, not a red module).
-          # shellcheck disable=SC2086  # registry command line, word-split on purpose
-          timeout 10 $pre < /dev/null > /dev/null 2>&1 || {
+          # The registry field is a command LINE (may hold shell builtins),
+          # so it runs through sh -c, not a direct exec.
+          timeout 10 sh -c "$pre" < /dev/null > /dev/null 2>&1 || {
             echo "run.sh: ENV-FAIL: smoke runner unavailable: $pre" >&2
             exit 6
           }
