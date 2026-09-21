@@ -85,6 +85,14 @@ LABEL stanok.digest="${STANOK_DIGEST}"
 #                           the sandbox's HTTP/SOCKS bridge sockets via socat;
 #                           the CLI hard-fails at startup without it (verified:
 #                           "dependencies are missing: socat not installed").
+# jq                      — JSON tooling for the model's native Bash (the
+#                           machine's CLAUDE.md gives the model unrestricted
+#                           Bash; jq is the standard JSON processor). The
+#                           old bash-hook consumer (hooks/verifier.sh) is gone
+#                           (R1 in-process hook), but the tool stays: it is
+#                           part of the generic toolchain, and the run.sh
+#                           preflight line probes it at launch (rc=25 if
+#                           missing) so a silent absence can never recur.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ca-certificates \
@@ -92,6 +100,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
       bubblewrap \
       socat \
+      jq \
       python3 \
       python3-venv \
     && rm -rf /var/lib/apt/lists/*

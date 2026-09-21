@@ -565,11 +565,15 @@ def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tup
 def _tests_manifest() -> dict[str, str]:
     """Snapshot {rel_path: sha256} of tests/ + scripts/run.sh (contract_lock,
     W2.5 + P2). Only PRE-EXISTING files are snapshotted: a missing
-    scripts/run.sh (bootstrap of a new project) is therefore free to create."""
+    scripts/run.sh (bootstrap of a new project) is therefore free to create.
+    __pycache__/ is skipped: .pyc files are interpreter cache artifacts, not
+    contract files — snapshotting them makes a routine `rm -rf __pycache__`
+    (or their regeneration) a false DELETED/MODIFIED violation (w12-verify)."""
     manifest: dict[str, str] = {}
     tests_dir = os.path.join(REPO_ROOT, "tests")
     if os.path.isdir(tests_dir):
-        for root, _dirs, files in os.walk(tests_dir):
+        for root, dirs, files in os.walk(tests_dir):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
             for name in files:
                 full = os.path.join(root, name)
                 rel = os.path.relpath(full, REPO_ROOT)
@@ -1424,12 +1428,39 @@ def launch_background(args) -> int:
     """Background run (replaces launch.sh's nohup branch): a detached
     self-spawn executes the sync path — the child writes the marker with its
     own pid and supervises the container (or runs in-process under
-    STANOK_NO_SANDBOX). The parent exits 0 immediately."""
+    STANOK_NO_SANDBOX). The parent WAITS for the child's `.running` marker
+    before returning: a return before the marker is written is a start race —
+    the first `status` reports a false `missing` and a blocking wait loop
+    exits early (w12-verify incident). rc=17: the child died (or stalled)
+    before writing the marker — a launch failure, not a run defect."""
     log_path = os.path.join(LOG_DIR, f"{args.label}.launch.log")
+    evidence_dir, _ = label_paths(args.label)
+    marker = os.path.join(evidence_dir, ".running")
     child_argv = [sys.executable, os.path.abspath(__file__)] + _inner_run_argv(args)
     with open(log_path, "a", encoding="utf-8") as lf:
         child = subprocess.Popen(child_argv, stdout=lf, stderr=subprocess.STDOUT,
                                  start_new_session=True, cwd=REPO_ROOT)
+    summary = os.path.join(evidence_dir, "summary.json")
+    deadline = time.monotonic() + 60
+    while not os.path.exists(marker):
+        if child.poll() is not None:
+            # The child exited. A fast abort (rc=13/20/14) writes summary.json
+            # and removes the marker BEFORE exiting — a process exit means all
+            # its writes are complete, so a present summary.json is a finished
+            # run, not a launch failure. No summary = the child died before
+            # reaching any abort path (crash/import error) -> rc=17.
+            if os.path.exists(summary):
+                log(f"Background child (PID {child.pid}) exited "
+                    f"rc={child.returncode} with a summary (fast abort)")
+                return 0
+            log(f"ERROR: background child (PID {child.pid}) exited "
+                f"rc={child.returncode} before writing the .running marker")
+            return 17
+        if time.monotonic() > deadline:
+            log(f"ERROR: background child (PID {child.pid}) did not write the "
+                f".running marker within 60s")
+            return 17
+        time.sleep(0.2)
     log(f"Machine launched in the background (PID {child.pid}). Log: {log_path}")
     return 0
 

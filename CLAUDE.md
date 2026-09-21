@@ -64,8 +64,31 @@ The test framework is chosen by the `scripts/run.sh` STACK REGISTRY, not by you:
 - **py** — pytest functions `def test_*` in `tests/**/*_test.py`; import the module as
   `from src import x` or bare `import x` (`src` is on `sys.path` via `pythonpath=src`).
 - **js** — `node:test` functions in `tests/**/*.test.js` (run via `node --test`).
+- **jq** — not a test stack: the registry line exists only so the image
+  preflight probes `jq` availability at launch (rc=25 if missing). There are
+  no jq tests; `run.sh test`/`smoke` do not accept `.json` paths.
 A bare module-level `assert` is NOT a test (the verifier sees rc=5 "no tests ran").
 Do not introduce another framework (`go test`, `cargo test`, ...): the registry does not run it.
+
+## `run.sh` rc table (W12)
+
+run.sh's own codes are disjoint from every runner's codes (pytest 0-5,
+node --test 0/1):
+
+| rc | meaning |
+|----|---------|
+| 0  | pass |
+| 1  | a test FAILED (runner 2/6 remapped to 1); also: `list` found an unregistered test-like file |
+| 2  | run.sh REFUSED the call (shape/charset/extension/missing/arg count) |
+| 6  | ENV-FAIL: runner unavailable in the environment (not a red test) |
+| 7  | SECURITY: symlink in path, or path escapes tests/ / src/ |
+| 124 | timeout (test 60s, smoke 10s) |
+| 3,4,5 | pytest's own codes, passed through (5 = no tests ran) |
+
+`list` fails closed (rc=1) when `tests/` contains a test-like file (basename
+contains "test", case-insensitive; `fixtures/`, `data/` and `__pycache__/`
+dirs exempt) that no registry line claims — an unrun test must never pass
+the gate silently.
 
 ## TDD discipline (Red -> Green)
 

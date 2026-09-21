@@ -54,3 +54,12 @@ def test_I3_ordinary_codes(repo):
 def test_I4_script_style_is_not_a_pass(repo):
     (repo / "tests" / "script_test.py").write_text("assert 1 == 1\n")
     assert run(repo, "tests/script_test.py").returncode != 0
+
+def test_I5_py_test_writes_no_pycache(repo):
+    # w12-verify: the py runner must not leave __pycache__/*.pyc in the repo —
+    # cache artifacts must not reach the W12 `list` check or the
+    # contract_lock manifest (PYTHONDONTWRITEBYTECODE=1 in the registry line).
+    (repo / "tests" / "ok_test.py").write_text("def test_ok():\n    assert True\n")
+    assert run(repo, "tests/ok_test.py").returncode == 0
+    leftovers = list(repo.rglob("__pycache__"))
+    assert not leftovers, f"__pycache__ left behind: {leftovers}"
