@@ -443,8 +443,7 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], bool]:
 def prepare_workspace(declared_paths: list[str]) -> int:
     # SEC-01: .git is read-only inside the container — NO git writes here.
     # The cleanliness gate is dirty_tree_gate() (single source, called by main()
-    # rc=22 and by launch.sh via `check-dirty`). This function only prepares the
-    # writable workspace.
+    # rc=22). This function only prepares the writable workspace.
     try:
         for d in ("src", "tests", "docs", "scripts"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
@@ -720,7 +719,7 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> tuple[dict, dict, int, str]:
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> tuple[dict, dict, int, str]:
     """Returns (turn_total, live_window, writes, turn_error).
 
     turn_total  — ResultMessage.usage: cumulative across the turn's API calls
@@ -764,13 +763,6 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
             subtype = getattr(msg, "subtype", None)
             errors = getattr(msg, "errors", None)
             terminal_reason = getattr(msg, "terminal_reason", None)
-            data = getattr(msg, "data", None)
-            if isinstance(data, dict):
-                is_err = is_err or data.get("is_error")
-                res = res or data.get("result")
-                subtype = subtype or data.get("subtype")
-                errors = errors or data.get("errors")
-                terminal_reason = terminal_reason or data.get("terminal_reason")
             if is_err:
                 if subtype == "error_max_turns" or terminal_reason == "max_turns":
                     turn_error = "CLI_MAX_TURNS_EXCEEDED: agent reached max-turns ceiling"
@@ -834,13 +826,29 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
+        # Read into a shared list: a cancelled wait_for discards the read
+        # task's LOCAL state (a communicate() that was cancelled had already
+        # consumed the pre-kill bytes into its own locals — they were lost).
+        # Chunks delivered before the deadline survive in `chunks` (bug 6:
+        # the timeout message must show what the test printed before it hung).
+        chunks: list[bytes] = []
+
+        async def _drain() -> None:
+            while True:
+                c = await proc.stdout.read(65536)
+                if not c:
+                    break
+                chunks.append(c)
+
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=_HOOK_TEST_TIMEOUT_S)
+            await asyncio.wait_for(_drain(), timeout=_HOOK_TEST_TIMEOUT_S)
+            await proc.wait()  # pipe EOF can arrive before the exit status
             rc = proc.returncode
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.communicate()
-            rc, out = 124, b""
+            await _drain()
+            rc = 124
+        out = b"".join(chunks)
         # rc=0: GREEN (implementation exists) — stay silent.
         # rc=2: runner refused the path (not a test in its terms) — not our concern.
         # rc=6: ENV-FAIL (runner unavailable in the image) — an environment
@@ -921,7 +929,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
                 t0 = time.time()
                 turn_task = asyncio.create_task(
-                    _execute_turn(client, current_prompt, turn, stream_f, job, local_run_id)
+                    _execute_turn(client, current_prompt, turn, stream_f, job)
                 )
 
                 try:
@@ -1581,18 +1589,8 @@ def main() -> int:
     st = sub.add_parser("stop")
     st.add_argument("label")
 
-    # Single-source cleanliness gate for launch.sh (host side). Exit 22 on a
-    # dirty REPO_ROOT, 0 when clean — no side effects.
-    sub.add_parser("check-dirty")
-
     args = p.parse_args()
 
-    if args.cmd == "check-dirty":
-        if hidden_files_gate():
-            return 26
-        if test_config_gate():
-            return 27
-        return 22 if dirty_tree_gate() else 0
     if args.cmd == "status":
         return cmd_status(args.label)
     if args.cmd == "stop":
