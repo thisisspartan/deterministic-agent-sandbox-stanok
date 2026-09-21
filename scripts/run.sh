@@ -8,6 +8,24 @@
 #   bash scripts/run.sh smoke <src/*.<ext>>           — smoke run (stdin=/dev/null, timeout 10s)
 #   bash scripts/run.sh list                           — list the test files (sorted, unique)
 #
+# RC TABLE (W12) — run.sh's own codes are DISJOINT from every runner's codes
+# (pytest 0-5, node --test 0/1), so a caller never has to guess who produced
+# the code:
+#   0    pass (all tests green)
+#   1    a test FAILED (runner failure; a runner that itself exits 2 or 6
+#        is remapped to 1 — pytest 2 = interrupted, 6 is outside its range);
+#        also: `list` found a test-like file no registry line claims
+#   2    run.sh REFUSED the call: unknown subcommand, bad shape/charset,
+#        unknown extension, missing file, wrong arg count
+#   6    ENV-FAIL: the stack's runner is unavailable in this environment
+#        (preflight probe failed) — an environment defect, NOT a red test
+#   7    SECURITY: symlink in a path component, or the resolved path
+#        escapes tests/ (test) or src/ (smoke)
+#   124  timeout (test: 60s, smoke: 10s)
+#   3,4,5  pytest's own codes, passed through unremapped: 3 = internal
+#        error, 4 = usage error, 5 = no tests ran (a bare assert-script is
+#        NOT a test — see CLAUDE.md "Test forms")
+#
 # STACK REGISTRY — the single stack extension point: exactly ONE line per
 # stack, format:
 #   <ext>|<test-glob>|<name-regex>|<test-runner>|<smoke-runner>|<preflight>
@@ -55,20 +73,21 @@ usage() {
 
 # SEC-01: shared path validation for a path that must live inside <root>/:
 # strict charset, file exists, no symlink in any path component, and the
-# resolved path does not escape the root. Exits 2 on shape/missing, 1 on
-# symlink/traversal.
+# resolved path does not escape the root. Exits 2 on shape/missing, 7 on
+# symlink/traversal (W12: 7 is disjoint from every runner code — the old
+# rc=1 collided with "a test failed").
 validate_path() {
   local f="$1" root="$2"
   local p full
   [ -f "$f" ] || { echo "run.sh: no such file: $f" >&2; exit 2; }
   p="$REPO_ROOT/$f"
   while [ "${p#"$REPO_ROOT"/}" != "$p" ]; do
-    [ -L "$p" ] && { echo "run.sh: Security Error: symlink in path: $p" >&2; exit 1; }
+    [ -L "$p" ] && { echo "run.sh: Security Error: symlink in path: $p" >&2; exit 7; }
     p="$(dirname "$p")"
   done
   full="$(realpath "$f")"
   [[ "$full" == "$root/"* ]] ||
-    { echo "run.sh: Security Error: path escapes $root: $f" >&2; exit 1; }
+    { echo "run.sh: Security Error: path escapes $root: $f" >&2; exit 7; }
 }
 
 cmd="${1:-}"
@@ -164,6 +183,32 @@ case "$cmd" in
         find tests -name "$glob"
       done <<< "$STACKS"
     } | sort -u
+    # W12 property 1: `list` must not be SILENT about test-like files no
+    # registry line claims (the reviewer's case: a failing calc_test.go next
+    # to ok_test.py — old `list` did not show it, verify_gate = PASS).
+    # Rule (owner-delegated, W12): a file under tests/ is test-like when its
+    # basename contains "test" (case-insensitive); fixture/data directories
+    # (basename "fixtures" or "data") are exempt. Any unclaimed test-like
+    # file fails the listing (rc=1) so the external verifier goes red, not silent.
+    unclaimed="$(
+      find tests -type f | while IFS= read -r f; do
+        base="${f##*/}"
+        dir="${f%/*}"
+        [[ "${dir##*/}" == "fixtures" || "${dir##*/}" == "data" ]] && continue
+        low="$(printf '%s' "$base" | tr 'A-Z' 'a-z')"
+        case "$low" in *test*) ;; *) continue ;; esac
+        claimed=0
+        while IFS='|' read -r _ glob _ _ _ _; do
+          [[ "$base" == $glob ]] && { claimed=1; break; }
+        done <<< "$STACKS"
+        [ "$claimed" = 1 ] || printf '%s\n' "$f"
+      done | sort -u
+    )"
+    if [ -n "$unclaimed" ]; then
+      echo "run.sh: unregistered test-like file(s) in tests/ (no registry line claims them):" >&2
+      printf '%s\n' "$unclaimed" >&2
+      exit 1
+    fi
     ;;
   *)
     usage

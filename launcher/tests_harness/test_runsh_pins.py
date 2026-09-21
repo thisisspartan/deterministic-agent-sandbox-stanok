@@ -6,7 +6,7 @@ test_runsh_runner_pins.py (fake python3/timeout shims — runner-independent).
 The pins surviving here:
 
   M1   smoke accepts files strictly from src/ (SEC-01: no traversal,
-       no symlink, no other directory)
+       no symlink, no other directory) — W12: security errors are rc=7
   M11  `list` fails when tests/ is missing
 
 Same hermetic pattern: copy the live run.sh into a tmpdir repo
@@ -54,13 +54,13 @@ def write(path, body):
 def test_m1_smoke_strictly_from_src(repo):
     write(repo / "evil.py", "print('ok')\n")
     # Traversal: the shape matches src/*.py, but realpath escapes src/
-    # -> SEC-01 containment, rc=1.
+    # -> SEC-01 containment, rc=7 (W12: disjoint from runner codes).
     p = run(repo, "smoke", "src/../evil.py")
-    assert p.returncode == 1
-    # Symlink inside src/ pointing outside -> SEC-01, rc=1.
+    assert p.returncode == 7
+    # Symlink inside src/ pointing outside -> SEC-01, rc=7.
     (repo / "src" / "link.py").symlink_to("../evil.py")
     p = run(repo, "smoke", "src/link.py")
-    assert p.returncode == 1
+    assert p.returncode == 7
     # A file outside src/ -> shape violation, rc=2.
     write(repo / "tests" / "a_test.py", PY_PASS)
     p = run(repo, "smoke", "tests/a_test.py")
