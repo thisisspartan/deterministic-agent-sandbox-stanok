@@ -33,7 +33,8 @@ cd "$REPO_ROOT"
 # uv from hunting for a pyproject.toml; -p no:cacheprovider keeps pytest from
 # writing .pytest_cache into the read-only repo root.
 STACKS='js|*.test.js|[A-Za-z0-9_-]+\.test\.js|node --test --test-force-exit|node|node --version
-py|*_test.py|[A-Za-z0-9_-]+_test\.py|uv run --no-project python3 -m pytest -q -p no:cacheprovider -o pythonpath=src|uv run --no-project python3|uv run --no-project python3 -m pytest --version'
+py|*_test.py|[A-Za-z0-9_-]+_test\.py|uv run --no-project python3 -m pytest -q -p no:cacheprovider -o pythonpath=src|uv run --no-project python3|uv run --no-project python3 -m pytest --version
+jq|*.json|[A-Za-z0-9_-]+\.json|jq empty|jq empty|command -v jq'
 
 # Generate the usage alternatives from the registry (single source).
 stack_alts() {

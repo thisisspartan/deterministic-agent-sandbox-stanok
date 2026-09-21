@@ -64,6 +64,9 @@ The test framework is chosen by the `scripts/run.sh` STACK REGISTRY, not by you:
 - **py** — pytest functions `def test_*` in `tests/**/*_test.py`; import the module as
   `from src import x` or bare `import x` (`src` is on `sys.path` via `pythonpath=src`).
 - **js** — `node:test` functions in `tests/**/*.test.js` (run via `node --test`).
+- **jq** — not a test stack: the registry line exists only so the image
+  preflight probes `jq` availability at launch (rc=25 if missing). There are
+  no jq tests; `run.sh test`/`smoke` do not accept `.json` paths.
 A bare module-level `assert` is NOT a test (the verifier sees rc=5 "no tests ran").
 Do not introduce another framework (`go test`, `cargo test`, ...): the registry does not run it.
 
