@@ -1440,9 +1440,19 @@ def launch_background(args) -> int:
     with open(log_path, "a", encoding="utf-8") as lf:
         child = subprocess.Popen(child_argv, stdout=lf, stderr=subprocess.STDOUT,
                                  start_new_session=True, cwd=REPO_ROOT)
+    summary = os.path.join(evidence_dir, "summary.json")
     deadline = time.monotonic() + 60
     while not os.path.exists(marker):
         if child.poll() is not None:
+            # The child exited. A fast abort (rc=13/20/14) writes summary.json
+            # and removes the marker BEFORE exiting — a process exit means all
+            # its writes are complete, so a present summary.json is a finished
+            # run, not a launch failure. No summary = the child died before
+            # reaching any abort path (crash/import error) -> rc=17.
+            if os.path.exists(summary):
+                log(f"Background child (PID {child.pid}) exited "
+                    f"rc={child.returncode} with a summary (fast abort)")
+                return 0
             log(f"ERROR: background child (PID {child.pid}) exited "
                 f"rc={child.returncode} before writing the .running marker")
             return 17
