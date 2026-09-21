@@ -4,7 +4,7 @@ Copies the live run.sh into a tmpdir repo (scripts/ + tests/ + src/) and
 pins the fixed contract:
   - strict charset on test/smoke args (rc=2 on shape violations),
   - SEC-01 realpath containment in tests/ (no symlink in any component,
-    no traversal escape — rc=1),
+    no traversal escape — rc=7),
   - timeouts (smoke: 10s kill -> rc=124),
   - `list`: a single globally sorted, unique stream (sort -u semantics),
   - rc=2 on unknown extensions and wrong argument counts.

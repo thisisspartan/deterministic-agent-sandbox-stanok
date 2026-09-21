@@ -1,4 +1,4 @@
-# Machine launcher dependencies (Stanok 2.0)
+# Machine launcher dependencies (Stanok 4.2)
 # claude-agent-sdk — Claude Agent SDK (runs claude-code via the API).
 claude-agent-sdk==0.2.139
 # pytest — the doctor harness (launcher/tests_harness/test_doctor.py, R5).

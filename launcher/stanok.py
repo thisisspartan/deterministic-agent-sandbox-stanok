@@ -6,7 +6,7 @@ Full integration with the L1 Supervisor:
   2. Strict summary.json contract (probe_result, c5, review_verdict, errors) for L1.
   3. Adaptive Contract Lock: adaptation for creating tests from scratch and a ban on weakening assertions.
   4. Cumulative Token & Cache Telemetry: exact session_hit_rate calculation.
-  5. Shielded Turn Watchdog: the turn timeout (default 1200s) is a terminal DoS
+  5. Shielded Turn Watchdog: the turn timeout (default 1800s) is a terminal DoS
      circuit breaker — asyncio.shield() keeps the turn task alive past wait_for,
      so client.interrupt() runs cleanly and summary.json is written with the
      TURN-TIMEOUT code (rc=1) without the process dying on CancelledError.
@@ -664,7 +664,7 @@ def _extract_usage(msg) -> dict:
 
 
 async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> tuple[dict, dict, int, str]:
-    """Returns (turn_total, live_window, writes).
+    """Returns (turn_total, live_window, writes, turn_error).
 
     turn_total  — ResultMessage.usage: cumulative across the turn's API calls
                   (for session totals).
@@ -672,6 +672,8 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
                   on the final API call (the true context window, for CONTEXT-ROT).
     writes      — count of Write/Edit tool_use blocks in the turn (NO-OP assert,
                   W2.4; immune to test side effects, unlike a file manifest).
+    turn_error  — "" on a clean turn; otherwise the API/max-turns error string
+                  (CLI_MAX_TURNS_EXCEEDED or the ResultMessage error detail).
     """
     from claude_agent_sdk import ResultMessage
 
