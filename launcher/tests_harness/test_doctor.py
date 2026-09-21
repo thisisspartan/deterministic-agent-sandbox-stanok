@@ -1,6 +1,8 @@
 """doctor — structural invariants of the claude machine (R5: pytest port of hooks/doctor.sh).
 
-16 checks: 11 static + 5 mock runner launches (rc=15/20/22/20/24).
+Static invariants + mock runner launches (rc=15/20/22/20/24).
+Count (do not hardcode the number in prose):
+    uv run --directory <repo> pytest launcher/tests_harness --collect-only -q | tail -1
 Run via hooks/doctor.sh (thin wrapper) or directly:
     .venv/bin/python -m pytest launcher/tests_harness/test_doctor.py -q
 

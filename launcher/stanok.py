@@ -48,6 +48,10 @@ CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "clau
 
 MAX_TEST_LINES = 60
 MAX_TEST_BYTES = 4096
+# W10: noise-line registry for _extract_smart_diff — substrings that mark a
+# verifier-output line as dependency noise (not a test signal). One entry per
+# pattern; add here, not inline in the filter.
+NOISE_LINE_PATTERNS = ("node_modules/",)
 DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))
 
 API_TIMEOUT_S = max(1.0, float(os.environ.get("STANOK_API_TIMEOUT_S", "600")))
@@ -452,7 +456,7 @@ def prepare_workspace(declared_paths: list[str]) -> int:
 def _extract_smart_diff(raw_text: str) -> str:
     cleaned_lines = [
         line for line in raw_text.strip().splitlines()
-        if "node_modules/" not in line
+        if not any(p in line for p in NOISE_LINE_PATTERNS)
     ]
     if not cleaned_lines:
         cleaned_lines = raw_text.strip().splitlines()
