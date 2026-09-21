@@ -139,6 +139,35 @@ def test_contract_lock_runsh():
         runsh.write_text(orig, encoding="utf-8")
 
 
+def test_claude_md_matches_registry():
+    # W5: CLAUDE.md "Test forms" must name every stack in the run.sh registry
+    # (extension + a runner word). A new registry line without a CLAUDE.md edit
+    # drops this test.
+    import re
+    runsh = (REPO_ROOT / "scripts" / "run.sh").read_text(encoding="utf-8")
+    m = re.search(r"STACKS='(.*?)'", runsh, re.S)
+    assert m, "STACKS registry not found in scripts/run.sh"
+    stacks = [ln for ln in m.group(1).splitlines() if ln.strip()]
+    assert stacks, "empty STACKS registry"
+    claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    tf = re.search(r"## Test forms.*?(?=\n## |\Z)", claude, re.S)
+    assert tf, "CLAUDE.md missing '## Test forms' section"
+    tf_text = tf.group(0)
+    stop = {"uv", "run", "python3", "bash", "sh", "timeout", "m", "no", "project", "q", "p", "o"}
+    for ln in stacks:
+        fields = ln.split("|")
+        assert len(fields) >= 4, f"malformed registry line: {ln!r}"
+        ext, test_runner = fields[0], fields[3]
+        # (a) the extension must be a named stack label in Test forms
+        assert re.search(r"\*\*" + re.escape(ext) + r"\*\*", tf_text), \
+            f"CLAUDE.md Test forms missing stack label **{ext}** (registry line: {ln!r})"
+        # (b) a runner word from the registry's test-runner must appear in Test forms
+        runner_tokens = {t for t in re.findall(r"[A-Za-z][A-Za-z0-9]*", test_runner) if t not in stop}
+        tf_tokens = {t for t in re.findall(r"[A-Za-z][A-Za-z0-9]*", tf_text)}
+        assert runner_tokens & tf_tokens, \
+            f"CLAUDE.md Test forms names no runner word for **{ext}** (runner: {test_runner!r})"
+
+
 # --- 12-16: mock runner launches --------------------------------------------
 
 def test_runner_label_guard(tmp_path):
