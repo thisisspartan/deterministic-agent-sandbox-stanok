@@ -56,7 +56,8 @@ test pass — that is the same violation as weakening an assertion in `tests/`.
 explicitly asks you to bootstrap it): write it, appropriate to the language the existing
 code already uses. It must implement exactly the three subcommands above and a STACK
 REGISTRY. The test framework is fixed by that registry — **py** runs `pytest`, **js** runs
-`node --test` (see "Test forms"); you do not pick `go test`/`cargo test`/etc.
+`node --test`, **jq** validates `.json` files (see "Test forms"); you do not pick
+`go test`/`cargo test`/etc.
 
 ## Test forms (fixed by the registry, not your choice)
 
@@ -64,16 +65,16 @@ The test framework is chosen by the `scripts/run.sh` STACK REGISTRY, not by you:
 - **py** — pytest functions `def test_*` in `tests/**/*_test.py`; import the module as
   `from src import x` or bare `import x` (`src` is on `sys.path` via `pythonpath=src`).
 - **js** — `node:test` functions in `tests/**/*.test.js` (run via `node --test`).
-- **jq** — not a test stack: the registry line exists only so the image
-  preflight probes `jq` availability at launch (rc=25 if missing). There are
-  no jq tests; `run.sh test`/`smoke` do not accept `.json` paths.
+- **jq** — JSON validation stack: `tests/**/*.json` files are validated with
+  `jq empty` (exit 0 = well-formed JSON). `run.sh test`/`smoke` accept `.json`
+  paths; the image preflight probes `jq` availability at launch (rc=25 if missing).
 A bare module-level `assert` is NOT a test (the verifier sees rc=5 "no tests ran").
 Do not introduce another framework (`go test`, `cargo test`, ...): the registry does not run it.
 
 ## `run.sh` rc table (W12)
 
 run.sh's own codes are disjoint from every runner's codes (pytest 0-5,
-node --test 0/1):
+node --test 0/1, jq 0/5):
 
 | rc | meaning |
 |----|---------|
@@ -83,7 +84,7 @@ node --test 0/1):
 | 6  | ENV-FAIL: runner unavailable in the environment (not a red test) |
 | 7  | SECURITY: symlink in path, or path escapes tests/ / src/ |
 | 124 | timeout (test 60s, smoke 10s) |
-| 3,4,5 | pytest's own codes, passed through (5 = no tests ran) |
+| 3,4,5 | pytest's own codes, passed through (5 = no tests ran; jq's parse error also exits 5) |
 
 `list` fails closed (rc=1) when `tests/` contains a test-like file (basename
 contains "test", case-insensitive; `fixtures/`, `data/` and `__pycache__/`

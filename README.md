@@ -35,9 +35,10 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 # `run` is optional: `./launch.sh <ticket.md> <label> ...` is equivalent.
 # The ticket is resolved against three bases (project root -> machine root -> as given),
 # so the canonical call from the project root is: `./stanok/launch.sh tickets/x.md <label>`.
-# The shim cd's into the project root itself: the call works from any cwd; --background with
-# a nonexistent ticket fails immediately (rc=13) instead of spawning a dead detach.
-./launch.sh status <label>      # JSON: running/done/interrupted/missing
+# The shim cd's into the machine root (the directory containing launch.sh):
+# the call works from any cwd; --background with a nonexistent ticket fails
+# immediately (rc=13) instead of spawning a dead detach.
+./launch.sh status <label>      # JSON: running/dead/done/missing
 ./launch.sh stop <label>        # interrupt the run (TERM by pid from .running)
 ```
 

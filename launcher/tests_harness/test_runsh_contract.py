@@ -1,10 +1,10 @@
-"""run.sh contract suite — 26 hermetic cases against the REAL scripts/run.sh.
+"""run.sh contract suite — hermetic cases against the REAL scripts/run.sh.
 
 Copies the live run.sh into a tmpdir repo (scripts/ + tests/ + src/) and
 pins the fixed contract:
   - strict charset on test/smoke args (rc=2 on shape violations),
   - SEC-01 realpath containment in tests/ (no symlink in any component,
-    no traversal escape — rc=1),
+    no traversal escape — rc=7),
   - timeouts (smoke: 10s kill -> rc=124),
   - `list`: a single globally sorted, unique stream (sort -u semantics),
   - rc=2 on unknown extensions and wrong argument counts.
@@ -13,58 +13,11 @@ Run: .venv/bin/python -m pytest launcher/tests_harness/test_runsh_contract.py -q
 """
 
 import os
-import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
 
-import pytest
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-RUNSH = REPO_ROOT / "scripts" / "run.sh"
-
-JS_PASS = (
-    "const test = require('node:test');\n"
-    "const assert = require('node:assert');\n"
-    "test('ok', () => { assert.ok(1); });\n"
-)
-JS_FAIL = (
-    "const test = require('node:test');\n"
-    "const assert = require('node:assert');\n"
-    "test('bad', () => { assert.strictEqual(1, 2); });\n"
-)
-# pytest-style: the py test-runner is `uv run --no-project pytest -q`, so a
-# bare module-level assert would give rc=5 ("no tests ran") even when true.
-PY_PASS = "def test_ok():\n    assert 1 == 1\n"
-PY_FAIL = "def test_bad():\n    assert 1 == 2\n"
-
-
-@pytest.fixture
-def repo(tmp_path):
-    (tmp_path / "scripts").mkdir()
-    shutil.copy(RUNSH, tmp_path / "scripts" / "run.sh")
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "src").mkdir()
-    return tmp_path
-
-
-def run(repo, *args, timeout=90):
-    # The py stack's runner is `uv run --no-project pytest ...`: uv resolves
-    # the environment via VIRTUAL_ENV first. Point it at the venv that runs
-    # this suite (it carries pytest; the host system python may not).
-    env = dict(os.environ)
-    env["VIRTUAL_ENV"] = os.path.dirname(os.path.dirname(sys.executable))
-    return subprocess.run(
-        ["bash", "scripts/run.sh", *args],
-        cwd=repo, env=env, capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def write(path, body):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-    return path
+from conftest import JS_FAIL, JS_PASS, PY_FAIL, PY_PASS, repo, run, write
 
 
 # --- list (5) ---------------------------------------------------------------
@@ -224,6 +177,27 @@ def test_smoke_multiple_args(repo):
     write(repo / "src" / "b.js", "console.log(2);\n")
     p = run(repo, "smoke", "src/a.js", "src/b.js")
     assert p.returncode == 2
+
+
+# --- jq stack (JSON validation) ---------------------------------------------
+
+def test_test_json_valid_passes(repo):
+    # The jq registry line is a real validation stack: `jq empty` exits 0
+    # on well-formed JSON (the preflight `command -v jq` runs via sh -c).
+    write(repo / "tests" / "data_test.json", '{"a": 1}\n')
+    p = run(repo, "test", "tests/data_test.json")
+    assert p.returncode == 0
+    assert "=== tests/data_test.json ===" in p.stdout
+
+
+def test_test_json_invalid_fails(repo):
+    # Malformed JSON: jq exits 5 (parse error). 5 is not in run.sh's own
+    # namespace (0/1/2/6/7/124), so it passes through unremapped — the same
+    # class as pytest's 5 ("no tests ran"): the test did not pass.
+    write(repo / "tests" / "bad_test.json", '{a: 1}\n')
+    p = run(repo, "test", "tests/bad_test.json")
+    assert p.returncode == 5
+    assert "parse error" in p.stderr
 
 
 # --- W12: unregistered test-like files in `list` ---------------------------

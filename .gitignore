@@ -7,10 +7,9 @@ evidence/
 __pycache__/
 # R4: CLI staging dir prepared by setup.sh before `docker build` (not source)
 .build-context/
-# native-sandbox stub targets, pre-created by sandbox-run.sh (create-if-missing).
-# They must exist so the inner bwrap binds in place instead of creating the
-# mountpoint on the read-only repo. Empty dirs (.vscode/, .idea/,
-# .claude/{skills,commands,agents}) are invisible to git and need no entry.
+# Environment dotfiles that must never be tracked: per-machine state, not
+# repo content (a bind-mounted home or a stray editor dir must not leak
+# into the tree the machine works in).
 /.gitconfig
 /.gitmodules
 /.bashrc

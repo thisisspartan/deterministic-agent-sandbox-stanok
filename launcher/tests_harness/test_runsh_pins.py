@@ -16,37 +16,8 @@ Run: .venv/bin/python -m pytest launcher/tests_harness/test_runsh_pins.py -q
 """
 
 import shutil
-import subprocess
-from pathlib import Path
 
-import pytest
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-RUNSH = REPO_ROOT / "scripts" / "run.sh"
-
-PY_PASS = "def test_ok():\n    assert 1 == 1\n"
-
-
-@pytest.fixture
-def repo(tmp_path):
-    (tmp_path / "scripts").mkdir()
-    shutil.copy(RUNSH, tmp_path / "scripts" / "run.sh")
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "src").mkdir()
-    return tmp_path
-
-
-def run(repo, *args, timeout=90):
-    return subprocess.run(
-        ["bash", "scripts/run.sh", *args],
-        cwd=repo, capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def write(path, body):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-    return path
+from conftest import PY_PASS, repo, run, write
 
 
 # --- M1: smoke strictly from src/ ------------------------------------------

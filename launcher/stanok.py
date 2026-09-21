@@ -6,7 +6,7 @@ Full integration with the L1 Supervisor:
   2. Strict summary.json contract (probe_result, c5, review_verdict, errors) for L1.
   3. Adaptive Contract Lock: adaptation for creating tests from scratch and a ban on weakening assertions.
   4. Cumulative Token & Cache Telemetry: exact session_hit_rate calculation.
-  5. Shielded Turn Watchdog: the turn timeout (default 1200s) is a terminal DoS
+  5. Shielded Turn Watchdog: the turn timeout (default 1800s) is a terminal DoS
      circuit breaker — asyncio.shield() keeps the turn task alive past wait_for,
      so client.interrupt() runs cleanly and summary.json is written with the
      TURN-TIMEOUT code (rc=1) without the process dying on CancelledError.
@@ -124,6 +124,23 @@ def _write_stream_msg(file_obj, turn: int, msg) -> None:
 
 def label_paths(label: str) -> tuple[str, str]:
     return (os.path.join(REPO_ROOT, "evidence", label), os.path.join(LOG_DIR, label))
+
+
+def _rotate_stale_summary(label: str) -> None:
+    """Rotate a stale summary.json left by an EARLIER run of the same label
+    (a run aborted at a gate after writing its report, or a killed process).
+    Without rotation, early_abort's write-if-absent guard would keep the OLD
+    report and the supervisor would read a verdict from the previous run.
+    Only rotate when no `.running` marker is present: a live run's evidence
+    must not be touched."""
+    evidence_dir, _ = label_paths(label)
+    marker = os.path.join(evidence_dir, ".running")
+    sum_path = os.path.join(evidence_dir, "summary.json")
+    if os.path.isfile(sum_path) and not os.path.exists(marker):
+        try:
+            os.replace(sum_path, sum_path + ".prev")
+        except OSError:
+            pass
 
 
 # ==================================================================================
@@ -379,10 +396,14 @@ def _validate_declared_path(rel: str) -> bool:
     """Literal `files:` paths are ticket-supplied input: prepare_workspace's
     quarantine shutil.move()s them, so an unvalidated path (e.g. `impl:
     /etc/passwd`) could destroy arbitrary host files. Fail-closed: relative,
-    no `..` segments, top-level dir inside the writable zones."""
+    no `..` segments, top-level dir inside the writable zones, and a FILE
+    path — a bare zone name (`src`, `tests/`) is not a file and must not
+    be quarantined (it would move the whole zone out of the tree)."""
     if rel.startswith("/") or rel.startswith("./"):
         return False
     if ".." in rel.split("/"):
+        return False
+    if rel.rstrip("/") in _DECLARED_ZONES:
         return False
     return rel.split("/", 1)[0] in _DECLARED_ZONES
 
@@ -422,8 +443,7 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], bool]:
 def prepare_workspace(declared_paths: list[str]) -> int:
     # SEC-01: .git is read-only inside the container — NO git writes here.
     # The cleanliness gate is dirty_tree_gate() (single source, called by main()
-    # rc=22 and by launch.sh via `check-dirty`). This function only prepares the
-    # writable workspace.
+    # rc=22). This function only prepares the writable workspace.
     try:
         for d in ("src", "tests", "docs", "scripts"):
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
@@ -547,9 +567,21 @@ def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tup
         return (False, [("(no tests)", f"run.sh list failed: {e}")], False)
     tests = [ln.strip() for ln in (lp.stdout or "").splitlines() if ln.strip()]
     if not tests:
+        if lp.returncode != 0:
+            # `list` failed and printed no tests (no tests/ dir, or only
+            # unclaimed files): the reason is on stderr — surface it instead
+            # of the generic "no tests" message.
+            failures.append(("(list)", _extract_smart_diff(lp.stderr)))
+            return (False, failures, False)
         if failures:
             return (False, failures, False)
         return (False, [("(no tests)", "The project runner declares no tests")], False)
+    if lp.returncode != 0:
+        # W12: `list` fails closed (rc=1) on an unclaimed test-like file while
+        # still printing the claimed tests on stdout. The unrun test must not
+        # pass the gate silently: record the listing failure, then still run
+        # the claimed tests (their failures add signal to the fix prompt).
+        failures.append(("(list)", _extract_smart_diff(lp.stderr)))
 
     with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
         futures = {ex.submit(_run_one_test, t): t for t in tests}
@@ -616,6 +648,30 @@ def _check_contract_lock(before: dict[str, str], job: dict, turn: int,
         log(f"  [CONTRACT-LOCK] turn {turn}: {violations}")
 
 
+def _contract_lock_forced_fail(job: dict, turn: int) -> int | None:
+    """Fail-closed on contract_lock violations (W2.5 + P2): a non-empty
+    cumulative violations list means the machine MODIFIED/DELETED a
+    pre-existing protected file (tests/, scripts/run.sh) after the manifest
+    snapshot — a verify_gate PASS was computed against tampered tests and is
+    not a PASS. No retry: the list is cumulative and can never be cleared
+    inside the session, so a fix prompt cannot succeed; the supervisor
+    relaunches with a refined ticket. Returns the run rc (1) or None when
+    clean."""
+    violations = job.get("contract_lock_violations") or []
+    if not violations:
+        return None
+    job["verifier"] = "FAIL"
+    job["error"] = ("CONTRACT-LOCK: the machine modified or deleted protected "
+                   "files (tests/, scripts/run.sh) after the manifest snapshot "
+                   "— the verdict was computed against tampered tests")
+    job.setdefault("failures", []).extend(
+        ("(contract_lock)", v) for v in violations
+    )
+    job["turns"] = turn
+    log("CONTRACT-LOCK: fail-closed (no retry — violations are cumulative)")
+    return 1
+
+
 # ==================================================================================
 # Inference environment (Prefix Invariance)
 # ==================================================================================
@@ -663,8 +719,8 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, local_run_id: str) -> tuple[dict, dict, int, str]:
-    """Returns (turn_total, live_window, writes).
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> tuple[dict, dict, int, str]:
+    """Returns (turn_total, live_window, writes, turn_error).
 
     turn_total  — ResultMessage.usage: cumulative across the turn's API calls
                   (for session totals).
@@ -672,6 +728,8 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
                   on the final API call (the true context window, for CONTEXT-ROT).
     writes      — count of Write/Edit tool_use blocks in the turn (NO-OP assert,
                   W2.4; immune to test side effects, unlike a file manifest).
+    turn_error  — "" on a clean turn; otherwise the API/max-turns error string
+                  (CLI_MAX_TURNS_EXCEEDED or the ResultMessage error detail).
     """
     from claude_agent_sdk import ResultMessage
 
@@ -705,13 +763,6 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
             subtype = getattr(msg, "subtype", None)
             errors = getattr(msg, "errors", None)
             terminal_reason = getattr(msg, "terminal_reason", None)
-            data = getattr(msg, "data", None)
-            if isinstance(data, dict):
-                is_err = is_err or data.get("is_error")
-                res = res or data.get("result")
-                subtype = subtype or data.get("subtype")
-                errors = errors or data.get("errors")
-                terminal_reason = terminal_reason or data.get("terminal_reason")
             if is_err:
                 if subtype == "error_max_turns" or terminal_reason == "max_turns":
                     turn_error = "CLI_MAX_TURNS_EXCEEDED: agent reached max-turns ceiling"
@@ -775,13 +826,29 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
+        # Read into a shared list: a cancelled wait_for discards the read
+        # task's LOCAL state (a communicate() that was cancelled had already
+        # consumed the pre-kill bytes into its own locals — they were lost).
+        # Chunks delivered before the deadline survive in `chunks` (bug 6:
+        # the timeout message must show what the test printed before it hung).
+        chunks: list[bytes] = []
+
+        async def _drain() -> None:
+            while True:
+                c = await proc.stdout.read(65536)
+                if not c:
+                    break
+                chunks.append(c)
+
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=_HOOK_TEST_TIMEOUT_S)
+            await asyncio.wait_for(_drain(), timeout=_HOOK_TEST_TIMEOUT_S)
+            await proc.wait()  # pipe EOF can arrive before the exit status
             rc = proc.returncode
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.communicate()
-            rc, out = 124, b""
+            await _drain()
+            rc = 124
+        out = b"".join(chunks)
         # rc=0: GREEN (implementation exists) — stay silent.
         # rc=2: runner refused the path (not a test in its terms) — not our concern.
         # rc=6: ENV-FAIL (runner unavailable in the image) — an environment
@@ -862,7 +929,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
                 t0 = time.time()
                 turn_task = asyncio.create_task(
-                    _execute_turn(client, current_prompt, turn, stream_f, job, local_run_id)
+                    _execute_turn(client, current_prompt, turn, stream_f, job)
                 )
 
                 try:
@@ -989,6 +1056,14 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     job["turns"] = turn
                     return 16
 
+                # Fail-closed on contract_lock (W2.5 + P2): a PASS computed
+                # against tampered tests is not a PASS. Checked after env_fail
+                # (an unavailable runner is an infrastructure defect, rc=16,
+                # and takes precedence over a ticket defect).
+                forced = _contract_lock_forced_fail(job, turn)
+                if forced is not None:
+                    return forced
+
                 if verify_ok:
                     # NO-OP assert (W2.4): a turn-1 pass with zero Write/Edit
                     # tool_use means the machine did no work — the artifacts
@@ -1010,8 +1085,15 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
                 if turn < max_turns:
                     has_no_tests = any(name == "(no tests)" for name, _ in failures)
+                    has_list_fail = any(name == "(list)" for name, _ in failures)
 
-                    if has_no_tests:
+                    if has_list_fail:
+                        rules = (
+                            "1. The project runner's `list` command failed: tests/ contains a test-like file that no registry line in scripts/run.sh claims.\n"
+                            "2. Delete the unclaimed file or move it to tests/fixtures/ (or tests/data/). It is CATEGORICALLY FORBIDDEN to add a registry line to scripts/run.sh to claim it, and to weaken or modify the tests in tests/.\n"
+                            "3. Then re-check with `bash scripts/run.sh list` — it must exit 0."
+                        )
+                    elif has_no_tests:
                         rules = (
                             "1. There are no test files in the tests/ directory! Create the reference tests strictly per the ticket specification.\n"
                             "2. Then implement the corresponding working module code in the src/ directory."
@@ -1507,18 +1589,8 @@ def main() -> int:
     st = sub.add_parser("stop")
     st.add_argument("label")
 
-    # Single-source cleanliness gate for launch.sh (host side). Exit 22 on a
-    # dirty REPO_ROOT, 0 when clean — no side effects.
-    sub.add_parser("check-dirty")
-
     args = p.parse_args()
 
-    if args.cmd == "check-dirty":
-        if hidden_files_gate():
-            return 26
-        if test_config_gate():
-            return 27
-        return 22 if dirty_tree_gate() else 0
     if args.cmd == "status":
         return cmd_status(args.label)
     if args.cmd == "stop":
@@ -1553,6 +1625,11 @@ def main() -> int:
 
         if validate_label(args.label):
             return early_abort(15, f"ERROR: Invalid label {args.label}")
+
+        # A stale summary.json from an earlier run of this label must not
+        # survive: early_abort writes only when the file is absent, so the
+        # supervisor could otherwise read a verdict from the previous run.
+        _rotate_stale_summary(args.label)
 
         # ROLE-LEAK (rc=24): a parent CLAUDE.md above the repo would be auto-loaded
         # into the machine session (cwd = REPO_ROOT) -> role leak. Fail-closed before

@@ -20,16 +20,10 @@ Run: .venv/bin/python -m pytest launcher/tests_harness/test_runsh_runner_pins.py
 """
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-RUNSH = REPO_ROOT / "scripts" / "run.sh"
-
-PY_PASS = "def test_ok():\n    assert 1 == 1\n"
+from conftest import PY_PASS
 
 # The shims log their argv + fd 0 to $LOG, then exec the real command.
 TIMEOUT_SHIM = (
@@ -53,21 +47,17 @@ UV_FAIL_VERSION = (
 )
 
 
-def build(tmp_path: Path, py_body: str) -> Path:
+def build(repo: Path, py_body: str) -> Path:
     """A hermetic repo: live run.sh + fake uv/timeout shims on PATH."""
-    (tmp_path / "scripts").mkdir()
-    shutil.copy(RUNSH, tmp_path / "scripts" / "run.sh")
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "src").mkdir()
-    (tmp_path / "bin").mkdir()
-    (tmp_path / "bin" / "timeout").write_text(TIMEOUT_SHIM, encoding="utf-8")
-    (tmp_path / "bin" / "uv").write_text(py_body, encoding="utf-8")
+    (repo / "bin").mkdir()
+    (repo / "bin" / "timeout").write_text(TIMEOUT_SHIM, encoding="utf-8")
+    (repo / "bin" / "uv").write_text(py_body, encoding="utf-8")
     for p in ("bin/timeout", "bin/uv"):
-        (tmp_path / p).chmod(0o755)
-    (tmp_path / "tests" / "a_test.py").write_text(PY_PASS, encoding="utf-8")
-    (tmp_path / "tests" / "b_test.py").write_text(PY_PASS, encoding="utf-8")
-    (tmp_path / "src" / "a.py").write_text("print('ok')\n", encoding="utf-8")
-    return tmp_path
+        (repo / p).chmod(0o755)
+    (repo / "tests" / "a_test.py").write_text(PY_PASS, encoding="utf-8")
+    (repo / "tests" / "b_test.py").write_text(PY_PASS, encoding="utf-8")
+    (repo / "src" / "a.py").write_text("print('ok')\n", encoding="utf-8")
+    return repo
 
 
 def run_sh(repo: Path, log: Path, *args: str, timeout: int = 90) -> subprocess.CompletedProcess:
@@ -85,9 +75,9 @@ def run_sh(repo: Path, log: Path, *args: str, timeout: int = 90) -> subprocess.C
 
 # --- R1: test keeps the 60s timeout and stdin </dev/null ---------------------
 
-def test_r1_test_timeout_60_and_stdin_dev_null(tmp_path):
-    repo = build(tmp_path, UV_OK)
-    log = tmp_path / "log.txt"
+def test_r1_test_timeout_60_and_stdin_dev_null(repo):
+    repo = build(repo, UV_OK)
+    log = repo / "log.txt"
     p = run_sh(repo, log, "test", "tests/a_test.py")
     assert p.returncode == 0
     lines = log.read_text(encoding="utf-8").splitlines()
@@ -99,9 +89,9 @@ def test_r1_test_timeout_60_and_stdin_dev_null(tmp_path):
 
 # --- R2: smoke keeps the 10s timeout and stdin </dev/null --------------------
 
-def test_r2_smoke_timeout_10_and_stdin_dev_null(tmp_path):
-    repo = build(tmp_path, UV_OK)
-    log = tmp_path / "log.txt"
+def test_r2_smoke_timeout_10_and_stdin_dev_null(repo):
+    repo = build(repo, UV_OK)
+    log = repo / "log.txt"
     p = run_sh(repo, log, "smoke", "src/a.py")
     assert p.returncode == 0
     lines = log.read_text(encoding="utf-8").splitlines()
@@ -113,9 +103,9 @@ def test_r2_smoke_timeout_10_and_stdin_dev_null(tmp_path):
 
 # --- R3: test runs all args on partial failure (no early exit) ---------------
 
-def test_r3_test_runs_all_args_on_partial_failure(tmp_path):
-    repo = build(tmp_path, UV_FAIL_A)
-    log = tmp_path / "log.txt"
+def test_r3_test_runs_all_args_on_partial_failure(repo):
+    repo = build(repo, UV_FAIL_A)
+    log = repo / "log.txt"
     p = run_sh(repo, log, "test", "tests/a_test.py", "tests/b_test.py")
     assert p.returncode != 0
     lines = log.read_text(encoding="utf-8").splitlines()
@@ -125,9 +115,9 @@ def test_r3_test_runs_all_args_on_partial_failure(tmp_path):
 
 # --- R4: ENV-FAIL — an unavailable runner exits 6, not a red test ------------
 
-def test_r4_env_fail_unavailable_runner_rc6(tmp_path):
-    repo = build(tmp_path, UV_FAIL_VERSION)
-    log = tmp_path / "log.txt"
+def test_r4_env_fail_unavailable_runner_rc6(repo):
+    repo = build(repo, UV_FAIL_VERSION)
+    log = repo / "log.txt"
     p = run_sh(repo, log, "test", "tests/a_test.py")
     assert p.returncode == 6
     assert "ENV-FAIL" in p.stderr
