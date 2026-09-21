@@ -1,4 +1,4 @@
-"""run.sh contract suite — 20 hermetic cases against the REAL scripts/run.sh.
+"""run.sh contract suite — 26 hermetic cases against the REAL scripts/run.sh.
 
 Copies the live run.sh into a tmpdir repo (scripts/ + tests/ + src/) and
 pins the fixed contract:
@@ -256,6 +256,17 @@ def test_list_fixture_dir_exempt(repo):
     write(repo / "tests" / "ok_test.py", PY_PASS)
     write(repo / "tests" / "fixtures" / "test_vectors.txt", "1 2 3\n")
     write(repo / "tests" / "data" / "test_samples.txt", "a b c\n")
+    p = run(repo, "list")
+    assert p.returncode == 0
+    assert p.stdout.splitlines() == ["tests/ok_test.py"]
+
+
+def test_list_pycache_dir_exempt(repo):
+    # A .pyc cache artifact under tests/__pycache__/ is not a test: the W12
+    # unregistered-test-like check must not fire on it (w12-verify: the
+    # verifier's pytest run regenerated the .pyc and `list` went red).
+    write(repo / "tests" / "ok_test.py", PY_PASS)
+    write(repo / "tests" / "__pycache__" / "ok_test.cpython-311-pytest-8.3.3.pyc", "x")
     p = run(repo, "list")
     assert p.returncode == 0
     assert p.stdout.splitlines() == ["tests/ok_test.py"]

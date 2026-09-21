@@ -86,8 +86,9 @@ node --test 0/1):
 | 3,4,5 | pytest's own codes, passed through (5 = no tests ran) |
 
 `list` fails closed (rc=1) when `tests/` contains a test-like file (basename
-contains "test", case-insensitive; `fixtures/` and `data/` dirs exempt) that
-no registry line claims — an unrun test must never pass the gate silently.
+contains "test", case-insensitive; `fixtures/`, `data/` and `__pycache__/`
+dirs exempt) that no registry line claims — an unrun test must never pass
+the gate silently.
 
 ## TDD discipline (Red -> Green)
 

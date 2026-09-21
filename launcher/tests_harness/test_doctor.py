@@ -141,6 +141,24 @@ def test_contract_lock_runsh():
         runsh.write_text(orig, encoding="utf-8")
 
 
+def test_manifest_skips_pycache():
+    # w12-verify: .pyc cache artifacts must not enter the contract_lock
+    # manifest — a routine `rm -rf __pycache__` is not a DELETED violation.
+    sys.path.insert(0, str(REPO_ROOT / "launcher"))
+    import stanok
+    pycache = REPO_ROOT / "tests" / "__pycache__"
+    pycache.mkdir(exist_ok=True)
+    probe = pycache / "probe_test.cpython-311.pyc"
+    probe.write_bytes(b"probe")
+    try:
+        manifest = stanok._tests_manifest()
+        assert not any("__pycache__" in k for k in manifest), \
+            f"__pycache__ leaked into the manifest: " \
+            f"{sorted(k for k in manifest if '__pycache__' in k)}"
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 def test_claude_md_matches_registry():
     # W5: CLAUDE.md "Test forms" must name every stack in the run.sh registry
     # (extension + a runner word). A new registry line without a CLAUDE.md edit

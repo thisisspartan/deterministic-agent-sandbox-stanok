@@ -45,13 +45,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_ROOT"
 
-# py runner: `uv run --no-project pytest ...` — uv resolves the environment
-# itself (host: the repo's .venv; image: the system python,
-# UV_SYSTEM_PYTHON=1 + UV_PYTHON_PREFERENCE=only-system). --no-project keeps
-# uv from hunting for a pyproject.toml; -p no:cacheprovider keeps pytest from
-# writing .pytest_cache into the read-only repo root.
+# py runner: `env PYTHONDONTWRITEBYTECODE=1 uv run --no-project pytest ...` —
+# uv resolves the environment itself (host: the repo's .venv; image: the
+# system python, UV_SYSTEM_PYTHON=1 + UV_PYTHON_PREFERENCE=only-system).
+# --no-project keeps uv from hunting for a pyproject.toml; -p no:cacheprovider
+# keeps pytest from writing .pytest_cache into the read-only repo root;
+# PYTHONDONTWRITEBYTECODE=1 keeps CPython from writing __pycache__/*.pyc into
+# the repo (cache artifacts must not reach the W12 `list` check or the
+# contract_lock manifest — the env prefix goes through `env` because
+# `timeout` cannot parse a VAR=value word itself).
 STACKS='js|*.test.js|[A-Za-z0-9_-]+\.test\.js|node --test --test-force-exit|node|node --version
-py|*_test.py|[A-Za-z0-9_-]+_test\.py|uv run --no-project python3 -m pytest -q -p no:cacheprovider -o pythonpath=src|uv run --no-project python3|uv run --no-project python3 -m pytest --version
+py|*_test.py|[A-Za-z0-9_-]+_test\.py|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest -q -p no:cacheprovider -o pythonpath=src|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest --version
 jq|*.json|[A-Za-z0-9_-]+\.json|jq empty|jq empty|command -v jq'
 
 # Generate the usage alternatives from the registry (single source).
@@ -187,14 +191,17 @@ case "$cmd" in
     # registry line claims (the reviewer's case: a failing calc_test.go next
     # to ok_test.py — old `list` did not show it, verify_gate = PASS).
     # Rule (owner-delegated, W12): a file under tests/ is test-like when its
-    # basename contains "test" (case-insensitive); fixture/data directories
-    # (basename "fixtures" or "data") are exempt. Any unclaimed test-like
-    # file fails the listing (rc=1) so the external verifier goes red, not silent.
+    # basename contains "test" (case-insensitive); fixture/data/cache
+    # directories (basename "fixtures", "data" or "__pycache__") are exempt —
+    # a .pyc cache artifact is not a test (w12-verify: the verifier's pytest
+    # run regenerated tests/__pycache__/*.pyc and `list` went red). Any
+    # unclaimed test-like file fails the listing (rc=1) so the external
+    # verifier goes red, not silent.
     unclaimed="$(
       find tests -type f | while IFS= read -r f; do
         base="${f##*/}"
         dir="${f%/*}"
-        [[ "${dir##*/}" == "fixtures" || "${dir##*/}" == "data" ]] && continue
+        [[ "${dir##*/}" == "fixtures" || "${dir##*/}" == "data" || "${dir##*/}" == "__pycache__" ]] && continue
         low="$(printf '%s' "$base" | tr 'A-Z' 'a-z')"
         case "$low" in *test*) ;; *) continue ;; esac
         claimed=0
