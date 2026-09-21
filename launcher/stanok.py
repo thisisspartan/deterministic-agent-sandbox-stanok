@@ -187,6 +187,31 @@ def hidden_files_gate() -> bool:
     return False
 
 
+def test_config_gate() -> bool:
+    # W6 verdict-subversion gate (owner decision A, fail-closed): reject a
+    # launch if tests/ holds a pytest config file (conftest.py / pytest.ini /
+    # tox.ini / setup.cfg / pyproject.toml) at any depth. A conftest.py with
+    # `pytest_sessionfinish: session.exitstatus = 0` turns a failing test into
+    # rc=0; tests/ is writable and contract_lock only hashes files that
+    # existed at start, so such a file can appear mid-project. pytest picks up
+    # conftest.py from every directory on the test file's path, hence the
+    # recursive walk.
+    tests_dir = os.path.join(REPO_ROOT, "tests")
+    if not os.path.isdir(tests_dir):
+        return False
+    forbidden = ("conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")
+    try:
+        for dirpath, _dirnames, filenames in os.walk(tests_dir):
+            for name in filenames:
+                if name in forbidden:
+                    log(f"TEST-CONFIG: {os.path.join(dirpath, name)}")
+                    return True
+    except OSError:
+        log("WARN: walk failed in test_config_gate — fail-closed (treating as flagged)")
+        return True
+    return False
+
+
 def _required_context_window() -> int | None:
     """Required context window: env STANOK_REQUIRED_WINDOW overrides
     CLAUDE_CODE_AUTO_COMPACT_WINDOW from .claude/settings.stanok.json."""
@@ -1450,6 +1475,8 @@ def main() -> int:
     if args.cmd == "check-dirty":
         if hidden_files_gate():
             return 26
+        if test_config_gate():
+            return 27
         return 22 if dirty_tree_gate() else 0
     if args.cmd == "status":
         return cmd_status(args.label)
@@ -1504,6 +1531,11 @@ def main() -> int:
         # leak into the machine's context and slip past dirty_tree_gate.
         if hidden_files_gate():
             return early_abort(26, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
+
+        # W6 verdict-subversion gate (rc=27): pytest config files under tests/
+        # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
+        if test_config_gate():
+            return early_abort(27, "ERROR: pytest config files in tests/ (rc=27)")
 
         # R2: launch orchestration (the former launch.sh branches, in Python).
         in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"

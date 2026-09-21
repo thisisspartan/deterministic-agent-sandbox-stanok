@@ -32,6 +32,11 @@ The ticket is self-contained — everything needed is described in the first mes
    `tests/`, `docs/`, or `scripts/`), and must be deleted before you finish. Hidden
    dotfiles and files carrying a `TEMP:` marker in `src/ tests/ docs/ scripts/` are
    rejected at launch (rc=26) — they leak into your own context on the next run.
+7. Do NOT create `conftest.py`, `pytest.ini`, `tox.ini`, `setup.cfg`, or
+   `pyproject.toml` anywhere under `tests/` — they can subvert the verdict
+   (e.g. a `conftest.py` with `pytest_sessionfinish` forcing `exitstatus = 0`
+   turns a failing test into rc=0). Launch is rejected (rc=27). Define
+   fixtures inside the test file itself.
 
 ## Project entrypoint: `scripts/run.sh`
 
