@@ -28,6 +28,15 @@ The ticket is self-contained — everything needed is described in the first mes
 5. Match the project's EXISTING stack. Look at what's already in `src/`, `tests/`, and
    `scripts/run.sh` before writing anything. Do not introduce a second language or test
    framework into a project that already has one, even if you would personally prefer it.
+6. Any scratch/temporary file you create goes ONLY under `$TMPDIR` (never in `src/`,
+   `tests/`, `docs/`, or `scripts/`), and must be deleted before you finish. Hidden
+   dotfiles and files carrying a `TEMP:` marker in `src/ tests/ docs/ scripts/` are
+   rejected at launch (rc=26) — they leak into your own context on the next run.
+7. Do NOT create `conftest.py`, `pytest.ini`, `tox.ini`, `setup.cfg`, or
+   `pyproject.toml` anywhere under `tests/` — they can subvert the verdict
+   (e.g. a `conftest.py` with `pytest_sessionfinish` forcing `exitstatus = 0`
+   turns a failing test into rc=0). Launch is rejected (rc=27). Define
+   fixtures inside the test file itself.
 
 ## Project entrypoint: `scripts/run.sh`
 
@@ -44,11 +53,19 @@ scripts/run.sh smoke <path>      # sanity-load one module; exit 0 = clean
 test pass — that is the same violation as weakening an assertion in `tests/`.
 
 **If `scripts/run.sh` does not exist yet** (first ticket in a new project, or a ticket that
-explicitly asks you to bootstrap it): write it, appropriate to whatever language/framework
-the ticket specifies or the existing code already uses. It must implement exactly the three
-subcommands above and nothing else is required of it — how it runs tests internally
-(`pytest`, `node --test`, `go test`, `cargo test`, ...) is entirely your choice, driven by
-the project, not by this file.
+explicitly asks you to bootstrap it): write it, appropriate to the language the existing
+code already uses. It must implement exactly the three subcommands above and a STACK
+REGISTRY. The test framework is fixed by that registry — **py** runs `pytest`, **js** runs
+`node --test` (see "Test forms"); you do not pick `go test`/`cargo test`/etc.
+
+## Test forms (fixed by the registry, not your choice)
+
+The test framework is chosen by the `scripts/run.sh` STACK REGISTRY, not by you:
+- **py** — pytest functions `def test_*` in `tests/**/*_test.py`; import the module as
+  `from src import x` or bare `import x` (`src` is on `sys.path` via `pythonpath=src`).
+- **js** — `node:test` functions in `tests/**/*.test.js` (run via `node --test`).
+A bare module-level `assert` is NOT a test (the verifier sees rc=5 "no tests ran").
+Do not introduce another framework (`go test`, `cargo test`, ...): the registry does not run it.
 
 ## TDD discipline (Red -> Green)
 

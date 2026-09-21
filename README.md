@@ -24,7 +24,8 @@ pluggable git submodule for any project.
 
 ```bash
 ./setup.sh                                   # .venv + claude-agent-sdk + CLI staging + docker image build
-bash hooks/doctor.sh                         # expected: 16 passed (pytest)
+bash hooks/doctor.sh                         # all doctor checks must pass (pytest)
+uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  # check count
 ```
 
 ## Running

@@ -33,7 +33,7 @@ cd "$REPO_ROOT"
 # uv from hunting for a pyproject.toml; -p no:cacheprovider keeps pytest from
 # writing .pytest_cache into the read-only repo root.
 STACKS='js|*.test.js|[A-Za-z0-9_-]+\.test\.js|node --test --test-force-exit|node|node --version
-py|*_test.py|[A-Za-z0-9_-]+_test\.py|uv run --no-project pytest -q -p no:cacheprovider|uv run --no-project python3|uv run --no-project pytest --version'
+py|*_test.py|[A-Za-z0-9_-]+_test\.py|uv run --no-project python3 -m pytest -q -p no:cacheprovider -o pythonpath=src|uv run --no-project python3|uv run --no-project python3 -m pytest --version'
 
 # Generate the usage alternatives from the registry (single source).
 stack_alts() {
@@ -122,7 +122,13 @@ case "$cmd" in
       # component invokes a test runner. --test-force-exit makes a leaked
       # handle exit 0 instead of hanging to rc=124.
       # shellcheck disable=SC2086  # registry command line, word-split on purpose
-      timeout 60 ${RUNNER["$f"]} "$f" < /dev/null || rc=$?
+      timeout 60 ${RUNNER["$f"]} "$f" < /dev/null || {
+        r=$?
+        # rc namespace: 2 (refused path) and 6 (ENV-FAIL) belong to run.sh. A
+        # runner that itself exits 2/6 (pytest: collection error) FAILED a test.
+        case "$r" in 2|6) r=1 ;; esac
+        rc=$r
+      }
     done
     exit "$rc"
     ;;

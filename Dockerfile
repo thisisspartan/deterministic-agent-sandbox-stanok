@@ -103,7 +103,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # UV_NO_CACHE=1 keeps builds and runs hermetic.
 # UV_BREAK_SYSTEM_PACKAGES=1: bookworm's system python is PEP 668
 # "externally managed" — without this, uv refuses the system install.
-COPY --from=ghcr.io/astral-sh/uv:0.5.24 /uv /usr/local/bin/uv
+# W7 supply-chain pin: the digest is the manifest-list digest from
+# `docker buildx imagetools inspect ghcr.io/astral-sh/uv:0.5.24`
+# (2026-09-21) — a tag move on ghcr can no longer change what we COPY.
+COPY --from=ghcr.io/astral-sh/uv:0.5.24@sha256:2381d6aa60c326b71fd40023f921a0a3b8f91b14d5db6b90402e65a635053709 /uv /usr/local/bin/uv
 ENV UV_SYSTEM_PYTHON=1 \
     UV_PYTHON_PREFERENCE=only-system \
     UV_NO_CACHE=1 \
@@ -132,8 +135,17 @@ RUN uv pip install --no-binary claude-agent-sdk \
 # package.json + vendor/ripgrep/x64-linux/rg from $STANOK_CLI_DIR).
 # Bump both deliberately.
 ARG NODE_VERSION=22.22.3
-RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" \
-      | tar -xzf - --strip-components=1 -C /usr/local
+# W7 supply-chain pin: sha256 of node-v22.22.3-linux-x64.tar.gz from the
+# official https://nodejs.org/dist/v22.22.3/SHASUMS256.txt (2026-09-21).
+# Download to a temp file, verify, THEN extract — a mismatched tarball
+# fails the build instead of being silently unpacked over /usr/local.
+ARG NODE_SHA256=c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8
+RUN set -eux; \
+    curl -fsSL -o /tmp/node.tar.gz \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz"; \
+    echo "${NODE_SHA256}  /tmp/node.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/node.tar.gz --strip-components=1 -C /usr/local; \
+    rm -f /tmp/node.tar.gz
 COPY .build-context/claude-code-2.1.88/ /opt/claude-code-2.1.88/
 RUN chmod +x /opt/claude-code-2.1.88/cli.js \
     && ln -s /opt/claude-code-2.1.88/cli.js /usr/local/bin/claude

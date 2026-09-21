@@ -48,6 +48,10 @@ CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "clau
 
 MAX_TEST_LINES = 60
 MAX_TEST_BYTES = 4096
+# W10: noise-line registry for _extract_smart_diff — substrings that mark a
+# verifier-output line as dependency noise (not a test signal). One entry per
+# pattern; add here, not inline in the filter.
+NOISE_LINE_PATTERNS = ("node_modules/",)
 DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))
 
 API_TIMEOUT_S = max(1.0, float(os.environ.get("STANOK_API_TIMEOUT_S", "600")))
@@ -149,6 +153,67 @@ def dirty_tree_gate() -> bool:
     except OSError:
         log("WARN: git status raised in dirty_tree_gate — fail-closed (treating as dirty)")
         return True
+
+
+def hidden_files_gate() -> bool:
+    # W4 hygiene gate (fail-closed): reject a launch if src/tests/docs/scripts
+    # holds a hidden file (name starting with '.', except .gitkeep) or a file
+    # carrying a 'TEMP:' marker in its first 40 lines. Such leftovers from past
+    # runs leak into the machine's context (the model reads them and derives
+    # requirements from them) and slip past dirty_tree_gate (git status is clean
+    # for committed/ignored dotfiles). Intentionally narrow (owner decision):
+    # only these two signals, not "any undeclared file".
+    for d in ("src", "tests", "docs", "scripts"):
+        dirpath = os.path.join(REPO_ROOT, d)
+        if not os.path.isdir(dirpath):
+            continue
+        try:
+            entries = os.listdir(dirpath)
+        except OSError:
+            log(f"WARN: listdir failed in hidden_files_gate for {dirpath} — fail-closed (treating as flagged)")
+            return True
+        for name in entries:
+            path = os.path.join(dirpath, name)
+            if not os.path.isfile(path):
+                continue
+            if name.startswith(".") and name != ".gitkeep":
+                log(f"HIDDEN-FILE: {path}")
+                return True
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    head = [f.readline() for _ in range(40)]
+            except OSError:
+                log(f"WARN: read failed in hidden_files_gate for {path} — fail-closed (treating as flagged)")
+                return True
+            if any("TEMP:" in line for line in head):
+                log(f"TEMP-MARKER: {path}")
+                return True
+    return False
+
+
+def test_config_gate() -> bool:
+    # W6 verdict-subversion gate (owner decision A, fail-closed): reject a
+    # launch if tests/ holds a pytest config file (conftest.py / pytest.ini /
+    # tox.ini / setup.cfg / pyproject.toml) at any depth. A conftest.py with
+    # `pytest_sessionfinish: session.exitstatus = 0` turns a failing test into
+    # rc=0; tests/ is writable and contract_lock only hashes files that
+    # existed at start, so such a file can appear mid-project. pytest picks up
+    # conftest.py from every directory on the test file's path, hence the
+    # recursive walk.
+    tests_dir = os.path.join(REPO_ROOT, "tests")
+    if not os.path.isdir(tests_dir):
+        return False
+    forbidden = ("conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")
+    try:
+        for dirpath, _dirnames, filenames in os.walk(tests_dir):
+            for name in filenames:
+                if name in forbidden:
+                    log(f"TEST-CONFIG: {os.path.join(dirpath, name)}")
+                    return True
+    except OSError:
+        log("WARN: walk failed in test_config_gate — fail-closed (treating as flagged)")
+        return True
+    return False
 
 
 def _required_context_window() -> int | None:
@@ -391,7 +456,7 @@ def prepare_workspace(declared_paths: list[str]) -> int:
 def _extract_smart_diff(raw_text: str) -> str:
     cleaned_lines = [
         line for line in raw_text.strip().splitlines()
-        if "node_modules/" not in line
+        if not any(p in line for p in NOISE_LINE_PATTERNS)
     ]
     if not cleaned_lines:
         cleaned_lines = raw_text.strip().splitlines()
@@ -677,6 +742,12 @@ _HOOK_TEST_TIMEOUT_S = 75  # mirrors the old `timeout 75` in verifier.sh
 
 
 async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -> dict:
+    # W8 double-hook diagnosis: log EVERY invocation with its tool_use_id.
+    # After a run: grep 'HOOK-CALL' <launcher log> | awk id | sort | uniq -d —
+    # duplicate ids = double registration/call; unique ids = the second
+    # callback is internal. Keep this log until the verdict is in CONTEXT.md.
+    _ti = hook_input.get("tool_input") or {}
+    log(f"HOOK-CALL id={tool_use_id} file={_ti.get('file_path')}")
     try:
         tool_input = hook_input.get("tool_input") or {}
         fp = tool_input.get("file_path")
@@ -1412,6 +1483,10 @@ def main() -> int:
     args = p.parse_args()
 
     if args.cmd == "check-dirty":
+        if hidden_files_gate():
+            return 26
+        if test_config_gate():
+            return 27
         return 22 if dirty_tree_gate() else 0
     if args.cmd == "status":
         return cmd_status(args.label)
@@ -1461,6 +1536,16 @@ def main() -> int:
 
         if dirty_tree_gate():
             return early_abort(22, "ERROR: the machine repo contains uncommitted changes (rc=22)")
+
+        # W4 hygiene gate (rc=26): hidden/TEMP leftovers in src/tests/docs/scripts
+        # leak into the machine's context and slip past dirty_tree_gate.
+        if hidden_files_gate():
+            return early_abort(26, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
+
+        # W6 verdict-subversion gate (rc=27): pytest config files under tests/
+        # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
+        if test_config_gate():
+            return early_abort(27, "ERROR: pytest config files in tests/ (rc=27)")
 
         # R2: launch orchestration (the former launch.sh branches, in Python).
         in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
