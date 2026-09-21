@@ -52,6 +52,8 @@ DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))
 
 API_TIMEOUT_S = max(1.0, float(os.environ.get("STANOK_API_TIMEOUT_S", "600")))
 TURN_TIMEOUT_S = float(os.environ.get("STANOK_TURN_TIMEOUT_S", "1800"))
+# CLI --max-turns ceiling: max model calls (agentic turns) per single query().
+STANOK_MAX_AGENT_TURNS = int(os.environ.get("STANOK_MAX_AGENT_TURNS", "60"))
 
 if TURN_TIMEOUT_S <= API_TIMEOUT_S:
     TURN_TIMEOUT_S = API_TIMEOUT_S + max(15.0, API_TIMEOUT_S * 0.2)
@@ -631,12 +633,24 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict, loc
         if isinstance(msg, ResultMessage):
             is_err = getattr(msg, "is_error", None)
             res = getattr(msg, "result", None)
+            subtype = getattr(msg, "subtype", None)
+            errors = getattr(msg, "errors", None)
+            terminal_reason = getattr(msg, "terminal_reason", None)
             data = getattr(msg, "data", None)
             if isinstance(data, dict):
                 is_err = is_err or data.get("is_error")
                 res = res or data.get("result")
+                subtype = subtype or data.get("subtype")
+                errors = errors or data.get("errors")
+                terminal_reason = terminal_reason or data.get("terminal_reason")
             if is_err:
-                turn_error = str(res or "unknown API error")
+                if subtype == "error_max_turns" or terminal_reason == "max_turns":
+                    turn_error = "CLI_MAX_TURNS_EXCEEDED: agent reached max-turns ceiling"
+                else:
+                    detail = res
+                    if not detail and isinstance(errors, list) and errors:
+                        detail = "; ".join(str(e) for e in errors)
+                    turn_error = str(detail or f"unknown API error (subtype={subtype})")
 
         content = getattr(msg, "content", None)
         if isinstance(content, list):
@@ -744,7 +758,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 HookMatcher(matcher="Write|Edit", hooks=[_verifier_hook], timeout=90)
             ]
         },
-        max_turns=30,
+        max_turns=STANOK_MAX_AGENT_TURNS,
         model=LOCAL_MODEL,
         env=build_agent_env(),
     )
