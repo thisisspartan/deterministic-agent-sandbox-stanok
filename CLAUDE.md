@@ -28,6 +28,10 @@ The ticket is self-contained — everything needed is described in the first mes
 5. Match the project's EXISTING stack. Look at what's already in `src/`, `tests/`, and
    `scripts/run.sh` before writing anything. Do not introduce a second language or test
    framework into a project that already has one, even if you would personally prefer it.
+6. Any scratch/temporary file you create goes ONLY under `$TMPDIR` (never in `src/`,
+   `tests/`, `docs/`, or `scripts/`), and must be deleted before you finish. Hidden
+   dotfiles and files carrying a `TEMP:` marker in `src/ tests/ docs/ scripts/` are
+   rejected at launch (rc=26) — they leak into your own context on the next run.
 
 ## Project entrypoint: `scripts/run.sh`
 

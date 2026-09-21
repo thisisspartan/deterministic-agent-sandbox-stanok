@@ -151,6 +151,42 @@ def dirty_tree_gate() -> bool:
         return True
 
 
+def hidden_files_gate() -> bool:
+    # W4 hygiene gate (fail-closed): reject a launch if src/tests/docs/scripts
+    # holds a hidden file (name starting with '.', except .gitkeep) or a file
+    # carrying a 'TEMP:' marker in its first 40 lines. Such leftovers from past
+    # runs leak into the machine's context (the model reads them and derives
+    # requirements from them) and slip past dirty_tree_gate (git status is clean
+    # for committed/ignored dotfiles). Intentionally narrow (owner decision):
+    # only these two signals, not "any undeclared file".
+    for d in ("src", "tests", "docs", "scripts"):
+        dirpath = os.path.join(REPO_ROOT, d)
+        if not os.path.isdir(dirpath):
+            continue
+        try:
+            entries = os.listdir(dirpath)
+        except OSError:
+            log(f"WARN: listdir failed in hidden_files_gate for {dirpath} — fail-closed (treating as flagged)")
+            return True
+        for name in entries:
+            path = os.path.join(dirpath, name)
+            if not os.path.isfile(path):
+                continue
+            if name.startswith(".") and name != ".gitkeep":
+                log(f"HIDDEN-FILE: {path}")
+                return True
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    head = [f.readline() for _ in range(40)]
+            except OSError:
+                log(f"WARN: read failed in hidden_files_gate for {path} — fail-closed (treating as flagged)")
+                return True
+            if any("TEMP:" in line for line in head):
+                log(f"TEMP-MARKER: {path}")
+                return True
+    return False
+
+
 def _required_context_window() -> int | None:
     """Required context window: env STANOK_REQUIRED_WINDOW overrides
     CLAUDE_CODE_AUTO_COMPACT_WINDOW from .claude/settings.stanok.json."""
@@ -1412,6 +1448,8 @@ def main() -> int:
     args = p.parse_args()
 
     if args.cmd == "check-dirty":
+        if hidden_files_gate():
+            return 26
         return 22 if dirty_tree_gate() else 0
     if args.cmd == "status":
         return cmd_status(args.label)
@@ -1461,6 +1499,11 @@ def main() -> int:
 
         if dirty_tree_gate():
             return early_abort(22, "ERROR: the machine repo contains uncommitted changes (rc=22)")
+
+        # W4 hygiene gate (rc=26): hidden/TEMP leftovers in src/tests/docs/scripts
+        # leak into the machine's context and slip past dirty_tree_gate.
+        if hidden_files_gate():
+            return early_abort(26, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
 
         # R2: launch orchestration (the former launch.sh branches, in Python).
         in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
