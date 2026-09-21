@@ -742,6 +742,12 @@ _HOOK_TEST_TIMEOUT_S = 75  # mirrors the old `timeout 75` in verifier.sh
 
 
 async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -> dict:
+    # W8 double-hook diagnosis: log EVERY invocation with its tool_use_id.
+    # After a run: grep 'HOOK-CALL' <launcher log> | awk id | sort | uniq -d —
+    # duplicate ids = double registration/call; unique ids = the second
+    # callback is internal. Keep this log until the verdict is in CONTEXT.md.
+    _ti = hook_input.get("tool_input") or {}
+    log(f"HOOK-CALL id={tool_use_id} file={_ti.get('file_path')}")
     try:
         tool_input = hook_input.get("tool_input") or {}
         fp = tool_input.get("file_path")

@@ -174,6 +174,21 @@ def test_verifier_hook_rc_semantics(tmp_path, monkeypatch, capsys):
         assert res == {}
 
 
+def test_verifier_hook_call_logged(tmp_path, monkeypatch, capsys):
+    # W8 double-hook diagnosis: EVERY invocation logs HOOK-CALL id=<tool_use_id>
+    # at entry — including early-return paths (file outside tests/).
+    repo = _verifier_repo(tmp_path, "repolog", 1)
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    asyncio.run(stanok._verifier_hook(
+        {"tool_input": {"file_path": str(repo / "tests" / "t_test.py")}}, "toolu_42", None))
+    assert "HOOK-CALL id=toolu_42" in capsys.readouterr().out
+    # early-return path (file outside tests/) still logs the call
+    res = asyncio.run(stanok._verifier_hook(
+        {"tool_input": {"file_path": str(repo / "src" / "x.js")}}, "toolu_43", None))
+    assert res == {}
+    assert "HOOK-CALL id=toolu_43" in capsys.readouterr().out
+
+
 # --- 8: full path rc=25 --------------------------------------------------------
 
 def test_full_path_rc25(tmp_path):
