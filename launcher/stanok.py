@@ -860,6 +860,25 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
             return {}
         text = out.decode("utf-8", "replace")
         tail = "\n".join(text.splitlines()[-25:])
+        if rc == 124:
+            # rc=124: the test HUNG (run.sh's 60 s runner timeout, or this
+            # hook's own backstop) — not a red assertion. "Implement src/ to
+            # make it GREEN" here is a retry-loop DoS: the model iterates on
+            # src/, the test hangs again, the hook fires again. Name the
+            # failure mode (hang) and where to look instead.
+            log(f"VERIFIER HOOK: TIMEOUT-ABORT ({rel} rc=124)")
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": (
+                        f"VERIFY: TIMEOUT-ABORT ({rel} rc=124). The test hung "
+                        f"past the runner timeout — this is NOT a red test; "
+                        f"do not iterate on src/ to make it green. Locate and "
+                        f"remove the hang (infinite loop / blocking call) in "
+                        f"the test or in the implementation.\n{tail}"
+                    ),
+                }
+            }
         log(f"VERIFIER HOOK: RED CONFIRMED ({rel} rc={rc})")
         return {
             "hookSpecificOutput": {
