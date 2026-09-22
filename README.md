@@ -125,6 +125,10 @@ src/ tests/ docs/ scripts/    — the machine working directories (empty at star
    SDK `hooks` option — no shell command) runs the matching test through
    `scripts/run.sh` and injects the verdict (RED CONFIRMED) into the
    session — the TDD red phase is harness-provided, not model discipline.
+   The contract_lock (pre-existing `tests/` + `scripts/run.sh`) is enforced
+   at two points: a PreToolUse deny (before the write hits disk, SDK
+   callback hook) and the post-turn SHA256 manifest diff (fallback —
+   catches Bash-mediated writes the hook cannot see).
 4. On verifier FAIL the Runner appends an in-session retry turn
    (`--local-retries`, default 2) with the failure block.
 5. Final: `verifier: PASS/FAIL`, `probe_result: CLEAN-FIRST |

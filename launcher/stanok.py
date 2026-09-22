@@ -78,6 +78,9 @@ _marker_path = None
 _evidence_dir = None
 _live_dir = None
 _INTERRUPTED_RC = 0
+# contract_lock first echelon (CC-104): the pre-session manifest, read by
+# _pretooluse_lock_hook at call time (set in run_continuous_session).
+_CONTRACT_LOCK_STATE: dict = {"manifest": None}
 
 
 # ==================================================================================
@@ -824,6 +827,51 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
     return (turn_total or live_window), live_window, writes, turn_error
 
 
+# contract_lock first echelon (CC-104): PreToolUse deny BEFORE the write hits
+# disk. The post-turn SHA256 manifest diff (_check_contract_lock) stays as
+# the independent second echelon: it catches Bash-mediated writes
+# (sed/tee/python) that a PreToolUse hook on Edit/Write/MultiEdit cannot see.
+#
+# Conditional by design: only PRE-EXISTING manifest files are denied. New
+# test files (TDD red phase) and a missing scripts/run.sh (bootstrap) are
+# NOT in the manifest and stay writable — a blanket deny would break TDD.
+#
+# SDK callback (not a shell hook): a timed-out SDK callback BLOCKS the tool
+# call (fail-closed); a timed-out shell/http/mcp_tool hook does NOT.
+# Fail-open on internal error, like _verifier_hook: the second echelon
+# still enforces fail-closed after the turn.
+
+
+async def _pretooluse_lock_hook(hook_input: dict, tool_use_id: "str | None", context) -> dict:
+    manifest = _CONTRACT_LOCK_STATE["manifest"]
+    if not manifest:
+        return {}
+    try:
+        path = (hook_input.get("tool_input") or {}).get("file_path")
+        if not path:
+            return {}
+        full = path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)
+        rel = os.path.relpath(os.path.realpath(full), REPO_ROOT)
+        if rel in manifest:
+            log(f"CONTRACT-LOCK DENY: {rel} (pre-existing protected file)")
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        f"CONTRACT-LOCK: {rel} is a pre-existing protected file "
+                        "(reference test / project entrypoint). Modifying or "
+                        "deleting it is CATEGORICALLY FORBIDDEN — the post-turn "
+                        "manifest diff will fail the run. Create NEW files "
+                        "instead; fix the implementation in src/."
+                    ),
+                }
+            }
+    except Exception as e:
+        log(f"CONTRACT-LOCK HOOK: no-op (error: {e})")
+    return {}
+
+
 # R1 (Phase 2): in-process replacement for hooks/verifier.sh.
 # PostToolUse on Write|Edit: if the written file is a test under tests/ and it
 # runs RED through the project entrypoint, inject "VERIFY: RED CONFIRMED" so
@@ -953,10 +1001,16 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         # allowed_tools is kept as the permission-allow side of the same set.
         tools=CURATED_TOOLS,
         allowed_tools=CURATED_TOOLS,
-        # R1: in-process PostToolUse verifier (replaces hooks/verifier.sh).
-        # timeout > _HOOK_TEST_TIMEOUT_S so the hook's own 75 s test timeout
-        # is the deterministic verdict, not the SDK's hook timeout.
         hooks={
+            # contract_lock first echelon (CC-104): deny writes to pre-existing
+            # protected files BEFORE they hit disk (Bash bypass stays with the
+            # post-turn manifest diff).
+            "PreToolUse": [
+                HookMatcher(matcher="Edit|Write|MultiEdit", hooks=[_pretooluse_lock_hook], timeout=10)
+            ],
+            # R1: in-process PostToolUse verifier (replaces hooks/verifier.sh).
+            # timeout > _HOOK_TEST_TIMEOUT_S so the hook's own 75 s test timeout
+            # is the deterministic verdict, not the SDK's hook timeout.
             "PostToolUse": [
                 HookMatcher(matcher="Write|Edit", hooks=[_verifier_hook], timeout=90)
             ]
@@ -982,6 +1036,9 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
     # contract_lock (W2.5): snapshot tests/ before the session; a pre-existing
     # test file modified/deleted during the run is a violation in summary.json.
     tests_manifest_before = _tests_manifest()
+    # First echelon (CC-104): expose the manifest to the PreToolUse hook
+    # (read at call time; the hook only fires during the session).
+    _CONTRACT_LOCK_STATE["manifest"] = tests_manifest_before
 
     with open(stream_out_path, "a", encoding="utf-8") as stream_f:
         async with ClaudeSDKClient(options=options) as client:
