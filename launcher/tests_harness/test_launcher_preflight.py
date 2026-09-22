@@ -8,18 +8,16 @@ Pins the launch mechanisms in launcher/stanok.py:
   5  verify_gate: stub run.sh (test -> rc=6) -> env_fail True, "ENV-FAIL:" message
   6  _status_fields(16, "FAIL", 1) == ("ENV-FAIL", "FAIL", "ENV-FAIL")
   7  _verifier_hook: rc=6 -> {} + "ENV-FAIL" log; rc=1 -> "RED CONFIRMED" context; rc=0/2 -> {}
-  8  full path `python launcher/stanok.py run ...` (digest label mismatch) -> process rc=25,
-     evidence/<label>/summary.json created with probe_result EARLY-ABORT
 
-Mutation check (manual, W2): `return early_abort(25, ...)` -> `return 0` in main()
-drops test 8; revert.
+CC-106: the former test 8 (full path digest mismatch -> process rc=25) is
+gone with the launch-path preflight — the digest check now lives in doctor
+(test_doctor.py::test_docker_image_digest_matches); tests 1-4 pin the
+preflight_image unit the doctor calls.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_launcher_preflight.py -q
 """
 import asyncio
-import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -187,36 +185,3 @@ def test_verifier_hook_call_logged(tmp_path, monkeypatch, capsys):
         {"tool_input": {"file_path": str(repo / "src" / "x.js")}}, "toolu_43", None))
     assert res == {}
     assert "HOOK-CALL id=toolu_43" in capsys.readouterr().out
-
-
-# --- 8: full path rc=25 --------------------------------------------------------
-
-def test_full_path_rc25(tmp_path):
-    repo = tmp_path / "repo"
-    (repo / "scripts").mkdir(parents=True)
-    (repo / "tickets").mkdir()
-    (repo / "Dockerfile").write_text("FROM scratch\n")
-    (repo / "scripts" / "run.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
-    (repo / "tickets" / "TASK-TEST.md").write_text("# test ticket\n")
-    for args in (["init", "-q"], ["add", "-A"],
-                 ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]):
-        subprocess.run(["git"] + args, cwd=repo, check=True, capture_output=True)
-    d = _make_fake_docker(tmp_path)
-    env = dict(os.environ)
-    env["PATH"] = f"{d}:{env['PATH']}"
-    env["STANOK_REPO"] = str(repo)
-    env["FAKE_DOCKER_INSPECT_OUT"] = "deadbeef"
-    env["FAKE_DOCKER_INSPECT_RC"] = "0"
-    env["STANOK_DOCKER_IMAGE"] = "stanok-machine:latest"
-    label = "w2-rc25"
-    proc = subprocess.run(
-        [sys.executable, str(LAUNCHER_DIR / "stanok.py"),
-         "run", "tickets/TASK-TEST.md", label, "--direct"],
-        cwd=repo, env=env, capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode == 25, proc.stdout + proc.stderr
-    sum_path = repo / "evidence" / label / "summary.json"
-    assert sum_path.is_file()
-    data = json.loads(sum_path.read_text())
-    assert data["probe_result"] == "EARLY-ABORT"
-    assert data["rc"] == 25

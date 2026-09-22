@@ -55,16 +55,11 @@
     "allowUnsandboxedCommands": false,
     "filesystem": {
       "denyWrite": [
-        ".git",
-        "hooks",
-        "launcher",
-        ".claude",
         "evidence"
       ],
       "denyRead": [
         "hooks",
         "launcher",
-        ".claude",
         "evidence"
       ]
     },

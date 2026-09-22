@@ -25,6 +25,15 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list) -> 
     uid, gid = os.getuid(), os.getgid()
     name = f"stanok-{os.path.basename(repo_root)}-{os.getpid()}"
 
+    # Pre-create the per-uid Claude tmp dir before `docker run`: bwrap
+    # resolves mount points via realpathSync and silently skips non-existent
+    # folders, so the FIRST Bash invocation of a session misses the
+    # /tmp/claude-<uid> bind if the dir is created lazily after bwrap args
+    # are formed.
+    claude_tmp = f"/tmp/claude-{uid}"
+    os.makedirs(claude_tmp, exist_ok=True)
+    os.chmod(claude_tmp, 0o700)
+
     argv = [
         "docker", "run", "--rm", "--name", name, "--init",
         # --network=host: loopback reachability to the local llama-server
@@ -61,6 +70,7 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list) -> 
     env["STANOK_IN_CONTAINER"] = "1"
     env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
     env["HOME"] = "/home/stanok"
+    env["CLAUDE_TMPDIR"] = claude_tmp
     for var in ("http_proxy", "https_proxy", "no_proxy", "NO_PROXY"):
         if os.environ.get(var):
             env[var] = os.environ[var]

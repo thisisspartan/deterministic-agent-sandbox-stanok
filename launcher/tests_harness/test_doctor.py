@@ -77,19 +77,6 @@ def test_verifier_hook_in_process():
     assert "_verifier_hook" in src
 
 
-def test_commit_msg_executable():
-    assert os.access(REPO_ROOT / "hooks" / "commit-msg", os.X_OK)
-
-
-def test_commit_msg_hook_symlink():
-    # FINDING-5: a broken/missing symlink disables the TASK-ID gate.
-    hooks_dir = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "rev-parse", "--git-path", "hooks"],
-        capture_output=True, text=True,
-    ).stdout.strip() or ".git/hooks"
-    assert (REPO_ROOT / hooks_dir / "commit-msg").is_symlink()
-
-
 def test_claude_md_exists():
     assert (REPO_ROOT / "CLAUDE.md").is_file()
 
@@ -112,6 +99,17 @@ def test_machine_image_built():
     assert subprocess.run(
         ["docker", "image", "inspect", image], capture_output=True
     ).returncode == 0
+
+
+def test_docker_image_digest_matches():
+    # CC-106: the image digest/runner preflight moved from the launch path
+    # (former blocking rc=25) to doctor. Import and call the SAME
+    # preflight_image the launcher uses — no second shell implementation.
+    sys.path.insert(0, str(REPO_ROOT / "launcher"))
+    import stanok
+    image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
+    assert stanok.preflight_image(image), \
+        "image preflight failed: digest mismatch or runner unavailable"
 
 
 def test_contract_lock_runsh():

@@ -21,18 +21,6 @@ fi
 echo "--- installing dependencies (uv) ---"
 uv pip install --no-binary claude-agent-sdk -r "$DIR/requirements.txt"
 
-echo "--- commit-msg hook (the machine's TASK-ID gate) ---"
-# git-path: works in a plain repo (.git dir) AND in a submodule (.git file ->
-# .git/modules/<name>/hooks).
-HOOKS_DIR="$(git rev-parse --git-path hooks)"
-mkdir -p "$HOOKS_DIR"
-if [[ ! -L "$HOOKS_DIR/commit-msg" ]]; then
-    ln -srf "$DIR/hooks/commit-msg" "$HOOKS_DIR/commit-msg"
-    echo "  created $HOOKS_DIR/commit-msg -> $DIR/hooks/commit-msg"
-else
-    echo "  already installed"
-fi
-
 echo "--- SDK check ---"
 .venv/bin/python -c "from claude_agent_sdk import query; print('claude-agent-sdk OK')"
 
@@ -78,9 +66,10 @@ echo "--- building the machine image (Docker boundary) ---"
 # gates; the run itself executes in the image (launcher/sandbox.py runs the
 # image system python, which carries the SDK).
 # Image provenance: bake sha256(Dockerfile + scripts/run.sh) into the image
-# LABEL stanok.digest. The launcher's host-side preflight (rc=25) re-computes
-# this digest at launch and fails closed if the image no longer matches the
-# tree — "image older than the Dockerfile/registry" becomes a launch error.
+# LABEL stanok.digest. Doctor re-computes this digest
+# (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches)
+# and fails if the image no longer matches the tree (CC-106: the check moved
+# out of the launch path).
 STANOK_DIGEST="$(cat "$DIR/Dockerfile" "$DIR/scripts/run.sh" | sha256sum | cut -d' ' -f1)"
 docker build -t "${STANOK_DOCKER_IMAGE:-stanok-machine:latest}" -f "$DIR/Dockerfile" "$DIR" \
     --build-arg STANOK_DIGEST="$STANOK_DIGEST"

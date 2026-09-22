@@ -17,4 +17,11 @@ if [ ! -x "$PY" ]; then
     exit 99
 fi
 
+# Pre-create the per-uid Claude tmp dir: bwrap resolves mount points via
+# realpathSync and silently skips non-existent folders, so the FIRST Bash
+# invocation of a session misses the /tmp/claude-<uid> bind if the dir is
+# created lazily after bwrap args are formed.
+mkdir -p "/tmp/claude-$(id -u)" && chmod 700 "/tmp/claude-$(id -u)"
+export CLAUDE_TMPDIR="/tmp/claude-$(id -u)"
+
 exec "$PY" "$DIR/launcher/stanok.py" "$@"

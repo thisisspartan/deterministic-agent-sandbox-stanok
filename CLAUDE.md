@@ -67,7 +67,8 @@ The test framework is chosen by the `scripts/run.sh` STACK REGISTRY, not by you:
 - **js** — `node:test` functions in `tests/**/*.test.js` (run via `node --test`).
 - **jq** — JSON validation stack: `tests/**/*.json` files are validated with
   `jq empty` (exit 0 = well-formed JSON). `run.sh test`/`smoke` accept `.json`
-  paths; the image preflight probes `jq` availability at launch (rc=25 if missing).
+  paths; the doctor image preflight probes `jq` availability in the image
+  (doctor fails if missing — CC-106 moved it off the launch path).
 A bare module-level `assert` is NOT a test (the verifier sees rc=5 "no tests ran").
 Do not introduce another framework (`go test`, `cargo test`, ...): the registry does not run it.
 
