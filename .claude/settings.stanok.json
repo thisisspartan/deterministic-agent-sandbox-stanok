@@ -54,16 +54,16 @@
     "allowUnsandboxedCommands": false,
     "filesystem": {
       "denyWrite": [
-        "evidence",
-        "hooks",
-        "launcher",
-        ".claude"
+        "../evidence",
+        "../hooks",
+        "../launcher",
+        "../.claude"
       ],
       "denyRead": [
-        "hooks",
-        "launcher",
-        "evidence",
-        ".claude"
+        "../hooks",
+        "../launcher",
+        "../evidence",
+        "../.claude"
       ]
     },
     "network": {
