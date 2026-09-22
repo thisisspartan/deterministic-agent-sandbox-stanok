@@ -1,8 +1,8 @@
 'use strict';
-// Harness smoke module: proves the full run path (test -> runner -> verifier).
+// src/smoke.js — sandbox/env smoke module. Contract: see docs/smoke.md.
 
 /**
- * Return the numeric sum of two numbers.
+ * Numeric sum of two arguments.
  * @param {number} a
  * @param {number} b
  * @returns {number} a + b
