@@ -1,7 +1,8 @@
-// src/smoke.js — harness smoke module.
-//
-// Contract: add(a, b) returns the numeric sum of a and b.
+// src/smoke.js — smoke module: exports add(a, b) -> the numeric sum.
+"use strict";
 
-export function add(a, b) {
+function add(a, b) {
   return a + b;
 }
+
+module.exports = { add };
