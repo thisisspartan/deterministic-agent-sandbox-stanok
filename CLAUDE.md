@@ -114,6 +114,9 @@ If the verifier returns an error (`<verification_result status="FAIL">`):
 - The tests in `tests/` are the reference contract of the ticket.
 - **It is categorically forbidden to weaken or change test assertions to fit broken code,**
   and equally forbidden to edit `scripts/run.sh` to make a failure disappear.
+  This is enforced at two points: a PreToolUse hook denies writes to
+  pre-existing `tests/` files and `scripts/run.sh` before they reach disk,
+  and a post-turn manifest diff fails the run (fallback).
 - Localize the problem and fix exclusively the implementation in `src/`.
 
 ## Final report (STRICTLY ≤ 5 lines)
