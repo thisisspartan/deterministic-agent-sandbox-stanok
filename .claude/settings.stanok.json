@@ -53,6 +53,21 @@
     "failIfUnavailable": true,
     "enableWeakerNestedSandbox": true,
     "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "denyWrite": [
+        ".git",
+        "hooks",
+        "launcher",
+        ".claude",
+        "evidence"
+      ],
+      "denyRead": [
+        "hooks",
+        "launcher",
+        ".claude",
+        "evidence"
+      ]
+    },
     "network": {
       "allowedDomains": [
         "192.168.8.131",
