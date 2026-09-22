@@ -1,8 +1,14 @@
-"""Bug 6: the verifier hook's timeout message must include the test's output.
+"""Verifier hook timeout: partial output + TIMEOUT-ABORT classification.
 
 When `run.sh test` hangs past _HOOK_TEST_TIMEOUT_S, the hook kills it and
 must surface what the test printed before the hang (the old code discarded
 the partial output: rc, out = 124, b"").
+
+A hung test (rc=124) is NOT a red test: the hook must classify it as
+TIMEOUT-ABORT and point the model at the hang (infinite loop / blocking
+call), never as "RED CONFIRMED / Implement src/ to make it GREEN" — that
+wording is a retry-loop DoS (the model iterates on src/, the test hangs
+again, the hook fires again).
 
 The hanging test is a JS test: node --test passes a top-level console.log
 through to stdout (as a TAP comment), while pytest captures module-level
@@ -43,3 +49,6 @@ def test_hook_timeout_includes_partial_output(repo, monkeypatch):
     ctx = result["hookSpecificOutput"]["additionalContext"]
     assert "rc=124" in ctx
     assert MARKER in ctx
+    # A hang is classified as TIMEOUT-ABORT, never as a red test.
+    assert "TIMEOUT-ABORT" in ctx
+    assert "RED CONFIRMED" not in ctx
