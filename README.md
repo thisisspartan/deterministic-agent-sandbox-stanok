@@ -62,9 +62,9 @@ Dockerfile                    — the machine image (debian + toolchain +
                                 uv + claude-agent-sdk + pytest + Node.js +
                                 Claude Code CLI 2.1.88 + bubblewrap + socat
                                 + jq)
-hooks/                        — doctor (thin pytest wrapper, R5),
-                                commit-msg (the TDD verifier is
-                                in-process in launcher/stanok.py, R1)
+hooks/                        — doctor (thin pytest wrapper, R5; the TDD
+                                verifier is in-process in
+                                launcher/stanok.py, R1)
 launcher/tests_harness/       — the doctor checks as pytest (R5)
 .claude/settings.stanok.json  — the machine config (allow/deny,
                                 native sandbox + allowedDomains)
@@ -101,11 +101,12 @@ src/ tests/ docs/ scripts/    — the machine working directories (empty at star
    runs either in-process (host no-sandbox / container side — the lock
    (rc=21) is taken there) or as a supervised `docker run`
    (`launcher/sandbox.py`; the container-side Runner re-runs the gates and
-   takes the lock). Before the `docker run`: the image preflight (rc=25) —
-   the image LABEL `stanok.digest` must equal sha256(Dockerfile +
-   scripts/run.sh) and every stack's preflight command must succeed inside
-   the image (`docker run --rm`); a stale image is a 1-second launch
-   failure, not a mid-run ENV-FAIL -> ticket header (rc=13: an `impl:`/`test:`/`docs:` line
+   takes the lock). The image preflight (the image LABEL `stanok.digest`
+   must equal sha256(Dockerfile + scripts/run.sh) and every stack's
+   preflight command must succeed inside the image, `docker run --rm`)
+   no longer blocks the launch path (CC-106) — it runs in doctor
+   (`test_docker_image_digest_matches`): a stale image is a doctor failure,
+   not a mid-run ENV-FAIL -> ticket header (rc=13: an `impl:`/`test:`/`docs:` line
    or `reset: none` is required — the ticket-scoped invariant, W2.1; literal
    paths are validated: relative, no `..`, top-level dir inside
    src/tests/docs/scripts) -> pre-flight `/props` of the server (rc=20;

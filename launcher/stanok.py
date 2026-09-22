@@ -319,7 +319,8 @@ def _stack_preflights() -> list[str]:
 def _image_digest() -> str:
     """sha256 over the image-defining sources: Dockerfile + scripts/run.sh
     (the STACKS registry). setup.sh bakes this into the image LABEL
-    stanok.digest at build time; preflight_image() re-computes it at launch."""
+    stanok.digest at build time; preflight_image() re-computes it in
+    doctor (CC-106: moved off the launch path)."""
     h = hashlib.sha256()
     for rel in ("Dockerfile", "scripts/run.sh"):
         with open(os.path.join(REPO_ROOT, rel), "rb") as f:
@@ -328,14 +329,16 @@ def _image_digest() -> str:
 
 
 def preflight_image(image: str) -> bool:
-    """Host-side image provenance + runner preflight (rc=25 on any miss).
+    """Host-side image provenance + runner preflight.
     1. The image LABEL stanok.digest must equal sha256(Dockerfile + run.sh)
-       — an image older than the Dockerfile/registry is a launch failure,
-       not a mid-run ENV-FAIL.
+       — an image older than the Dockerfile/registry is caught here,
+       not mid-run.
     2. Each stack's preflight command must succeed INSIDE the image
        (docker run --rm) — the runner is available where the tests run.
+    CC-106: no longer on the launch path (the former blocking rc=25 is
+    freed) — doctor calls it (test_doctor.py::test_docker_image_digest_matches).
     Fail-closed: any docker error, missing label, or failed probe returns
-    False (the caller aborts with rc=25)."""
+    False."""
     try:
         want = _image_digest()
     except OSError as e:
@@ -377,10 +380,9 @@ def preflight_image(image: str) -> bool:
 def _opik_trace_count() -> int | None:
     """Total trace count in the 'stanok' Opik project, or None if Opik is
     unreachable. The machine exports OTLP spans to the host Opik backend
-    (network=host -> localhost:8080). We sample the count before and after a
-    run: the delta is this run's exported traces. A delta of 0 (or an
-    unreachable backend) means the run left no traces — surfaced loudly so a
-    silent 'no traces' can never happen again."""
+    (network=host -> localhost:8080). CC-106: sampled ONCE, fast, strictly
+    after the verdict is formed (no pre-run baseline, no settle loop) — an
+    unreachable backend (None) never delays or alters the run."""
     if os.environ.get("STANOK_SKIP_OPIK_CHECK") == "1":
         return None
     base = os.environ.get("STANOK_OPIK_URL", "http://localhost:8080")
@@ -1432,15 +1434,6 @@ def cmd_run(args) -> int:
             except OSError: pass
         return 14
 
-    # Opik trace verification (baseline): sample the project trace count before
-    # the run. The delta after the run is this run's exported traces — one run
-    # at a time (the lock guarantees no concurrent stanok run to pollute it).
-    opik_before = _opik_trace_count()
-    if opik_before is None:
-        log("OPIK: backend unreachable — traces will NOT be recorded for this run")
-    else:
-        log(f"OPIK: backend reachable (project trace baseline={opik_before})")
-
     rc = 1
     try:
         rc = asyncio.run(run_continuous_session(job, ticket_prompt, args.local_retries, declared_paths))
@@ -1452,27 +1445,18 @@ def cmd_run(args) -> int:
         rc = 1
     finally:
         job["rc"] = rc
-        # Post-run Opik check: how many traces did this run export? OTLP export
-        # is batched/async, so if the count has not moved yet, give it a short
-        # settle and re-sample once before concluding.
+        # Post-run Opik check (CC-106): strictly AFTER the verdict is formed,
+        # ONE fast best-effort sample of the project trace count. No baseline
+        # poll before the session, no sleep/resample loop — Opik latency must
+        # never delay the run. Any network/HTTP/timeout failure ->
+        # opik_traces: null. rc and verifier are never touched here.
         opik_after = _opik_trace_count()
-        if opik_before is None or opik_after is None:
+        if opik_after is None:
             job["opik_traces"] = None
             log("OPIK: post-run trace count unavailable (backend unreachable)")
         else:
-            if opik_after <= opik_before:
-                time.sleep(3)
-                resample = _opik_trace_count()
-                if resample is not None:
-                    opik_after = resample
-            delta = opik_after - opik_before
-            job["opik_traces"] = delta
-            if delta <= 0:
-                log(f"OPIK WARNING: 0 traces exported for this run "
-                    f"(before={opik_before}, after={opik_after}) — OTLP export may have failed")
-            else:
-                log(f"OPIK: {delta} traces exported for this run "
-                    f"(before={opik_before}, after={opik_after})")
+            job["opik_traces"] = opik_after
+            log(f"OPIK: project trace count after run = {opik_after}")
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try:
@@ -1776,14 +1760,11 @@ def main() -> int:
 
         # Host sync: supervise the Docker container (launcher/sandbox.py).
         # The container-side Runner re-runs the gates and takes the lock.
+        # CC-106: the image digest/runner preflight no longer blocks the
+        # launch path — it lives in doctor
+        # (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
         if shutil.which("docker") is None:
             return early_abort(1, "ERROR: docker not found on PATH")
-        # Image provenance + runner preflight (rc=25): the image must match
-        # the current Dockerfile/STACKS registry and carry every stack's
-        # runner — otherwise the run would die mid-session with ENV-FAIL.
-        image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
-        if not preflight_image(image):
-            return early_abort(25, "ERROR: image preflight failed (digest mismatch or runner unavailable) (rc=25)")
         return run_sandboxed(args)
 
     return 0
