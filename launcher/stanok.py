@@ -532,6 +532,13 @@ def _run_one_test(rel: str) -> tuple[str, str] | None:
             # verify_gate can fail-closed WITHOUT a fix prompt (rc=16).
             raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
             return (rel, "ENV-FAIL: " + _extract_smart_diff(raw_err))
+        if p.returncode == 124:
+            # The test HUNG (run.sh's 60 s runner timeout). Tagged like
+            # ENV-FAIL so the fix prompt gets the timeout rules, not the
+            # generic "fix src exclusively" block (retry-loop DoS: the model
+            # iterates on src/, the test hangs again, same prompt again).
+            raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
+            return (rel, "TIMEOUT: test hung (rc=124) — " + _extract_smart_diff(raw_err))
         if p.returncode != 0:
             raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
             return (rel, _extract_smart_diff(raw_err))
@@ -592,6 +599,41 @@ def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tup
     failures.sort(key=lambda x: x[0])
     env_fail = any(msg.startswith("ENV-FAIL:") for _, msg in failures)
     return (len(failures) == 0, failures, env_fail)
+
+
+def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
+    """Select the fix-prompt rule block for a verify_gate failure set.
+
+    Priority: list-fail > timeout > no-tests > generic. A hung test
+    (TIMEOUT) must not get the generic "fix src exclusively" rules: that
+    wording is a retry-loop DoS (the model iterates on src/, the test
+    hangs again, verify_gate fails again with the same prompt).
+    """
+    has_list_fail = any(name == "(list)" for name, _ in failures)
+    has_timeout_fail = any(msg.startswith("TIMEOUT:") for _, msg in failures)
+    has_no_tests = any(name == "(no tests)" for name, _ in failures)
+    if has_list_fail:
+        return (
+            "1. The project runner's `list` command failed: tests/ contains a test-like file that no registry line in scripts/run.sh claims.\n"
+            "2. Delete the unclaimed file or move it to tests/fixtures/ (or tests/data/). It is CATEGORICALLY FORBIDDEN to add a registry line to scripts/run.sh to claim it, and to weaken or modify the tests in tests/.\n"
+            "3. Then re-check with `bash scripts/run.sh list` — it must exit 0."
+        )
+    if has_timeout_fail:
+        return (
+            "1. A test HUNG (rc=124, runner timeout) — this is NOT a red assertion; do not iterate on src/ to make it green.\n"
+            "2. Locate and remove the hang (infinite loop / blocking call) in the test or in the implementation.\n"
+            "3. Then re-check with `bash scripts/run.sh test <path>` — it must finish well under the runner timeout."
+        )
+    if has_no_tests:
+        return (
+            "1. There are no test files in the tests/ directory! Create the reference tests strictly per the ticket specification.\n"
+            "2. Then implement the corresponding working module code in the src/ directory."
+        )
+    return (
+        "1. The tests in tests/ are the reference specification of the ticket. It is CATEGORICALLY FORBIDDEN to delete, modify, or weaken assertions in tests/.\n"
+        "2. Fixes are made EXCLUSIVELY in the module implementations in the src/ directory.\n"
+        "3. Study the diff and stack above, localize the error in src/ and eliminate the root cause of the bug."
+    )
 
 
 def _tests_manifest() -> dict[str, str]:
@@ -1103,26 +1145,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 job["failures"] = failures
 
                 if turn < max_turns:
-                    has_no_tests = any(name == "(no tests)" for name, _ in failures)
-                    has_list_fail = any(name == "(list)" for name, _ in failures)
-
-                    if has_list_fail:
-                        rules = (
-                            "1. The project runner's `list` command failed: tests/ contains a test-like file that no registry line in scripts/run.sh claims.\n"
-                            "2. Delete the unclaimed file or move it to tests/fixtures/ (or tests/data/). It is CATEGORICALLY FORBIDDEN to add a registry line to scripts/run.sh to claim it, and to weaken or modify the tests in tests/.\n"
-                            "3. Then re-check with `bash scripts/run.sh list` — it must exit 0."
-                        )
-                    elif has_no_tests:
-                        rules = (
-                            "1. There are no test files in the tests/ directory! Create the reference tests strictly per the ticket specification.\n"
-                            "2. Then implement the corresponding working module code in the src/ directory."
-                        )
-                    else:
-                        rules = (
-                            "1. The tests in tests/ are the reference specification of the ticket. It is CATEGORICALLY FORBIDDEN to delete, modify, or weaken assertions in tests/.\n"
-                            "2. Fixes are made EXCLUSIVELY in the module implementations in the src/ directory.\n"
-                            "3. Study the diff and stack above, localize the error in src/ and eliminate the root cause of the bug."
-                        )
+                    rules = _fix_prompt_rules(failures)
 
                     fail_xml_blocks = "\n".join([
                         f'  <failure test="{name}">\n{diff}\n  </failure>'

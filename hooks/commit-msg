@@ -3,9 +3,14 @@
 # Rejects a commit without TASK-STANOK-CC-NNN in the message.
 # The model does NOT commit (git-write is forbidden); only the operator commits,
 # outside the sandbox.
+# Two maintenance prefixes pass without a task ID: the supervisor's
+# save-state commit (before a ticket launch) and the clean-for-task commit
+# (before a new ticket exists). Exact prefixes (trailing space required),
+# not a wildcard — the supervisor paths no longer use --no-verify, so this
+# hook is the only enforcement and must actually enforce.
 MSG_FILE="$1"
-if ! grep -Eq 'TASK-STANOK-CC-[0-9]+' "$MSG_FILE"; then
-  echo "COMMIT REJECTED: commit message must contain TASK-STANOK-CC-NNN" >&2
+if ! grep -Eq 'TASK-STANOK-CC-[0-9]+|^chore: save state before |^chore: clean for new task ' "$MSG_FILE"; then
+  echo "COMMIT REJECTED: commit message must contain TASK-STANOK-CC-NNN (or be a recognized maintenance commit)" >&2
   exit 1
 fi
 exit 0
