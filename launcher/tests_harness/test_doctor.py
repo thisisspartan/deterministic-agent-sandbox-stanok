@@ -253,12 +253,13 @@ def mock_small_server():
 
 def test_runner_preflight_window(tmp_path, mock_small_server):
     # A LIVE server whose n_ctx is below the required window
-    # (CLAUDE_CODE_AUTO_COMPACT_WINDOW from settings.stanok.json) -> rc=20.
+    # (STANOK_REQUIRED_WINDOW — the window moved from settings.env to env) -> rc=20.
     t = _ticket(tmp_path, "# doctor\n\nreset: none\n")
     label = f"doctor-window-{os.getpid()}-{uuid.uuid4().hex[:6]}"
     try:
         rc = _launch(["run", t, label],
-                     {"STANOK_SERVER_URL": mock_small_server, "STANOK_NO_SANDBOX": "1"})
+                     {"STANOK_SERVER_URL": mock_small_server, "STANOK_NO_SANDBOX": "1",
+                      "STANOK_REQUIRED_WINDOW": "128000"})
     finally:
         _cleanup(label)
     if rc == 21:
