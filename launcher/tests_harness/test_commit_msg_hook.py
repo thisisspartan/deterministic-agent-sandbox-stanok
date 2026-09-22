@@ -2,7 +2,7 @@
 
 The hook is the ONLY enforcement of the commit-message contract (the
 supervisor paths no longer use --no-verify), so it must actually enforce:
-accept TASK-STANOK-CC-NNN and the two exact maintenance prefixes
+accept TASK-STANOK-CC-NNN and the four exact maintenance prefixes
 (trailing space required), reject everything else.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_commit_msg_hook.py -q
@@ -36,6 +36,14 @@ def test_save_state_prefix_accepted():
 
 def test_clean_for_task_prefix_accepted():
     assert _run_hook("chore: clean for new task — infra only") == 0
+
+
+def test_sync_infra_prefix_accepted():
+    assert _run_hook("chore: sync infra from darkcast (2026-09-22)") == 0
+
+
+def test_harness_prefix_accepted():
+    assert _run_hook("chore: harness sandbox denyRead + sync-infra prefix") == 0
 
 
 def test_unrecognized_messages_rejected():
