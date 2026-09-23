@@ -159,7 +159,9 @@ class FireSim:
                       for y in range(height)]
 
     def _taper(self, x, y):
-        """Lateral cone factor for cell ``(x, y)`` in (0, 1]."""
+        """Lateral cone factor for cell ``(x, y)`` in [0, 1]: a hard gate
+        for rising rows (0 outside the cone) and a gentle edge dimmer on
+        the base row."""
         r = (self.h - 1) - y  # rows above the base
         c = (self.w - 1) / 2.0
         hw = (self.w / 2.0) * (1.0 - r / self.h)
@@ -183,7 +185,10 @@ class FireSim:
         old = self.heat
 
         # Per-row horizontal turbulence: the new row samples the row below
-        # with a small deterministic-per-seed offset.
+        # with a small deterministic-per-seed offset. The cone taper acts
+        # as a hard gate (cells outside the cone stay cold); it must not
+        # also multiply the heat, or it compounds row after row and the
+        # flame dies out well before the upper rows.
         wobble = [rng.randint(-1, 1) for _ in range(h - 1)]
         new = [[0.0] * w for _ in range(h)]
         for y in range(h - 1):
@@ -192,6 +197,8 @@ class FireSim:
             taper = self.taper[y]
             off = wobble[y]
             for x in range(w):
+                if taper[x] <= 0.0:
+                    continue
                 i = x + off
                 s = 0.0
                 if 0 <= i - 1 < w:
@@ -200,14 +207,18 @@ class FireSim:
                     s += src[i]
                 if 0 <= i + 1 < w:
                     s += src[i + 1]
-                row[x] = (s / 3.0) * DECAY * taper[x]
+                row[x] = (s / 3.0) * DECAY
 
         if self.inject:
             base_row = new[h - 1]
             base_taper = self.taper[h - 1]
             for x in range(w):
                 if rng.random() < INJECT_PROB:
-                    base_row[x] = (INJECT_MIN + 0.15 * rng.random()) * base_taper[x]
+                    # Clamp at 1.0: the base taper dims only the row
+                    # edges, and heat must stay within [0, 1].
+                    base_row[x] = min(
+                        1.0, (INJECT_MIN + 0.15 * rng.random()) * base_taper[x]
+                    )
 
         self.heat = new
         self._tick_smoke()
