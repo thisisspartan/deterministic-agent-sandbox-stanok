@@ -21,8 +21,9 @@ Four separated concerns:
    faint gray. ``color_mode`` picks the escape style: ``"truecolor"``
    (24-bit, the default, byte-identical to the original output),
    ``"256"`` (``\\x1b[38;5;Nm`` via :func:`rgb_to_256`), ``"16"``
-   (``\\x1b[38;5;Nm`` with N in 0..15 via :func:`rgb_to_16` -- the
-   last-resort fallback for terminals that drop 256-color escapes) or
+   (basic SGR ``\\x1b[3Xm`` for N in 0..7 and ``\\x1b[9Xm`` for N in 8..15
+   via :func:`rgb_to_16` -- the last-resort fallback for terminals that
+   drop extended 256-color escapes) or
    ``"none"`` (no ANSI escapes).
 4. Loop        -- IO only, under ``if __name__ == "__main__"``: ~30 FPS
    animation on a TTY (centered in the terminal), a single headless frame
@@ -369,9 +370,12 @@ def render(sim, color_mode="truecolor"):
     - ``"truecolor"`` (default) -- ``\\x1b[38;2;R;G;Bm\\x1b[0m\\u2580``;
     - ``"256"`` -- ``\\x1b[38;5;Nm\\x1b[0m\\u2580`` with
       ``N = rgb_to_256(jittered rgb)``;
-    - ``"16"`` -- ``\\x1b[38;5;Nm\\x1b[0m\\u2580`` with
-      ``N = rgb_to_16(jittered rgb)`` (N in 0..15): the last-resort
-      fallback for terminals that drop 256-color escapes;
+    - ``"16"`` -- basic SGR, the most compatible encoding: with
+      ``N = rgb_to_16(jittered rgb)``, N in 0..7 renders
+      ``\\x1b[3Xm\\x1b[0m\\u2580`` (X = N) and N in 8..15 renders
+      ``\\x1b[9Xm\\x1b[0m\\u2580`` (X = N - 8): the last-resort fallback
+      for terminals that drop extended ``\\x1b[38;5;N`` escapes even for
+      N in 0..15;
     - ``"none"`` -- plain ``\\u2580``, no ANSI escapes.
     """
     w, h = sim.w, sim.h
@@ -396,9 +400,16 @@ def render(sim, color_mode="truecolor"):
                         "\x1b[38;5;%dm\x1b[0m\u2580" % rgb_to_256((r, g, b))
                     )
                 elif color_mode == "16":
-                    cells.append(
-                        "\x1b[38;5;%dm\x1b[0m\u2580" % rgb_to_16((r, g, b))
-                    )
+                    # CC-117: basic SGR codes only -- the most compatible
+                    # color encoding that exists. Terminals that drop the
+                    # extended \x1b[38;5;N sequences do so even for N in
+                    # 0..15, but usually still understand \x1b[3Xm (0..7)
+                    # and \x1b[9Xm (bright 8..15).
+                    n = rgb_to_16((r, g, b))
+                    if n < 8:
+                        cells.append("\x1b[3%dm\x1b[0m\u2580" % n)
+                    else:
+                        cells.append("\x1b[9%dm\x1b[0m\u2580" % (n - 8))
                 elif color_mode == "none":
                     cells.append("\u2580")
                 else:
