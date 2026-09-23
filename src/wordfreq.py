@@ -34,16 +34,53 @@ def format_report(freq: dict[str, int]) -> str:
     return "\n".join(f"{word} {count}" for word, count in items)
 
 
+def top_n(freq: dict[str, int], n: int) -> list[tuple[str, int]]:
+    """Return the top ``n`` entries in report order (count descending,
+    then word ascending — the same order ``format_report`` uses).
+    ``n <= 0`` -> []; ``n >= len(freq)`` -> all entries; empty dict -> [].
+    """
+    if n <= 0:
+        return []
+    items = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
+    return items[:n]
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point. Returns the exit code.
 
-    argv[0] (if present) is the input file; otherwise stdin is read.
-    Exit codes: 0 success; 2 file missing/unreadable.
+    Usage: wordfreq [--top N] [file]. The optional input file is read
+    from the remaining argument; otherwise stdin is read. With
+    ``--top N`` only the top N report lines are printed.
+    Exit codes: 0 success; 2 file missing/unreadable, or ``--top`` given
+    a non-integer or non-positive argument.
     """
     if argv is None:
         argv = sys.argv[1:]
-    if argv:
-        path = argv[0]
+    top: int | None = None
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--top":
+            if i + 1 >= len(argv):
+                print("wordfreq: --top requires an integer argument", file=sys.stderr)
+                return 2
+            value = argv[i + 1]
+            try:
+                n = int(value)
+            except ValueError:
+                print(f"wordfreq: --top expects an integer, got {value!r}", file=sys.stderr)
+                return 2
+            if n < 1:
+                print(f"wordfreq: --top must be a positive integer, got {n}", file=sys.stderr)
+                return 2
+            top = n
+            i += 2
+        else:
+            rest.append(arg)
+            i += 1
+    if rest:
+        path = rest[0]
         try:
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
@@ -52,7 +89,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     else:
         text = sys.stdin.read()
-    report = format_report(frequencies(tokenize(text)))
+    freq = frequencies(tokenize(text))
+    if top is not None:
+        freq = dict(top_n(freq, top))
+    report = format_report(freq)
     if report:
         print(report)
     return 0
