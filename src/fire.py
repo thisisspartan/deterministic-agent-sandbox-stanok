@@ -293,7 +293,11 @@ class FireSim:
         if self.inject:
             base_row = new[h - 1]
             base_taper = self.taper[h - 1]
-            for x in range(w):
+            # CC-114: inject only in the central third of the terminal
+            # (columns [w//3, 2*w//3], inclusive): the flame is a central
+            # cone that scales with the width, not a mountain filling it.
+            # Per-cell ignition probability keeps the band ragged, not solid.
+            for x in range(w // 3, 2 * w // 3 + 1):
                 if rng.random() < INJECT_PROB:
                     # Clamp at 1.0: the base taper dims only the row
                     # edges, and heat must stay within [0, 1].

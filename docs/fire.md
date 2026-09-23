@@ -1,47 +1,44 @@
-# fire
+# `src/fire.py` — deterministic multicolor terminal fire
 
-`src/fire.py` — a deterministic multicolor terminal fire (CC-108..CC-113).
-Stdlib only, single module, no side effects on import. Four concerns:
-`FireSim` (deterministic 2D heat field), `palette` (heat → RGB),
-`render` (ANSI half-block frames), and the CLI loop (TTY animation or a
-single headless frame). A fixed seed reproduces every frame byte-for-byte.
+A pure, deterministic 2D heat-field fire: seeded PRNG drives every draw, so a
+fixed seed reproduces every frame byte-for-byte. Stdlib only, no side effects
+on import.
 
-## Color modes (CC-113)
+## Flame proportions (CC-114)
 
-The renderer picks its escape style via `render(sim, color_mode=...)`:
+The flame is a **central cone**, not a mountain filling the terminal:
 
-- `truecolor` (default) — `\x1b[38;2;R;G;Bm\x1b[0m▀`; byte-identical to the
-  original output.
-- `256` — `\x1b[38;5;Nm\x1b[0m▀`, where `N = rgb_to_256(jittered rgb)` is
-  the nearest color in the standard 256-color palette (16 base colors,
-  6x6x6 cube, 24-step grayscale ramp). Exact ties prefer the cube color
-  (black → 16, white → 231).
-- `none` — plain `▀`, no ANSI escapes.
+- **Central base:** base-row injection happens only in the central third of
+  the terminal — columns `[w//3, 2*w//3]` (inclusive) — with per-cell ignition
+  probability, so the base is a ragged band with internal gaps, not a solid
+  line.
+- **Span cap:** in the bottom 6 rows the colored span (rightmost − leftmost
+  + 1) is at most `w//2`.
+- **Scales with the terminal:** on a wide terminal the flame stays central
+  and proportional to the width; it does not stretch to fill it.
 
-Terminal capability is detected by `detect_color_mode(env=None)`:
-`COLORTERM` containing `truecolor`/`24bit` (case-insensitive) wins and
-yields `truecolor`; otherwise `TERM` containing `256color` yields `256`;
-otherwise `none`.
+Kept from earlier contracts: tapering cone, internal gaps/tongues (cold
+pockets in the lower body), blue combustion base (bottom rows), white-hot
+core, per-frame flicker, sparse smoke above the flame top, per-cell color
+jitter, and full determinism.
 
-CLI: `--color {truecolor,256,none}` forces the mode. Without the flag, a
-TTY auto-detects via `COLORTERM`/`TERM`, and headless (non-TTY) output
-stays `truecolor` (the existing contract). All other flags are unchanged.
+## Public API
 
-## Licking flame shape (CC-113)
+- `FireSim(width, height, seed=42, inject=True)` — `sim.heat[y][x]` floats in
+  `[0, 1]` (`y=0` top), `sim.base[y][x]` blue-zone flag (bottom `height//10`
+  rows), `sim.smoke` particle list.
+- `sim.tick()` — one frame: turbulence-offset upward diffusion, decay,
+  central-third base injection, smoke update.
+- `palette(heat, is_base, blank=0.01)` — `(r, g, b)` or `None` (blank).
+- `render(sim, color_mode="truecolor")` — one ANSI frame of half-block cells;
+  modes `"truecolor"` (default, 24-bit escapes), `"256"` (`rgb_to_256`),
+  `"none"` (no escapes).
+- `rgb_to_256(rgb)`, `detect_color_mode(env=None)`, `jittered_rgb(rgb, x, y)`
+  — CC-113 color-capability helpers.
+- CLI: `--seed/--width/--height/--fps/--frames N/--frame N/--color`; headless
+  renders one frame and exits; TTY animates and exits 0 on SIGINT.
 
-The flame body is not a solid cone. Two mechanisms:
+## Tests
 
-- **Internal gaps / tongues:** in the lower body (rows
-  `y >= h * GAP_ROW_FRACTION`), each rising cell skips diffusion with
-  probability `GAP_PROB` — a cold pocket. Gaps streak slightly upward
-  (a killed cell feeds zero to the row above), so the body shows licking
-  tongues with blank cells strictly between colored ones; the upper rows
-  stay coherent, keeping the tapered cone silhouette and letting heat
-  still rise to the top rows.
-- **No edge contact:** base-row ignitions whose heat falls below the
-  blank threshold are dropped, so the leftmost/rightmost colored base
-  cells never sit in the terminal edge columns (the base is a ragged,
-  inset line).
-
-Unchanged: tapering cone, blue combustion base, white-hot core,
-per-frame flicker, smoke, per-cell jitter, determinism.
+`bash scripts/run.sh test tests/fire_*_test.py` — basic, realism, polish,
+shape, color, and flame-width contracts.
