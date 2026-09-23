@@ -236,6 +236,52 @@ def test_config_gate() -> bool:
     return False
 
 
+def _resolve_sandbox_path(base: str, entry: str) -> str:
+    # Mirror cli.js Rn6/lq resolution for sandbox.filesystem entries:
+    #   "//X" -> "/X";  "~..." -> home;  absolute -> as-is;
+    #   relative -> resolved against the --settings file's directory (base),
+    #   NOT cwd. This is the exact base cli.js uses (V_6 for flagSettings),
+    #   which is why a bare "hooks" resolves to <settings-dir>/hooks.
+    if entry.startswith("//"):
+        return "/" + entry[2:]
+    if entry.startswith("~"):
+        return os.path.expanduser(entry)
+    if os.path.isabs(entry):
+        return entry
+    return os.path.normpath(os.path.join(base, entry))
+
+
+def sandbox_config_gate() -> bool:
+    # W7 sandbox-config gate (fail-closed): cli.js resolves sandbox.filesystem
+    # deny entries against the --settings file's directory (REPO_ROOT/.claude),
+    # NOT cwd. A deny entry that resolves to a NON-EXISTENT path inside the
+    # allowed-write region makes cli.js emit `--ro-bind /dev/null <path>`;
+    # bwrap must then create the mount-point file, and when the parent sits on
+    # a read-only mount (the Docker repo mount) it dies with EROFS and EVERY
+    # Bash call in the session fails from the first command (CC-107). A
+    # non-existent deny entry is always a mistake (typo / wrong base), so
+    # fail-closed if any denyWrite/denyRead entry resolves to a path that does
+    # not exist.
+    settings = os.path.join(REPO_ROOT, ".claude", "settings.stanok.json")
+    if not os.path.isfile(settings):
+        return False
+    try:
+        with open(settings, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError) as e:
+        log(f"WARN: could not parse {settings} in sandbox_config_gate — fail-closed: {e}")
+        return True
+    base = os.path.dirname(settings)  # == REPO_ROOT/.claude, matches cli.js V_6
+    fs = cfg.get("sandbox", {}).get("filesystem", {})
+    for key in ("denyWrite", "denyRead"):
+        for entry in fs.get(key, []):
+            resolved = _resolve_sandbox_path(base, entry)
+            if not os.path.exists(resolved):
+                log(f"SANDBOX-CONFIG: {key} entry {entry!r} resolves to non-existent {resolved} (base {base})")
+                return True
+    return False
+
+
 def _required_context_window() -> int | None:
     """Required context window: env STANOK_REQUIRED_WINDOW overrides
     CLAUDE_CODE_AUTO_COMPACT_WINDOW from .claude/settings.stanok.json."""
@@ -1738,6 +1784,12 @@ def main() -> int:
         # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
         if test_config_gate():
             return early_abort(27, "ERROR: pytest config files in tests/ (rc=27)")
+
+        # W7 sandbox-config gate (rc=28): a sandbox.filesystem deny entry that
+        # resolves (against the settings dir, per cli.js) to a non-existent
+        # path makes bwrap EROFS-kill every Bash call in the session (CC-107).
+        if sandbox_config_gate():
+            return early_abort(28, "ERROR: sandbox.filesystem deny entry resolves to a non-existent path (rc=28)")
 
         # R2: launch orchestration (the former launch.sh branches, in Python).
         in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
