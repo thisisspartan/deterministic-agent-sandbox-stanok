@@ -1,77 +1,65 @@
-# `src/fire.py` — console fire (CC-108)
+# `src/fire.py` — deterministic multicolor terminal fire (CC-109)
 
-Deterministic, multicolor terminal fire. Python 3.11 stdlib only, single
-module, zero dependencies.
+Stdlib-only Python 3.11 module. No IO at import time. Four separated
+concerns:
 
-## Module contract
+## 1. Simulation — `FireSim(width, height, seed=0, inject=True)`
 
-Four separated concerns:
+- `sim.heat[y][x]`: 2D grid of floats in `[0, 1]`; `y = 0` is the TOP row,
+  `y = h-1` the bottom (base) row.
+- `sim.base[y][x]`: per-cell flag for the blue combustion zone (bottom 2 rows).
+- `sim.smoke`: sparse deterministic list of `SmokeParticle(x, y, life)`
+  (life in `(0, 1]`, capped at 12), rising above the flame top and fading.
+- `sim.tick()`: one deterministic frame (single seeded `random.Random(seed)`):
+  1. global per-frame **flicker** multiplier `uniform(0.92, 1.08)`;
+  2. heat **rises** one row per tick (`0.7` from below + `0.15` from each
+     diagonal-below neighbor) with cooling `* 0.94` and `- 0.006` decay;
+  3. per-cell multiplicative **turbulence** `uniform(0.85, 1.15)` on heated
+     cells (sway / licking / multiple tongues);
+  4. base row re-ignites each tick: `flick * uniform(0.6, 1.0)` per cell
+     (`inject=False` decays instead — used by the decay test);
+  5. smoke particles rise (`y -= 1`), drift sideways, fade (`life -= 0.06`),
+     a new particle spawns (p = 0.5/tick) just above the current flame top.
 
-| Concern | API | Property |
-|---|---|---|
-| Simulation | `FireSim(width, height, seed)`, `.tick()`, `.heat`, `.base`, `.smoke` | pure, deterministic (seeded `random.Random`) |
-| Palette | `palette(heat, is_base, jitter=0.0) -> (r,g,b) \| None` | pure |
-| Renderer | `render(sim) -> str`, `frame_at(sim, n) -> str` | pure |
-| Loop | `main(argv)`, `_run_loop(sim, fps)` | IO only, `__main__` guard |
+Two sims with the same seed produce identical frame sequences.
 
-### Simulation
+## 2. Palette (pure)
 
-- `heat`: 2D grid of floats in `[0, 1]`; row 0 = top, last row = base.
-- Per `tick()`: inject heat at the base row(s) (center span), diffuse
-  upward, lateral spread, turbulence (perturbs only hot cells, so cold
-  cells stay exactly `0.0`), cooling decay; result clamped to `[0, 1]`.
-- `base`: per-cell flag for the bottom two rows of the flame body (blue
-  combustion zone).
-- `smoke`: sparse deterministic list of `SmokeParticle(x, y, life)` (cap
-  12); spawns just above the flame top, rises one row per tick, fades,
-  and is dropped when dead.
-- Same `seed` ⇒ identical frame sequence, always.
+- `palette(heat, is_base) -> (r, g, b) | None`
+  - `heat < 0.05` (blank threshold, ≤ 0.10) → `None` (empty cell);
+  - base-zone cells: blue-dominant gradient by heat (always `b > r`);
+  - other cells: multi-stop gradient
+    white-hot `(255,255,240)` → yellow `(255,220,80)` → orange `(255,140,0)`
+    → red-orange `(220,60,20)` → red `(160,30,10)` → dark red `(90,15,8)`;
+  - `palette(1.0, False) == (255, 255, 240)` exactly.
+- `jittered_rgb(rgb, x, y)`: deterministic per-cell jitter in `[-4, +3]` per
+  channel that breaks color banding — adjacent cells with identical heat are
+  never pixel-identical.
 
-### Palette
+## 3. Renderer (pure)
 
-Hot→cool multi-stop gradient: white-hot `(255,255,240)` → yellow
-`(255,220,80)` → orange `(255,140,0)` → red-orange `(220,60,20)` → red
-`(160,30,10)` → dark red `(90,15,8)` → fade to black. Base-zone cells use
-a blue gradient by heat. Zero heat → `None` (empty cell). All components
-int `0..255`. `jitter ∈ [-1, 1]` is a small SEEDED per-cell term
-(pure function of `(seed, x, y)`) that breaks color banding.
+`render(sim)` → one ANSI frame string: `height` lines of `width` cells; each
+visible cell is a 24-bit truecolor escape (`\x1b[38;2;R;G;B m`) followed by a
+half-block `▀`; blank cells (and zero-heat frames) are plain spaces. Smoke
+particles render as faint gray (~`(60,60,65)`, fading with life).
 
-### Renderer
+## 4. Loop (IO only) — `main()`, under `if __name__ == "__main__"`
 
-Grid + smoke → one ANSI frame of `▀` half-block characters, 24-bit
-truecolor (`\x1b[38;2;R;G;B m`), `\x1b[0m` per line. Frame dimensions
-match the grid: `len(frame.split("\n")) == height`, exactly `width`
-visible characters per line. Zero heat → plain space. Smoke renders faint
-gray (~`60,60,65`) scaled by particle life.
+- CLI (argparse): `--seed N --width W --height H --fps N --frames N --frame N`.
+- `--frame N`: render exactly frame N (N ticks) to stdout, exit 0.
+- No TTY (or `--frames N`): render N (default 1) frames to stdout, exit 0 —
+  headless-safe, no infinite loop.
+- Real TTY: ~30 FPS animation, flame centered in `shutil.get_terminal_size()`
+  (fallback 80x24), clear per frame, cursor hidden; SIGINT stops the loop,
+  restores the cursor (`\x1b[?25h`), resets ANSI (`\x1b[0m`), exits 0.
 
-### Loop / entrypoint
+## Contracts / verification
 
-- Real TTY on stdout → ~30 FPS animation: clear screen per frame, flame
-  centered in `shutil.get_terminal_size()` (fallback 80×24), cursor hidden.
-  SIGINT: stop loop, restore cursor (`\x1b[?25h`), reset ANSI (`\x1b[0m`),
-  exit 0.
-- No TTY (e.g. `stdin </dev/null`, as `run.sh smoke` uses) → render ONE
-  frame to stdout, exit 0 (no infinite loop).
-- CLI (argparse): `--seed N`, `--width W`, `--height H`, `--fps N`,
-  `--frames N` (render N frames then exit 0), `--frame N` (render exactly
-  frame N then exit 0). Frame N (0-based) is the state after N+1 ticks.
-- Importing `fire` has no IO side effects (everything IO is under the
-  `__main__` guard).
-
-## Usage
-
-```bash
-python3 src/fire.py                       # TTY: animate; no TTY: one frame
-python3 src/fire.py --seed 7 --frame 12   # one deterministic frame
-python3 src/fire.py --frames 30 --width 60 --height 20
-bash scripts/run.sh test tests/fire_basic_test.py
-bash scripts/run.sh smoke src/fire.py
-```
-
-## Tests
-
-`tests/fire_basic_test.py` — import purity, seed determinism (in-process
-and via CLI), heat-field bounds/evolution, base-zone flag, smoke
-particles, palette range/white-hot/blue base/zero→None, renderer
-dimensions/ANSI/half-block/empty frame, CLI `--frame`/`--frames`/headless,
-and `run.sh smoke`.
+- Basic contract: `tests/fire_basic_test.py` (17 tests, protected).
+- Realism contract: `tests/fire_realism_test.py` (9 tests: multicolor 4
+  families, blue base `b > r`, white-hot core brighter than cool edge,
+  consecutive-frame flicker, moving flame top, smoke above flame top,
+  banding-free jitter, heat rises and decays).
+- Run: `bash scripts/run.sh test tests/fire_realism_test.py`
+  `bash scripts/run.sh test tests/fire_basic_test.py`
+  `bash scripts/run.sh smoke src/fire.py`
