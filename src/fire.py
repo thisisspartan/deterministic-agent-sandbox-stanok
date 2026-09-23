@@ -35,7 +35,7 @@ import time
 # --------------------------------------------------------------------------
 
 #: Heat below this renders as a blank (empty) cell (ticket allows <= 0.10).
-BLANK_THRESHOLD = 0.01
+BLANK_THRESHOLD = 0.10
 
 #: Multi-stop gradient, hottest -> coldest. heat >= stop renders that color.
 FLAME_STOPS = (
@@ -43,8 +43,8 @@ FLAME_STOPS = (
     (0.10, (90, 15, 8)),      # dark red
     (0.20, (160, 30, 10)),    # red
     (0.35, (220, 60, 20)),    # red-orange
-    (0.55, (255, 140, 0)),    # orange
-    (0.75, (255, 220, 80)),   # yellow
+    (0.50, (255, 140, 0)),    # orange
+    (0.70, (255, 220, 80)),   # yellow
     (1.00, (255, 255, 240)),  # white-hot
 )
 
@@ -70,15 +70,20 @@ def _lerp(stops, heat):
     return stops[-1][1]
 
 
-def palette(heat, is_base):
+def palette(heat, is_base, blank=0.01):
     """Map ``(heat, is_base)`` to an ``(r, g, b)`` int tuple, or ``None``
     for a blank cell (zero heat; non-base heat below the blank threshold).
+
+    ``blank`` is the cold-blank threshold for non-base heat: heat below it
+    renders as an empty cell. The renderer passes :data:`BLANK_THRESHOLD`
+    (<= 0.10) so near-dead heat never fills the grid; the legacy default
+    ``0.01`` keeps the two-argument behavior unchanged.
     """
     if heat <= 0.0:
         return None
     if is_base:
         return _lerp(BASE_STOPS, heat)
-    if heat < BLANK_THRESHOLD:
+    if heat < blank:
         return None
     return _lerp(FLAME_STOPS, heat)
 
@@ -106,9 +111,11 @@ def jittered_rgb(rgb, x, y):
 # Simulation (pure, deterministic)
 # --------------------------------------------------------------------------
 
-DECAY = 0.92          # per-row heat retention while rising
-INJECT_PROB = 0.80    # base-row ignition probability per cell per tick
-INJECT_MIN = 0.85     # ignition heat floor
+DECAY = 0.84          # per-row heat retention while rising (strong cooling
+                      # so the flame dies out well before the top row)
+INJECT_PROB = 0.70    # base-row ignition probability per cell per tick
+                      # (leaves gaps -> ragged, non-solid base)
+INJECT_MIN = 0.88     # ignition heat floor
 SMOKE_PROB = 0.35     # smoke spawn probability per tick
 SMOKE_FADE = 0.12     # life lost per tick
 MAX_SMOKE = 12        # hard cap on live smoke particles
@@ -144,6 +151,22 @@ class FireSim:
         self.smoke = []
         self.inject = inject
         self.rng = random.Random(seed)
+        # Cone taper, precomputed (no PRNG involved): 1.0 on the central
+        # axis, shrinking to 0 at the row edges the higher a row sits
+        # above the base -- the flame narrows to a point as it rises
+        # instead of filling a rectangular block.
+        self.taper = [[self._taper(x, y) for x in range(width)]
+                      for y in range(height)]
+
+    def _taper(self, x, y):
+        """Lateral cone factor for cell ``(x, y)`` in (0, 1]."""
+        r = (self.h - 1) - y  # rows above the base
+        c = (self.w - 1) / 2.0
+        hw = (self.w / 2.0) * (1.0 - r / self.h)
+        d = abs(x - c)
+        if d >= hw:
+            return 0.0
+        return 1.0 - d / hw
 
     def _flame_top(self):
         """Smallest y (topmost row) whose row carries flame heat, or None."""
@@ -166,6 +189,7 @@ class FireSim:
         for y in range(h - 1):
             src = old[y + 1]
             row = new[y]
+            taper = self.taper[y]
             off = wobble[y]
             for x in range(w):
                 i = x + off
@@ -176,13 +200,14 @@ class FireSim:
                     s += src[i]
                 if 0 <= i + 1 < w:
                     s += src[i + 1]
-                row[x] = (s / 3.0) * DECAY
+                row[x] = (s / 3.0) * DECAY * taper[x]
 
         if self.inject:
             base_row = new[h - 1]
+            base_taper = self.taper[h - 1]
             for x in range(w):
                 if rng.random() < INJECT_PROB:
-                    base_row[x] = INJECT_MIN + 0.15 * rng.random()
+                    base_row[x] = (INJECT_MIN + 0.15 * rng.random()) * base_taper[x]
 
         self.heat = new
         self._tick_smoke()
@@ -227,7 +252,7 @@ def render(sim):
         flags = sim.base[y]
         cells = []
         for x in range(w):
-            rgb = palette(row[x], flags[x])
+            rgb = palette(row[x], flags[x], BLANK_THRESHOLD)
             if rgb is None and (x, y) in smoke:
                 rgb = SMOKE_RGB
             if rgb is None:
