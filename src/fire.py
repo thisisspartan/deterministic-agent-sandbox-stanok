@@ -20,8 +20,10 @@ Four separated concerns:
    match the grid; zero heat renders as plain spaces; smoke renders
    faint gray. ``color_mode`` picks the escape style: ``"truecolor"``
    (24-bit, the default, byte-identical to the original output),
-   ``"256"`` (``\\x1b[38;5;Nm`` via :func:`rgb_to_256`) or ``"none"``
-   (no ANSI escapes).
+   ``"256"`` (``\\x1b[38;5;Nm`` via :func:`rgb_to_256`), ``"16"``
+   (``\\x1b[38;5;Nm`` with N in 0..15 via :func:`rgb_to_16` -- the
+   last-resort fallback for terminals that drop 256-color escapes) or
+   ``"none"`` (no ANSI escapes).
 4. Loop        -- IO only, under ``if __name__ == "__main__"``: ~30 FPS
    animation on a TTY (centered in the terminal), a single headless frame
    when stdout is not a TTY, deterministic ``--frame N`` / ``--frames N``
@@ -115,7 +117,8 @@ def jittered_rgb(rgb, x, y):
 
 
 # --------------------------------------------------------------------------
-# 256-color quantization and terminal capability detection (CC-113)
+# 256-color / 16-color quantization and terminal capability detection
+# (CC-113, CC-116)
 # --------------------------------------------------------------------------
 
 #: Standard xterm 16-color ANSI palette (indices 0..15).
@@ -153,6 +156,21 @@ def rgb_to_256(rgb):
         key = (d, 0 if 16 <= i <= 231 else 1, i)
         if best_key is None or key < best_key:
             best_key, best_i = key, i
+    return best_i
+
+
+def rgb_to_16(rgb):
+    """Nearest of the 16 basic ANSI colors (standard 0..15 palette:
+    black, red, green, yellow, blue, magenta, cyan, white, then the
+    bright variants 9..15), returned as an int index in 0..15.
+    Deterministic; on a distance tie the lower index wins, so e.g. pure
+    red maps to 1 and pure white to 7."""
+    r, g, b = rgb
+    best_i, best_d = 0, None
+    for i, (pr, pg, pb) in enumerate(ANSI16_RGB):
+        d = (pr - r) * (pr - r) + (pg - g) * (pg - g) + (pb - b) * (pb - b)
+        if best_d is None or d < best_d:
+            best_d, best_i = d, i
     return best_i
 
 
@@ -351,6 +369,9 @@ def render(sim, color_mode="truecolor"):
     - ``"truecolor"`` (default) -- ``\\x1b[38;2;R;G;Bm\\x1b[0m\\u2580``;
     - ``"256"`` -- ``\\x1b[38;5;Nm\\x1b[0m\\u2580`` with
       ``N = rgb_to_256(jittered rgb)``;
+    - ``"16"`` -- ``\\x1b[38;5;Nm\\x1b[0m\\u2580`` with
+      ``N = rgb_to_16(jittered rgb)`` (N in 0..15): the last-resort
+      fallback for terminals that drop 256-color escapes;
     - ``"none"`` -- plain ``\\u2580``, no ANSI escapes.
     """
     w, h = sim.w, sim.h
@@ -373,6 +394,10 @@ def render(sim, color_mode="truecolor"):
                 if color_mode == "256":
                     cells.append(
                         "\x1b[38;5;%dm\x1b[0m\u2580" % rgb_to_256((r, g, b))
+                    )
+                elif color_mode == "16":
+                    cells.append(
+                        "\x1b[38;5;%dm\x1b[0m\u2580" % rgb_to_16((r, g, b))
                     )
                 elif color_mode == "none":
                     cells.append("\u2580")
@@ -446,11 +471,14 @@ def main(argv=None):
                         help="render N frames then exit 0")
     parser.add_argument("--frame", type=int, default=None,
                         help="render exactly frame N then exit 0")
-    parser.add_argument("--color", choices=("truecolor", "256", "none"),
+    parser.add_argument("--color",
+                        choices=("truecolor", "256", "16", "none"),
                         default=None,
                         help="force the color mode (default: auto-detect on a "
                              "TTY -- 256 unless NO_COLOR/TERM=dumb or "
-                             "COLORTERM truecolor/24bit -- truecolor headless)")
+                             "COLORTERM truecolor/24bit -- truecolor headless); "
+                             "16 = basic ANSI palette fallback for terminals "
+                             "that drop 256-color escapes")
     args = parser.parse_args(argv)
 
     term_w, term_h = _terminal_size()
