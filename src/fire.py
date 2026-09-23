@@ -4,7 +4,10 @@ Four separated concerns:
 
 1. Simulation  -- ``FireSim``: a pure, deterministic 2D heat-field grid of
    floats in [0, 1]. Per tick: turbulence-offset upward diffusion from the
-   row below, decay, heat injection at the base row(s), and a sparse
+   row below (with per-cell cold pockets that carve internal gaps --
+   the flame body licks, it is not a solid cone), decay, base-row heat
+   injection (edge ignitions below the blank threshold are dropped, so
+   the flame never touches the terminal edges), and a sparse
    smoke-particle list rising above the flame top. One seeded
    ``random.Random`` drives every draw, so a fixed seed reproduces every
    frame byte-for-byte.
@@ -12,9 +15,13 @@ Four separated concerns:
    multi-stop hot->cold gradient (white-hot -> yellow -> orange ->
    red-orange -> red -> dark red), a blue combustion gradient for base
    zone cells, ``None`` below the blank threshold.
-3. Renderer    -- pure ``render(sim) -> str``: one ANSI frame of 24-bit
-   truecolor half-block (``\\u2580``) cells; frame dimensions match the
-   grid; zero heat renders as plain spaces; smoke renders faint gray.
+3. Renderer    -- pure ``render(sim, color_mode="truecolor") -> str``:
+   one ANSI frame of half-block (``\\u2580``) cells; frame dimensions
+   match the grid; zero heat renders as plain spaces; smoke renders
+   faint gray. ``color_mode`` picks the escape style: ``"truecolor"``
+   (24-bit, the default, byte-identical to the original output),
+   ``"256"`` (``\\x1b[38;5;Nm`` via :func:`rgb_to_256`) or ``"none"``
+   (no ANSI escapes).
 4. Loop        -- IO only, under ``if __name__ == "__main__"``: ~30 FPS
    animation on a TTY (centered in the terminal), a single headless frame
    when stdout is not a TTY, deterministic ``--frame N`` / ``--frames N``
@@ -108,6 +115,66 @@ def jittered_rgb(rgb, x, y):
 
 
 # --------------------------------------------------------------------------
+# 256-color quantization and terminal capability detection (CC-113)
+# --------------------------------------------------------------------------
+
+#: Standard xterm 16-color ANSI palette (indices 0..15).
+ANSI16_RGB = (
+    (0, 0, 0), (196, 0, 0), (0, 196, 0), (196, 196, 0),
+    (0, 0, 204), (196, 0, 196), (0, 196, 196), (229, 229, 229),
+    (0, 0, 0), (196, 0, 0), (0, 196, 0), (196, 196, 0),
+    (0, 0, 204), (196, 0, 196), (0, 196, 196), (229, 229, 229),
+)
+
+#: 6x6x6 cube channel values (indices 16..231).
+_CUBE_VALUES = (0, 95, 135, 175, 215, 255)
+
+#: The full standard 256-color palette as ``(r, g, b)`` tuples indexed by
+#: escape index 0..255: 16 base colors, 6x6x6 cube, 24-step gray ramp.
+_PALETTE256 = list(ANSI16_RGB)
+for _r in _CUBE_VALUES:
+    for _g in _CUBE_VALUES:
+        for _b in _CUBE_VALUES:
+            _PALETTE256.append((_r, _g, _b))
+for _i in range(24):
+    _v = 255 if _i == 23 else 8 + 10 * _i
+    _PALETTE256.append((_v, _v, _v))
+
+
+def rgb_to_256(rgb):
+    """Nearest color in the standard 256-color palette (16 base colors,
+    6x6x6 cube, 24-step grayscale ramp), returned as an int index in
+    0..255. Deterministic; on an exact distance tie the cube color wins,
+    so black maps to 16 and white to 231."""
+    r, g, b = rgb
+    best_i, best_key = 0, None
+    for i, (pr, pg, pb) in enumerate(_PALETTE256):
+        d = (pr - r) * (pr - r) + (pg - g) * (pg - g) + (pb - b) * (pb - b)
+        key = (d, 0 if 16 <= i <= 231 else 1, i)
+        if best_key is None or key < best_key:
+            best_key, best_i = key, i
+    return best_i
+
+
+def detect_color_mode(env=None):
+    """Detect terminal color capability from environment variables.
+
+    ``"truecolor"`` when ``COLORTERM`` contains ``truecolor`` or ``24bit``
+    (case-insensitive; takes precedence over ``TERM``), else ``"256"``
+    when ``TERM`` contains ``256color``, else ``"none"``. ``env``
+    defaults to ``os.environ``.
+    """
+    env = os.environ if env is None else env
+    colorterm = (env.get("COLORTERM") or "").lower()
+    if "truecolor" in colorterm or "24bit" in colorterm:
+        return "truecolor"
+    term = (env.get("TERM") or "").lower()
+    if "256color" in term:
+        return "256"
+    return "none"
+
+
+# --------------------------------------------------------------------------
 # Simulation (pure, deterministic)
 # --------------------------------------------------------------------------
 
@@ -116,6 +183,18 @@ DECAY = 0.84          # per-row heat retention while rising (strong cooling
 INJECT_PROB = 0.70    # base-row ignition probability per cell per tick
                       # (leaves gaps -> ragged, non-solid base)
 INJECT_MIN = 0.88     # ignition heat floor
+GAP_PROB = 0.20       # probability per cell of a cold pocket in the
+                      # gap band (see GAP_ROW_FRACTION): the cell skips
+                      # diffusion this tick, leaving internal gaps between
+                      # tongues -- the flame body licks instead of forming
+                      # a solid cone. A killed cell also feeds 0 to the row
+                      # above next tick, so gaps streak slightly upward
+                      # (tongue-like). The upper rows stay coherent, so the
+                      # tip keeps its cone silhouette and heat still rises
+                      # to the top rows.
+GAP_ROW_FRACTION = 0.75  # cold pockets apply only to rows y >= h * this:
+                        # the licking is concentrated in the lower body,
+                        # never in the rising tip
 SMOKE_PROB = 0.35     # smoke spawn probability per tick
 SMOKE_FADE = 0.12     # life lost per tick
 MAX_SMOKE = 12        # hard cap on live smoke particles
@@ -199,6 +278,8 @@ class FireSim:
             for x in range(w):
                 if taper[x] <= 0.0:
                     continue
+                if y >= int(h * GAP_ROW_FRACTION) and rng.random() < GAP_PROB:
+                    continue  # cold pocket: internal gap / tongue edge
                 i = x + off
                 s = 0.0
                 if 0 <= i - 1 < w:
@@ -216,9 +297,14 @@ class FireSim:
                 if rng.random() < INJECT_PROB:
                     # Clamp at 1.0: the base taper dims only the row
                     # edges, and heat must stay within [0, 1].
-                    base_row[x] = min(
+                    heat = min(
                         1.0, (INJECT_MIN + 0.15 * rng.random()) * base_taper[x]
                     )
+                    # Base-zone cells render blue for ANY heat > 0, so an
+                    # edge ignition below the blank threshold would make
+                    # the flame touch the terminal edge -- drop it.
+                    if heat >= BLANK_THRESHOLD:
+                        base_row[x] = heat
 
         self.heat = new
         self._tick_smoke()
@@ -249,10 +335,16 @@ class FireSim:
 # Renderer (pure)
 # --------------------------------------------------------------------------
 
-def render(sim):
+def render(sim, color_mode="truecolor"):
     """Render one ANSI frame: ``height`` newline-joined rows of exactly
-    ``width`` cells. A cell is either a truecolor half-block
-    (``\\x1b[38;2;R;G;Bm\\x1b[0m\\u2580``) or a plain space."""
+    ``width`` cells. A cell is either a colored half-block (``\\u2580``)
+    or a plain space. ``color_mode`` picks the escape style:
+
+    - ``"truecolor"`` (default) -- ``\\x1b[38;2;R;G;Bm\\x1b[0m\\u2580``;
+    - ``"256"`` -- ``\\x1b[38;5;Nm\\x1b[0m\\u2580`` with
+      ``N = rgb_to_256(jittered rgb)``;
+    - ``"none"`` -- plain ``\\u2580``, no ANSI escapes.
+    """
     w, h = sim.w, sim.h
     smoke = {}
     for p in sim.smoke:
@@ -270,7 +362,16 @@ def render(sim):
                 cells.append(" ")
             else:
                 r, g, b = jittered_rgb(rgb, x, y)
-                cells.append("\x1b[38;2;%d;%d;%dm\x1b[0m\u2580" % (r, g, b))
+                if color_mode == "256":
+                    cells.append(
+                        "\x1b[38;5;%dm\x1b[0m\u2580" % rgb_to_256((r, g, b))
+                    )
+                elif color_mode == "none":
+                    cells.append("\u2580")
+                else:
+                    cells.append(
+                        "\x1b[38;2;%d;%d;%dm\x1b[0m\u2580" % (r, g, b)
+                    )
         rows.append("".join(cells))
     return "\n".join(rows)
 
@@ -298,7 +399,7 @@ def _center(frame, width):
     return "\n".join(pad_s + line for line in frame.split("\n"))
 
 
-def _animation_loop(sim, fps):
+def _animation_loop(sim, fps, color_mode="truecolor"):
     """TTY mode: clear per frame, ~``fps`` frames/second, exit 0 on SIGINT
     with the cursor restored and ANSI reset."""
     out = sys.stdout
@@ -309,7 +410,7 @@ def _animation_loop(sim, fps):
         while True:
             t0 = time.monotonic()
             sim.tick()
-            frame = _center(render(sim), sim.w)
+            frame = _center(render(sim, color_mode), sim.w)
             out.write("\x1b[2J\x1b[H" + frame + "\n")
             out.flush()
             time.sleep(max(0.0, step - (time.monotonic() - t0)))
@@ -337,6 +438,10 @@ def main(argv=None):
                         help="render N frames then exit 0")
     parser.add_argument("--frame", type=int, default=None,
                         help="render exactly frame N then exit 0")
+    parser.add_argument("--color", choices=("truecolor", "256", "none"),
+                        default=None,
+                        help="force the color mode (default: auto-detect via "
+                             "COLORTERM/TERM on a TTY, truecolor headless)")
     args = parser.parse_args(argv)
 
     term_w, term_h = _terminal_size()
@@ -355,6 +460,15 @@ def main(argv=None):
 
     sim = FireSim(w, h, seed=args.seed)
 
+    # Color mode: --color forces it; otherwise auto-detect on a TTY and
+    # keep the legacy truecolor default headless.
+    if args.color is not None:
+        color_mode = args.color
+    elif sys.stdout.isatty():
+        color_mode = detect_color_mode(os.environ)
+    else:
+        color_mode = "truecolor"
+
     def emit(frame):
         try:
             sys.stdout.write(frame + "\n")
@@ -367,17 +481,17 @@ def main(argv=None):
     if args.frame is not None:
         for _ in range(args.frame):
             sim.tick()
-        return emit(render(sim))
+        return emit(render(sim, color_mode))
     if args.frames is not None:
         rc = 0
         for _ in range(args.frames):
             sim.tick()
-            rc = emit(render(sim)) or rc
+            rc = emit(render(sim, color_mode)) or rc
         return rc
     if sys.stdout.isatty():
-        return _animation_loop(sim, args.fps)
+        return _animation_loop(sim, args.fps, color_mode)
     # Headless: exactly one frame, no loop.
-    return emit(render(sim))
+    return emit(render(sim, color_mode))
 
 
 if __name__ == "__main__":

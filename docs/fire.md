@@ -1,62 +1,47 @@
-# Fire — deterministic multicolor terminal fire
+# fire
 
-A pure-stdlib (Python 3.11, zero dependencies) deterministic fire rendered
-with 24-bit truecolor half-block (`▀`) cells.
+`src/fire.py` — a deterministic multicolor terminal fire (CC-108..CC-113).
+Stdlib only, single module, no side effects on import. Four concerns:
+`FireSim` (deterministic 2D heat field), `palette` (heat → RGB),
+`render` (ANSI half-block frames), and the CLI loop (TTY animation or a
+single headless frame). A fixed seed reproduces every frame byte-for-byte.
 
-## Run / stop
+## Color modes (CC-113)
 
-- Run: `python3 src/fire.py` — ~30 FPS animation on a TTY, centered in the
-  terminal.
-- Stop: `Ctrl-C` (cursor restored, ANSI reset, exit 0).
-- Flags: `--seed N` (default 42), `--width N` / `--height N` (default:
-  terminal size), `--fps N` (default 30), `--frame N` (render exactly frame
-  N and exit), `--frames N` (render N frames and exit).
-- Non-TTY stdout (pipes, `scripts/run.sh`): exactly one frame is rendered
-  and the process exits 0 — never an infinite loop.
+The renderer picks its escape style via `render(sim, color_mode=...)`:
 
-## How it works
+- `truecolor` (default) — `\x1b[38;2;R;G;Bm\x1b[0m▀`; byte-identical to the
+  original output.
+- `256` — `\x1b[38;5;Nm\x1b[0m▀`, where `N = rgb_to_256(jittered rgb)` is
+  the nearest color in the standard 256-color palette (16 base colors,
+  6x6x6 cube, 24-step grayscale ramp). Exact ties prefer the cube color
+  (black → 16, white → 231).
+- `none` — plain `▀`, no ANSI escapes.
 
-`src/fire.py` has four separated concerns:
+Terminal capability is detected by `detect_color_mode(env=None)`:
+`COLORTERM` containing `truecolor`/`24bit` (case-insensitive) wins and
+yields `truecolor`; otherwise `TERM` containing `256color` yields `256`;
+otherwise `none`.
 
-1. **Simulation** (`FireSim`): a 2D heat field `heat[y][x]` of floats in
-   `[0, 1]`, `y = 0` at the top, fuel injected at the base row. Each tick:
-   upward diffusion from the row below with a per-row turbulence wobble
-   (±1 column), strong per-row cooling (`DECAY = 0.84`), probabilistic
-   base-row injection (`INJECT_PROB = 0.70`, leaving ragged gaps), and a
-   sparse list of smoke particles rising above the flame top. One seeded
-   `random.Random` drives every draw, so a fixed seed reproduces every
-   frame byte-for-byte.
-2. **Flame shape**: the cone taper precomputed per cell gates rising
-   rows — a row `r` rows above the base only carries heat within a half
-   width of `(w/2) * (1 - r/h)`, shrinking to a point at the top. Cells
-   outside the cone stay cold, so the flame is a tapering cone (wide at
-   the base, narrow at the tip) with a ragged silhouette, not a solid
-   block.
-3. **Palette** (`palette(heat, is_base, blank)`): `None` (blank cell) for
-   heat below the blank threshold (`BLANK_THRESHOLD = 0.10`), so
-   near-dead heat never fills the grid; a blue combustion gradient for
-   base-zone cells (blue-dominant, `b > r`); otherwise a multi-stop
-   hot→cold gradient: white-hot `(255,255,240)` at the peak → yellow →
-   orange → red-orange → dark red. Per-cell seeded jitter (`jittered_rgb`,
-   ≤ 8 per channel) breaks color banding.
-4. **Renderer** (`render(sim)`): one ANSI frame of exactly `height` rows ×
-   `width` cells; colored cells are `\x1b[38;2;R;G;Bm\x1b[0m▀`, blank cells
-   are plain spaces; smoke particles render as faint gray.
+CLI: `--color {truecolor,256,none}` forces the mode. Without the flag, a
+TTY auto-detects via `COLORTERM`/`TERM`, and headless (non-TTY) output
+stays `truecolor` (the existing contract). All other flags are unchanged.
 
-Color model: blue combustion base zone → white-hot core → yellow-orange
-→ red body → smoke above the flame top.
+## Licking flame shape (CC-113)
 
-## Tests
+The flame body is not a solid cone. Two mechanisms:
 
-- `bash scripts/run.sh test tests/fire_basic_test.py` — contract (imports,
-  determinism, heat bounds, palette, renderer, CLI).
-- `bash scripts/run.sh test tests/fire_realism_test.py` — realism (4 color
-  families, blue base, white-hot core, flicker, turbulence, smoke, no
-  banding, heat rises and decays).
-- `bash scripts/run.sh test tests/fire_polish_test.py` — polish (300 frames
-  at 80x24 < 5 s, `--frame`/`--frames` determinism, small terminals,
-  non-TTY safety).
-- `bash scripts/run.sh test tests/fire_shape_test.py` — shape (taper:
-  top 6 rows under half the bottom 6; top 50%+ blank; base < 90% lit;
-  cold heat renders blank).
-- `bash scripts/run.sh smoke src/fire.py` — module smoke load.
+- **Internal gaps / tongues:** in the lower body (rows
+  `y >= h * GAP_ROW_FRACTION`), each rising cell skips diffusion with
+  probability `GAP_PROB` — a cold pocket. Gaps streak slightly upward
+  (a killed cell feeds zero to the row above), so the body shows licking
+  tongues with blank cells strictly between colored ones; the upper rows
+  stay coherent, keeping the tapered cone silhouette and letting heat
+  still rise to the top rows.
+- **No edge contact:** base-row ignitions whose heat falls below the
+  blank threshold are dropped, so the leftmost/rightmost colored base
+  cells never sit in the terminal edge columns (the base is a ragged,
+  inset line).
+
+Unchanged: tapering cone, blue combustion base, white-hot core,
+per-frame flicker, smoke, per-cell jitter, determinism.
