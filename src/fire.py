@@ -159,19 +159,23 @@ def rgb_to_256(rgb):
 def detect_color_mode(env=None):
     """Detect terminal color capability from environment variables.
 
+    ``"none"`` on an EXPLICIT opt-out: ``NO_COLOR`` set to a non-empty
+    value (wins over everything) or ``TERM == "dumb"``. Else
     ``"truecolor"`` when ``COLORTERM`` contains ``truecolor`` or ``24bit``
-    (case-insensitive; takes precedence over ``TERM``), else ``"256"``
-    when ``TERM`` contains ``256color``, else ``"none"``. ``env``
-    defaults to ``os.environ``.
+    (case-insensitive; takes precedence over ``TERM``). Else ``"256"`` --
+    the default: most terminals support 256 colors even without an
+    explicit signal. ``env`` defaults to ``os.environ``.
     """
     env = os.environ if env is None else env
+    if env.get("NO_COLOR"):
+        return "none"
+    term = (env.get("TERM") or "").lower()
+    if term == "dumb":
+        return "none"
     colorterm = (env.get("COLORTERM") or "").lower()
     if "truecolor" in colorterm or "24bit" in colorterm:
         return "truecolor"
-    term = (env.get("TERM") or "").lower()
-    if "256color" in term:
-        return "256"
-    return "none"
+    return "256"
 
 
 # --------------------------------------------------------------------------
@@ -444,8 +448,9 @@ def main(argv=None):
                         help="render exactly frame N then exit 0")
     parser.add_argument("--color", choices=("truecolor", "256", "none"),
                         default=None,
-                        help="force the color mode (default: auto-detect via "
-                             "COLORTERM/TERM on a TTY, truecolor headless)")
+                        help="force the color mode (default: auto-detect on a "
+                             "TTY -- 256 unless NO_COLOR/TERM=dumb or "
+                             "COLORTERM truecolor/24bit -- truecolor headless)")
     args = parser.parse_args(argv)
 
     term_w, term_h = _terminal_size()

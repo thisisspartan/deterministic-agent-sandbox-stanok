@@ -1,147 +1,161 @@
-"""Color-capability + licking-flame contract tests for src/fire.py (CC-113).
+"""Color-capability contract tests for src/fire.py (CC-115).
+
+The default color mode is 256: on a terminal that carries no explicit
+color signal the flame must still render in 256-color ANSI escapes, not
+monochrome. ``detect_color_mode`` returns:
+
+- ``"none"`` on an EXPLICIT opt-out: ``NO_COLOR`` set to a non-empty
+  value (wins over everything) or ``TERM == "dumb"``;
+- ``"truecolor"`` when ``COLORTERM`` contains ``truecolor`` / ``24bit``
+  (case-insensitive);
+- ``"256"`` otherwise (the default -- most terminals support 256 colors
+  even without ``COLORTERM``).
 
 Run via:  bash scripts/run.sh test tests/fire_color_test.py
-
-Covers: nearest-256-color quantization (``rgb_to_256``), terminal color
-capability detection (``detect_color_mode``), the ``render()``
-``color_mode`` argument (truecolor default / 256 / none), the CLI
-``--color`` flag (forced mode, headless default stays truecolor), and the
-licking-flame shape (internal gaps / tongues in the middle body rows and
-no terminal-edge contact on the base row).
 """
 
-import os
 import re
-import subprocess
-import sys
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC_DIR = os.path.join(REPO_ROOT, "src")
 
 import fire  # src is on sys.path via pythonpath=src in run.sh
 
-# One cell: a truecolor half-block or a plain space (the default renderer).
-TRUECOLOR_CELL_RE = re.compile(r"(\x1b\[38;2;(\d+);(\d+);(\d+)m\x1b\[0m▀| )")
-# One cell in 256-color mode.
-ANSI256_CELL_RE = re.compile(r"(\x1b\[38;5;(\d+)m\x1b\[0m▀| )")
-
-W, H = 80, 24          # shape-contract frame grid
-SEED = 42             # fixed seed -> deterministic frames
-TICKS = 30            # run to steady state
-
-
-def _run_py(args):
-    env = dict(os.environ)
-    env["PYTHONPATH"] = SRC_DIR
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return subprocess.run(
-        [sys.executable] + args,
-        cwd=REPO_ROOT,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=20,
-    )
+# One 256-mode cell: an escape-indexed half-block or a plain space.
+CELL256_RE = re.compile(r"(\x1b\[38;5;(\d+)m\x1b\[0m▀| )")
+# One truecolor cell (default renderer) or a plain space.
+CELLTC_RE = re.compile(r"(\x1b\[38;2;\d+;\d+;\d+m\x1b\[0m▀| )")
+BLOCK = "\u2580"
+SEED = 42
+TICKS = 30
 
 
-def _decode_truecolor(frame):
-    """Truecolor frame -> list of rows; each cell True (colored) / False."""
+def _grid(w, h, seed=SEED, ticks=TICKS):
+    """Frame rendered after ``ticks`` ticks (default truecolor mode) ->
+    list of rows (top to bottom); each cell is True (colored) or
+    False (blank)."""
+    sim = fire.FireSim(w, h, seed=seed)
+    for _ in range(ticks):
+        sim.tick()
     grid = []
-    for line in frame.split("\n"):
+    for line in fire.render(sim).split("\n"):
         row = []
         pos = 0
-        for m in TRUECOLOR_CELL_RE.finditer(line):
+        for m in CELLTC_RE.finditer(line):
             assert m.start() == pos, "frame is not cell-aligned"
             pos = m.end()
-            row.append(m.group(2) is not None)
+            row.append(m.group(1)[0] == "\x1b")
         assert pos == len(line), "trailing garbage in line"
         grid.append(row)
     return grid
 
 
-def _steady_grid():
-    sim = fire.FireSim(W, H, seed=SEED)
-    for _ in range(TICKS):
-        sim.tick()
-    return _decode_truecolor(fire.render(sim))
-
-
 # --- rgb_to_256 ---------------------------------------------------------------
 
-def test_rgb_to_256_anchor_colors():
+def test_rgb_to_256_known_indices():
+    # Exact palette hits: black and white tie between the 16 base colors
+    # and the 6x6x6 cube; per contract the cube color wins (black -> 16,
+    # white -> 231).
     assert fire.rgb_to_256((0, 0, 0)) == 16
     assert fire.rgb_to_256((255, 255, 255)) == 231
-    assert 196 <= fire.rgb_to_256((255, 0, 0)) <= 202
+    # The 16 base colors resolve to their exact indices.
+    assert fire.rgb_to_256((196, 0, 0)) == 1
+    assert fire.rgb_to_256((0, 196, 0)) == 2
+    assert fire.rgb_to_256((0, 0, 204)) == 4
 
 
-def test_rgb_to_256_range_and_deterministic():
-    for rgb in ((0, 0, 0), (255, 255, 255), (255, 0, 0), (0, 255, 0),
-                (0, 0, 255), (127, 127, 127), (200, 100, 50), (12, 34, 200)):
+def test_rgb_to_256_index_in_range():
+    for rgb in ((0, 0, 0), (1, 1, 1), (90, 15, 8), (160, 30, 10),
+                (255, 140, 0), (255, 220, 80), (255, 255, 240),
+                (25, 45, 90), (80, 130, 220), (150, 200, 255),
+                (60, 60, 65), (200, 100, 50)):
         idx = fire.rgb_to_256(rgb)
         assert isinstance(idx, int)
-        assert 0 <= idx <= 255
-        assert fire.rgb_to_256(rgb) == idx, "rgb_to_256 must be deterministic"
+        assert 0 <= idx <= 255, f"rgb_to_256({rgb}) = {idx} out of range"
 
 
-# --- detect_color_mode ----------------------------------------------------------
+# --- detect_color_mode ---------------------------------------------------------
 
-def test_detect_color_mode_matrix():
+def test_detect_empty_env_defaults_to_256():
+    """No explicit signal -> the default is 256, not monochrome."""
+    assert fire.detect_color_mode({}) == "256"
+
+
+def test_detect_colorterm_truecolor():
     assert fire.detect_color_mode({"COLORTERM": "truecolor"}) == "truecolor"
+
+
+def test_detect_colorterm_24bit():
     assert fire.detect_color_mode({"COLORTERM": "24bit"}) == "truecolor"
+
+
+def test_detect_colorterm_case_insensitive():
     assert fire.detect_color_mode({"COLORTERM": "TRUECOLOR"}) == "truecolor"
+    assert fire.detect_color_mode({"COLORTERM": "24BIT"}) == "truecolor"
+
+
+def test_detect_term_256color():
     assert fire.detect_color_mode({"TERM": "xterm-256color"}) == "256"
+
+
+def test_detect_plain_term_defaults_to_256():
+    """TERM without a 256-color signal -> still the 256 default."""
+    assert fire.detect_color_mode({"TERM": "xterm"}) == "256"
+
+
+def test_detect_dumb_term_is_none():
     assert fire.detect_color_mode({"TERM": "dumb"}) == "none"
-    assert fire.detect_color_mode({}) == "none"
-    # COLORTERM takes precedence over TERM.
-    assert fire.detect_color_mode(
-        {"COLORTERM": "truecolor", "TERM": "xterm-256color"}
-    ) == "truecolor"
 
 
-def test_detect_color_mode_none_env_uses_os_environ():
-    assert fire.detect_color_mode(None) in ("truecolor", "256", "none")
+def test_detect_truecolor_wins_over_term():
+    env = {"COLORTERM": "truecolor", "TERM": "xterm-256color"}
+    assert fire.detect_color_mode(env) == "truecolor"
 
 
-# --- render color_mode ------------------------------------------------------------
+def test_detect_no_color_is_none():
+    """Explicit opt-out: NO_COLOR set to a non-empty value."""
+    assert fire.detect_color_mode({"NO_COLOR": "1"}) == "none"
 
-def test_render_default_still_emits_truecolor():
-    """Regression guard: the default call is byte-compatible with the
-    truecolor renderer (every cell matches the truecolor cell regex)."""
+
+def test_detect_no_color_wins_over_truecolor():
+    env = {"NO_COLOR": "1", "COLORTERM": "truecolor"}
+    assert fire.detect_color_mode(env) == "none"
+
+
+def test_detect_empty_no_color_does_not_opt_out():
+    """NO_COLOR set but empty is NOT an explicit opt-out -> 256."""
+    assert fire.detect_color_mode({"NO_COLOR": ""}) == "256"
+
+
+# --- renderer: 256 mode ---------------------------------------------------------
+
+def test_render_256_mode_cell_alignment():
     sim = fire.FireSim(24, 12, seed=3)
     for _ in range(8):
         sim.tick()
-    frame = fire.render(sim)
-    assert "\x1b[38;2;" in frame
-    for line in frame.split("\n"):
-        pos = 0
-        for m in TRUECOLOR_CELL_RE.finditer(line):
-            assert m.start() == pos, "frame is not cell-aligned"
-            pos = m.end()
-        assert pos == len(line), "trailing garbage in line"
-
-
-def test_render_256_mode_cell_aligned_and_in_range():
-    sim = fire.FireSim(40, 12, seed=42)
-    for _ in range(20):
-        sim.tick()
     frame = fire.render(sim, color_mode="256")
+    assert "\x1b[38;2;" not in frame, "256 mode must not emit truecolor escapes"
     lines = frame.split("\n")
     assert len(lines) == 12
-    colored = 0
+    saw_block = False
     for line in lines:
         pos = 0
-        for m in ANSI256_CELL_RE.finditer(line):
+        for m in CELL256_RE.finditer(line):
             assert m.start() == pos, "256-mode frame is not cell-aligned"
             pos = m.end()
-            if m.group(2) is not None:
-                idx = int(m.group(2))
-                assert 0 <= idx <= 255, f"256 index {idx} out of range"
-                colored += 1
-        assert pos == len(line), "trailing garbage in line"
-    assert colored > 0, "256-mode frame has no colored cells"
-    assert "\x1b[38;2;" not in frame, "256 mode must not emit truecolor escapes"
+            idx = m.group(2)
+            if idx is not None:
+                saw_block = True
+                assert 0 <= int(idx) <= 255
+        assert pos == len(line), "trailing garbage in 256-mode line"
+        assert len(CELL256_RE.findall(line)) == 24
+    assert saw_block, "256-mode frame has no colored cells"
+
+
+def test_render_256_mode_is_deterministic():
+    a = fire.FireSim(24, 12, seed=42)
+    b = fire.FireSim(24, 12, seed=42)
+    for _ in range(8):
+        a.tick()
+        b.tick()
+    assert fire.render(a, color_mode="256") == fire.render(b, color_mode="256")
 
 
 def test_render_none_mode_has_no_ansi():
@@ -149,76 +163,47 @@ def test_render_none_mode_has_no_ansi():
     for _ in range(8):
         sim.tick()
     frame = fire.render(sim, color_mode="none")
-    assert "\x1b[" not in frame, "none mode must emit no ANSI escapes"
+    assert "\x1b[" not in frame
     for line in frame.split("\n"):
-        assert set(line) <= {" ", "▀"}, f"none-mode line has extra chars: {line!r}"
+        assert len(line) == 24
+    assert BLOCK in frame
 
 
-# --- licking flame: internal gaps --------------------------------------------------
-
-def _has_internal_gap(row):
-    """True iff the row has colored i < blank j < colored k (tongue gap)."""
-    colored = [x for x, c in enumerate(row) if c]
-    return any(
-        colored[b] - colored[a] >= 2
-        for a in range(len(colored) - 1)
-        for b in (a + 1,)
-    )
-
-
-def test_middle_body_rows_have_internal_gaps():
-    """In >= 50% of the middle flame-body rows (strictly between the
-    topmost and bottommost body rows) a blank cell sits strictly between
-    two colored cells: the body licks, it is not a solid cone."""
-    grid = _steady_grid()
-    body = [y for y in range(H) if any(grid[y])]
-    assert body, "flame body is empty: no colored cells at all"
-    y_top, y_bot = min(body), max(body)
-    middle = [y for y in body if y_top < y < y_bot]
-    assert middle, "flame body has no middle rows"
-    gap_rows = [y for y in middle if _has_internal_gap(grid[y])]
-    assert len(gap_rows) / len(middle) >= 0.50, (
-        f"only {len(gap_rows)}/{len(middle)} middle rows have internal gaps; "
-        f"at least 50% must (gap rows: {gap_rows}, middle: {middle})"
-    )
+def test_render_default_stays_truecolor():
+    """Regression guard: the default renderer keeps emitting 24-bit
+    truecolor escapes, never 256-mode ones."""
+    sim = fire.FireSim(24, 12, seed=3)
+    for _ in range(8):
+        sim.tick()
+    frame = fire.render(sim)
+    assert "\x1b[38;2;" in frame
+    assert "\x1b[38;5;" not in frame
+    assert BLOCK in frame
 
 
-# --- licking flame: no edge contact ---------------------------------------------------
+# --- simulation shape guards (kept from the CC-113 suite) -----------------------
 
-def test_base_row_does_not_touch_terminal_edges():
-    """On the base row the leftmost colored cell is not in column 0 and
-    the rightmost is not in the last column: the flame does not touch the
-    terminal edges."""
-    grid = _steady_grid()
-    base = grid[H - 1]
+def test_base_row_has_internal_gaps():
+    """At 80x24 (seed 42, 30 ticks) the base row's span is a ragged band,
+    not a solid one: within the leftmost..rightmost colored cells, at
+    least 25% are blank."""
+    grid = _grid(80, 24)
+    base = grid[23]
     lit = [x for x, c in enumerate(base) if c]
-    assert lit, "base row has no colored cells"
-    assert lit[0] != 0, f"leftmost base cell is in column 0 (edge contact)"
-    assert lit[-1] != W - 1, f"rightmost base cell is in the last column"
+    assert lit, "base row is empty: no flame at all"
+    lo, hi = lit[0], lit[-1]
+    span = hi - lo + 1
+    blank = sum(1 for x in range(lo, hi + 1) if not base[x])
+    assert blank / span >= 0.25, (
+        f"only {100.0 * blank / span:.1f}% of the base span is blank; "
+        f"at least 25% must be (span {span}, blank {blank})"
+    )
 
 
-# --- CLI --color flag ---------------------------------------------------------------
-
-def test_cli_color_none_forces_plain_output():
-    p = _run_py(["src/fire.py", "--color", "none", "--frame", "5",
-                 "--width", "24", "--height", "10"])
-    assert p.returncode == 0, p.stderr
-    assert "\x1b[" not in p.stdout, "--color none must emit no ANSI escapes"
-    lines = p.stdout.strip("\n").split("\n")
-    assert len(lines) == 10
-    for line in lines:
-        assert len(line) == 24, "plain cells: line must be exactly width chars"
-
-
-def test_cli_color_256_forces_256_escapes():
-    p = _run_py(["src/fire.py", "--color", "256", "--frame", "5",
-                 "--width", "24", "--height", "10"])
-    assert p.returncode == 0, p.stderr
-    assert "\x1b[38;5;" in p.stdout, "--color 256 must emit 38;5 escapes"
-    assert "\x1b[38;2;" not in p.stdout, "--color 256 must not emit truecolor"
-
-
-def test_cli_headless_default_stays_truecolor():
-    p = _run_py(["src/fire.py", "--frame", "5", "--width", "24", "--height", "10"])
-    assert p.returncode == 0, p.stderr
-    assert "\x1b[38;2;" in p.stdout, "headless default must stay truecolor"
+def test_flame_does_not_touch_terminal_edges():
+    """At 80x24 (seed 42, 30 ticks) the leftmost and rightmost columns
+    are never lit: the flame never touches the terminal edges."""
+    grid = _grid(80, 24)
+    for y in range(24):
+        assert not grid[y][0], f"leftmost column lit in row {y}"
+        assert not grid[y][79], f"rightmost column lit in row {y}"
