@@ -17,6 +17,10 @@ CC-132 adds the single-source zone/kind pins:
   - the ticket header kinds are exactly impl|test|docs|edit (`scripts` is
     a zone, not a kind)
 
+CC-133 adds the create-vs-edit filesystem check:
+  - assert_create_paths_are_new: a create-declared path that exists -> rc=13
+    (the CC-119 fire16 retry1 case); `edit:` paths and genuinely new paths pass
+
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_session_plan.py -q
 """
 import dataclasses
@@ -196,3 +200,39 @@ def test_scripts_is_a_zone_not_a_kind():
     )
     assert declared == []
     assert edit_paths == []
+
+
+# --- CC-133: create-vs-edit derived from the filesystem -------------------------
+
+def test_stale_create_path_is_a_defect(repo, monkeypatch):
+    # The CC-119 fire16 retry1 header: `tests/fire_color16_test.py` already
+    # existed but was declared as a create -> quarantine moved it aside, the
+    # hook denied recreating it, the turn stalled. Now it is rc=13 up front.
+    write(repo / "tests" / "fire_color16_test.py", "def test_x():\n    assert 1\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    declared, edit_paths, _ = stanok.parse_ticket_header(
+        "test: tests/fire_fire16_test.py\n"
+        "test: tests/fire_color16_test.py\n"
+    )
+    with pytest.raises(ValueError) as exc:
+        stanok.assert_create_paths_are_new(declared, edit_paths)
+    assert "tests/fire_color16_test.py" in str(exc.value)
+    assert "edit: tests/fire_color16_test.py" in str(exc.value)
+
+
+def test_create_paths_that_are_new_pass(repo, monkeypatch):
+    write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    declared, edit_paths, _ = stanok.parse_ticket_header(
+        "test: tests/new_test.py\n"
+        "edit: tests/old_test.py\n"
+        "impl: src/new.py\n"
+    )
+    stanok.assert_create_paths_are_new(declared, edit_paths)  # no raise
+
+
+def test_edit_path_that_is_absent_is_not_a_defect(repo, monkeypatch):
+    # Deliberately unchecked direction: `edit:` on a missing path is not
+    # destructive (a bootstrap ticket may declare it before the file exists).
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    stanok.assert_create_paths_are_new(["src/new.py"], ["scripts/run.sh"])

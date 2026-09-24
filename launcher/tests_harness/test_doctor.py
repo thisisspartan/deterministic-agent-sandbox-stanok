@@ -14,7 +14,8 @@ the RUNNER, not the sandbox; the Docker container does not mount the host
 Gate order (single source: launcher/stanok.py main()):
   label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->
   dirty-tree (rc=22) -> lock (rc=21) -> [cmd_run: W2.1 ticket header
-  (rc=13, no impl:/test:/docs:/reset:none) -> pre-flight /props (rc=20)]
+  (rc=13: no impl:/test:/docs:/reset:none, or a create-declared path that
+  already exists) -> pre-flight /props (rc=20)]
 
 Skip semantics (valid refusal, not a regression): rc=21 (a machine run is
 in progress — lock held) / rc=22 (dirty tree fires before pre-flight).
@@ -235,6 +236,38 @@ def test_runner_dirty_tree(tmp_path):
         marker.unlink(missing_ok=True)
         _cleanup(label)
     assert rc == 22, f"expected rc=22, got rc={rc}"
+
+
+def test_runner_stale_create_rc13(tmp_path):
+    # CC-133, end to end through main(): the CC-119 fire16 retry1 shape — an
+    # EXISTING test declared as a create — is refused rc=13 in cmd_run, after
+    # the gates but BEFORE the pre-flight (a dead server would give rc=20) and
+    # before any container or agent starts. The quarantine -> contract-lock
+    # DENY -> 1800 s watchdog loop therefore cannot happen anymore.
+    # A private git-init'ed repo keeps this independent of the live tree's
+    # cleanliness (the temp repo is committed, so rc=22 does not fire).
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "fire_color16_test.py").write_text(
+        "def test_x():\n    assert 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-c", "user.email=doctor@stanok", "-c", "user.name=doctor",
+                    "-C", str(repo), "commit", "-q", "-m", "init"], check=True)
+    t = _ticket(tmp_path, "# doctor\n\ntest: tests/fire_color16_test.py\n")
+    label = f"doctor-stale-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    try:
+        rc = _launch(["run", t, label],
+                     {"STANOK_REPO": str(repo),
+                      "STANOK_SERVER_URL": DEAD_SERVER, "STANOK_NO_SANDBOX": "1"})
+        # rc=13 is also the "ticket not found" code — pin the REASON.
+        summary = repo / "evidence" / label / "summary.json"
+        errs = json.loads(summary.read_text(encoding="utf-8"))["errors"]
+    finally:
+        _cleanup(label)
+    assert rc == 13, f"expected rc=13, got rc={rc}"
+    assert any("already exists" in e for e in errs), errs
+    assert any("edit: tests/fire_color16_test.py" in e for e in errs), errs
 
 
 class _SmallCtxHandler(BaseHTTPRequestHandler):

@@ -518,6 +518,34 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
     return declared, edit_paths, reset_none
 
 
+def assert_create_paths_are_new(declared: list[str], edit_paths: list[str]) -> None:
+    """CC-133: create-vs-edit is a header CLAIM that nothing used to verify.
+
+    A path declared as a create (`impl:`/`test:`/`docs:`) that ALREADY EXISTS
+    is a ticket defect, and it used to fail in the worst possible way: the
+    quarantine moved the file aside, the agent then had to edit a path that no
+    longer held the old content, the contract-lock hook denied recreating it,
+    and the turn died on the 1800 s watchdog (CC-119 fire16: a pre-existing
+    test declared as `test:`; retry1 `rc=143` + a 1800 s stall).
+
+    Derive the kind from the filesystem instead of trusting the header: raise
+    ValueError (fail-closed, rc=13 upstream) naming the path and the fix.
+
+    Only this direction is checked. `edit:` on a path that does NOT exist is
+    left alone: it is not silently destructive (the agent just creates it), and
+    a bootstrap ticket may legitimately declare `edit: scripts/run.sh` before
+    run.sh exists."""
+    for rel in declared:
+        if rel in edit_paths:
+            continue
+        if os.path.exists(os.path.join(REPO_ROOT, rel)):
+            raise ValueError(
+                f"declared path {rel!r} already exists but is declared as a create "
+                f"(impl:/test:/docs:); declare it as `edit: {rel}` to modify it in "
+                f"place, or remove the stale artifact"
+            )
+
+
 def prepare_workspace(plan: "SessionPlan") -> int:
     # SEC-01: .git is read-only inside the container — NO git writes here.
     # The cleanliness gate is dirty_tree_gate() (single source, called by main()
@@ -1453,11 +1481,16 @@ def cmd_run(args) -> int:
     # Ticket-scoped invariant (W2.1): parse the header BEFORE any workspace
     # mutation. Fail-closed: no `impl:`/`test:`/`docs:`/`edit:` line and no
     # `reset: none` means the invariant cannot be enforced (the old false
-    # CLEAN-FIRST returns); an invalid literal path is rejected the same way.
+    # CLEAN-FIRST returns); an invalid literal path — including a
+    # create-declared path that already exists (CC-133) — is rejected the same
+    # way, before any workspace mutation.
     try:
         with open(args.ticket_path, encoding="utf-8") as f:
             ticket_prompt = f.read().strip()
         declared_paths, edit_paths, reset_none = parse_ticket_header(ticket_prompt)
+        # CC-133: the create/edit split is derived from the filesystem, not
+        # trusted from the header (ValueError -> rc=13 below).
+        assert_create_paths_are_new(declared_paths, edit_paths)
     except (OSError, ValueError) as e:
         job["rc"] = 13
         job["error"] = f"ticket parse error: {e}"
