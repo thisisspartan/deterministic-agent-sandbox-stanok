@@ -32,7 +32,7 @@ WRITABLE_ZONES = ("src", "tests", "docs", "scripts")
 
 
 def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
-                 rw_paths: tuple = ()) -> tuple:
+                 rw_paths: tuple = (), ro_paths: tuple = ()) -> tuple:
     """Return (container_name, docker_argv).
 
     inner_argv is the container-side command (e.g.
@@ -42,6 +42,12 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     derivation is stanok.declared_carveout (T4, CC-135), the host computes them
     before `docker run`. The default is () = nothing writable: a caller that
     forgets the carve-outs gets a read-only container, not an open one.
+
+    ro_paths are the pre-existing contract files (tests/**, scripts/run.sh —
+    stanok.host_ro_paths, T4b/CC-136) re-bound :ro ON TOP of a rw carve-out
+    DIR: Docker layers a file bind over a dir bind by specificity, so a
+    protected file stays immutable while new siblings in that dir stay
+    creatable. Emitted after the rw binds (deeper destination wins).
     """
     parent_dir = os.path.dirname(repo_root)
     uid, gid = os.getuid(), os.getgid()
@@ -71,15 +77,18 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     # Writable carve-outs: base repo read-only, the ticket's declared paths
     # re-mounted rw on top (Docker layers -v mounts by specificity) — the T3
     # experiment (2026-09-24): an existing file bound rw over the ro repo is
-    # writable while its siblings stay EROFS. .git inherits :ro from the base
-    # mount — git reads work, git writes fail at the filesystem layer.
-    # Parent of the repo mounted ro FIRST: tickets live in $PARENT_DIR/tickets
-    # and the role-leak gate (rc=24) checks $PARENT_DIR/CLAUDE.md.
+    # writable while its siblings stay EROFS, and a file bound ro over a rw DIR
+    # is EROFS while its new siblings stay creatable (verified 2026-09-24).
+    # .git inherits :ro from the base mount — git reads work, git writes fail
+    # at the filesystem layer. Parent of the repo mounted ro FIRST: tickets live
+    # in $PARENT_DIR/tickets and the role-leak gate (rc=24) checks
+    # $PARENT_DIR/CLAUDE.md.
     specs = [
         f"{parent_dir}:{parent_dir}:ro",
         f"{repo_root}:{repo_root}:ro",
     ]
     specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:rw" for rel in rw_paths]
+    specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:ro" for rel in ro_paths]
     specs.append(f"{log_dir}:{log_dir}:rw")
     for spec in specs:
         argv += ["-v", spec]

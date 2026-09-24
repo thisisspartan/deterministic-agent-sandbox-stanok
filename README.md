@@ -56,7 +56,11 @@ launcher/sandbox.py           — the Docker boundary (R2, former sandbox-run.sh
                                 repo mounted read-only with per-ticket writable
                                 carve-outs (T4/CC-135: derived from the declared
                                 paths — an existing declared path binds itself,
-                                an absent one its nearest existing ancestor dir);
+                                an absent one its nearest existing ancestor dir),
+                                and the pre-existing contract files (tests/**,
+                                scripts/run.sh) re-bound :ro on top of a carve-out
+                                dir (T4b/CC-136), so reference tests are
+                                immutable at the fs layer, not only in the hook;
                                 evidence/ is HOST-ONLY: read-only in the
                                 container, the host publishes the verdict into it
                                 (CC-134); .git read-only; cap-drop=ALL,
@@ -125,8 +129,10 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
    container (`launcher/sandbox.py`): the repo is `:ro` and exactly the
    declared paths are re-mounted `:rw` on top (an existing declared path binds
    itself; an absent one binds its nearest existing ancestor dir, since Docker
-   creates a missing bind source as a root-owned directory — T4/CC-135);
-   settings from `.claude/settings.stanok.json`,
+   creates a missing bind source as a root-owned directory — T4/CC-135), with
+   the pre-existing contract files under such a dir re-bound `:ro` (a file bind
+   over a dir bind wins — CC-136), so declaring a new test cannot make the
+   existing ones writable; settings from `.claude/settings.stanok.json`,
    tools Read/Write/Edit/Grep/Glob/Bash — Bash is native and UNRESTRICTED;
    the boundary is the container (cap-drop=ALL, no-new-privileges,
    resource limits) plus the claude-code native sandbox (bwrap per Bash

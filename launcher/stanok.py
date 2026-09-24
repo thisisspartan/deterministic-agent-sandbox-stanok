@@ -532,6 +532,32 @@ def _validate_declared_path(rel: str) -> bool:
     return declared_carveout(rel) is not None
 
 
+def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
+    """The pre-existing contract files to re-bind `:ro` ON TOP of a rw carve-out
+    (T4b, CC-136).
+
+    A carve-out that is a DIRECTORY hands back write access to every
+    pre-existing file in it — and since an absent declared path can only be
+    carved out through its parent dir, declaring a NEW test would otherwise make
+    every reference test in tests/ writable at the filesystem layer. Docker
+    layers a file bind over a dir bind by specificity (verified 2026-09-24), so
+    binding the protected files :ro restores immutability natively, with the
+    PreToolUse deny as the second echelon instead of the only one.
+
+    Two exclusions: a file outside every carve-out needs no bind (the repo `:ro`
+    mount already covers it), and a DECLARED path is never bound (`edit:` on an
+    existing test is exactly the case that must stay writable)."""
+    declared_set = set(declared)
+    ro: list[str] = []
+    for rel in _protected_files():
+        if rel in declared_set:
+            continue
+        if not any(rel == carve or rel.startswith(carve + "/") for carve in rw_paths):
+            continue
+        ro.append(rel)
+    return tuple(ro)
+
+
 def host_rw_paths(declared: list[str]) -> tuple[str, ...]:
     """The deduped rw carve-outs for a declared-path list — what the HOST
     passes to sandbox_argv before `docker run` (T4). The declared paths were
@@ -803,33 +829,39 @@ def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
     )
 
 
-def _tests_manifest() -> dict[str, str]:
-    """Snapshot {rel_path: sha256} of tests/ + scripts/run.sh (contract_lock,
-    W2.5 + P2). Only PRE-EXISTING files are snapshotted: a missing
-    scripts/run.sh (bootstrap of a new project) is therefore free to create.
-    __pycache__/ is skipped: .pyc files are interpreter cache artifacts, not
-    contract files — snapshotting them makes a routine `rm -rf __pycache__`
-    (or their regeneration) a false DELETED/MODIFIED violation (w12-verify)."""
-    manifest: dict[str, str] = {}
+def _protected_files() -> list[str]:
+    """The pre-existing contract files — the ONE source for "protected"
+    (CC-136): tests/** plus scripts/run.sh. Both the contract_lock manifest and
+    the host's :ro bind list (host_ro_paths) read this list, so the two cannot
+    drift.
+
+    Only PRE-EXISTING files: a missing scripts/run.sh (bootstrap of a new
+    project) is free to create. __pycache__/ is skipped: .pyc files are
+    interpreter cache artifacts, not contract files — locking them makes a
+    routine `rm -rf __pycache__` (or their regeneration) a false
+    DELETED/MODIFIED violation (w12-verify)."""
+    protected: list[str] = []
     tests_dir = os.path.join(REPO_ROOT, "tests")
     if os.path.isdir(tests_dir):
         for root, dirs, files in os.walk(tests_dir):
             dirs[:] = [d for d in dirs if d != "__pycache__"]
             for name in files:
-                full = os.path.join(root, name)
-                rel = os.path.relpath(full, REPO_ROOT)
-                try:
-                    with open(full, "rb") as f:
-                        manifest[rel] = hashlib.sha256(f.read()).hexdigest()
-                except OSError:
-                    manifest[rel] = "unreadable"
-    runsh = os.path.join(REPO_ROOT, "scripts", "run.sh")
-    if os.path.isfile(runsh):
+                protected.append(os.path.relpath(os.path.join(root, name), REPO_ROOT))
+    if os.path.isfile(os.path.join(REPO_ROOT, "scripts", "run.sh")):
+        protected.append("scripts/run.sh")
+    return protected
+
+
+def _tests_manifest() -> dict[str, str]:
+    """Snapshot {rel_path: sha256} of the protected files (contract_lock,
+    W2.5 + P2) — see _protected_files for which files and why."""
+    manifest: dict[str, str] = {}
+    for rel in _protected_files():
         try:
-            with open(runsh, "rb") as f:
-                manifest["scripts/run.sh"] = hashlib.sha256(f.read()).hexdigest()
+            with open(os.path.join(REPO_ROOT, rel), "rb") as f:
+                manifest[rel] = hashlib.sha256(f.read()).hexdigest()
         except OSError:
-            manifest["scripts/run.sh"] = "unreadable"
+            manifest[rel] = "unreadable"
     return manifest
 
 
@@ -1737,14 +1769,15 @@ def _inner_run_argv(args) -> list:
     return inner
 
 
-def run_sandboxed(args, rw_paths: tuple) -> int:
+def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
     """Host-side sync run: supervise the Docker container (replaces
     sandbox-run.sh). The marker carries THIS process's pid — cmd_stop's
     killpg lands here, and the try/finally stops the container and removes
     the marker on every exit path (normal return, crash, signal).
 
     rw_paths are the per-ticket rw carve-outs (T4/CC-135, derived in main()
-    from the same ticket text the container will parse)."""
+    from the same ticket text the container will parse); ro_paths are the
+    protected files re-bound :ro over a carve-out dir (T4b/CC-136)."""
     evidence_dir, _ = label_paths(args.label)
     os.makedirs(evidence_dir, exist_ok=True)
 
@@ -1761,7 +1794,7 @@ def run_sandboxed(args, rw_paths: tuple) -> int:
     name, argv = sandbox.sandbox_argv(
         REPO_ROOT, LOG_DIR, image,
         ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args),
-        rw_paths=rw_paths)
+        rw_paths=rw_paths, ro_paths=ro_paths)
     log(f"SANDBOX: docker container {name}")
     try:
         proc = subprocess.Popen(argv, start_new_session=True)
@@ -1976,7 +2009,8 @@ def main() -> int:
             assert_create_paths_are_new(declared, edit_paths)
         except (OSError, ValueError) as e:
             return early_abort(13, f"ERROR: ticket parse error: {e}")
-        return run_sandboxed(args, host_rw_paths(declared))
+        rw_paths = host_rw_paths(declared)
+        return run_sandboxed(args, rw_paths, host_ro_paths(declared, rw_paths))
 
     return 0
 
