@@ -14,9 +14,18 @@ container), same --network=host (loopback to the local llama-server).
 import os
 import subprocess
 
-# T1 (CC-120): the writable zone carve-outs, shared by SessionPlan.rw_zones
-# and sandbox_argv. T4 will derive per-run zones from plan.mutable_paths.
-DEFAULT_RW_ZONES = ("src", "tests", "docs", "scripts", "evidence")
+# The default project zones — the ONE literal zone list (CC-132). Two
+# consumers: sandbox_argv mounts them rw, and stanok.py imports them for
+# path validation, hidden_files_gate and prepare_workspace. T4 (CC-135)
+# will derive the rw set per run from plan.mutable_paths, and this tuple
+# becomes the fallback — the derivation happens in ONE place because the
+# list exists in one place.
+WRITABLE_ZONES = ("src", "tests", "docs", "scripts")
+# evidence/ holds the host-side verdict (summary.json, .running, the
+# launcher stdout log); it stays mounted rw because the container's
+# `stanok.py run` writes summary.json there. CC-134 takes it out of the
+# container's view, at which point this becomes WRITABLE_ZONES itself.
+DEFAULT_RW_ZONES = WRITABLE_ZONES + ("evidence",)
 
 
 def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,

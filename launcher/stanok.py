@@ -70,9 +70,12 @@ API_TIMEOUT_MS = str(int(API_TIMEOUT_S * 1000))
 CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# The ONE kind list for a ticket header (CC-132). `scripts` is a ZONE, not a
+# kind: a path under scripts/ is declared with impl:/test:/docs:/edit: like
+# any other path. `scripts: x.sh` is therefore not a declaration — it ends
+# the header (this is the fix for the old docstring that advertised it).
 _FILE_LINE_RE = re.compile(r"^(impl|test|docs|edit):\s*([A-Za-z0-9_./-]+)\s*$")
 _RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
-_DECLARED_ZONES = ("src", "tests", "docs", "scripts")
 
 _stdout_log_f = None
 _marker_path = None
@@ -93,7 +96,7 @@ _CONTRACT_LOCK_STATE: dict = {"plan": None}
 # placeholder was dropped when T2 was burned — CC-131.)
 @dataclasses.dataclass(frozen=True)
 class SessionPlan:
-    declared_paths:  tuple[str, ...]  # ticket header: impl:/test:/docs:/scripts:
+    declared_paths:  tuple[str, ...]  # ticket header: impl:/test:/docs:/edit:
     mutable_paths:   tuple[str, ...]  # always == declared_paths (edit: paths included, CC-125)
     protected_paths: tuple[str, ...]  # pre-existing manifest keys (tests/**, scripts/run.sh)
     rw_zones:       tuple[str, ...]  # sandbox.DEFAULT_RW_ZONES (T4 would derive them — deferred)
@@ -204,7 +207,7 @@ def hidden_files_gate() -> bool:
     # requirements from them) and slip past dirty_tree_gate (git status is clean
     # for committed/ignored dotfiles). Intentionally narrow (owner decision):
     # only these two signals, not "any undeclared file".
-    for d in ("src", "tests", "docs", "scripts"):
+    for d in sandbox.WRITABLE_ZONES:
         dirpath = os.path.join(REPO_ROOT, d)
         if not os.path.isdir(dirpath):
             continue
@@ -457,14 +460,21 @@ def _validate_declared_path(rel: str) -> bool:
     /etc/passwd`) could destroy arbitrary host files. Fail-closed: relative,
     no `..` segments, top-level dir inside the writable zones, and a FILE
     path — a bare zone name (`src`, `tests/`) is not a file and must not
-    be quarantined (it would move the whole zone out of the tree)."""
+    be quarantined (it would move the whole zone out of the tree).
+
+    CC-132: the zone list comes from sandbox.WRITABLE_ZONES (one source).
+    It is intentionally still an ALLOW-list of the default zones; letting a
+    ticket declare arbitrary top-level dirs / root files (go.mod, internal/)
+    is T4 (CC-135), which must move the mounts in the same change — a
+    widened gate without the matching rw mount would accept a ticket the
+    container then cannot execute."""
     if rel.startswith("/") or rel.startswith("./"):
         return False
     if ".." in rel.split("/"):
         return False
-    if rel.rstrip("/") in _DECLARED_ZONES:
+    if rel.rstrip("/") in sandbox.WRITABLE_ZONES:
         return False
-    return rel.split("/", 1)[0] in _DECLARED_ZONES
+    return rel.split("/", 1)[0] in sandbox.WRITABLE_ZONES
 
 
 def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
@@ -495,7 +505,7 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
             if not _validate_declared_path(rel):
                 raise ValueError(
                     f"invalid declared path {rel!r}: must be relative, contain no "
-                    f"'..', and start with one of {list(_DECLARED_ZONES)}"
+                    f"'..', and start with one of {list(sandbox.WRITABLE_ZONES)}"
                 )
             declared.append(rel)
             if kind == "edit":
@@ -513,7 +523,7 @@ def prepare_workspace(plan: "SessionPlan") -> int:
     # The cleanliness gate is dirty_tree_gate() (single source, called by main()
     # rc=22). This function only prepares the writable workspace.
     try:
-        for d in ("src", "tests", "docs", "scripts"):
+        for d in sandbox.WRITABLE_ZONES:
             os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
         # Ticket-scoped invariant (W2.2): QUARANTINE (not delete) the artifacts
         # the ticket declares, so the run starts in a state where they do not

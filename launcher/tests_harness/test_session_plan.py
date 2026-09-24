@@ -10,6 +10,13 @@ cmd_run does, and pin the T1 invariants:
   - the contract_lock exemption is generalized to mutable_paths:
     a mutable protected path is not flagged; a non-mutable one is.
 
+CC-132 adds the single-source zone/kind pins:
+  - sandbox.WRITABLE_ZONES is the only literal zone list; DEFAULT_RW_ZONES
+    is derived from it, and every consumer (prepare_workspace,
+    hidden_files_gate, _validate_declared_path) reads the constant
+  - the ticket header kinds are exactly impl|test|docs|edit (`scripts` is
+    a zone, not a kind)
+
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_session_plan.py -q
 """
 import dataclasses
@@ -139,3 +146,53 @@ def test_prepare_workspace_quarantines_create_not_edit(repo, monkeypatch, tmp_pa
     # The edit-declared path stays in the tree (no "recreate verbatim" dance).
     assert (repo / "tests" / "existing_test.py").exists()
     assert not (live / "pre-existing" / "tests" / "existing_test.py").exists()
+
+
+# --- CC-132: one source for zones/kinds ----------------------------------------
+
+def test_zones_have_one_source():
+    # The zone list is one literal in sandbox.py; the rw mount set is derived
+    # from it rather than repeated.
+    assert stanok.sandbox.DEFAULT_RW_ZONES == \
+        stanok.sandbox.WRITABLE_ZONES + ("evidence",)
+    assert _build_plan(_TICKET).rw_zones == stanok.sandbox.DEFAULT_RW_ZONES
+
+
+def test_zone_consumers_read_the_constant(tmp_path, monkeypatch):
+    # prepare_workspace and hidden_files_gate take the zone list from
+    # sandbox.WRITABLE_ZONES: patch the constant and watch both follow.
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo_dir))
+    monkeypatch.setattr(stanok.sandbox, "WRITABLE_ZONES", ("src", "zoneA"))
+
+    assert stanok.prepare_workspace(_build_plan("")) == 0
+    assert (repo_dir / "zoneA").is_dir()
+    assert (repo_dir / "src").is_dir()
+    assert not (repo_dir / "docs").exists()  # the old inline literal is gone
+
+    write(repo_dir / "zoneA" / ".secret", "")
+    assert stanok.hidden_files_gate() is True
+
+
+def test_header_kinds_are_impl_test_docs_edit():
+    declared, edit_paths, reset_none = stanok.parse_ticket_header(
+        "impl: src/a.py\n"
+        "test: tests/a_test.py\n"
+        "docs: docs/a.md\n"
+        "edit: tests/b_test.py\n"
+    )
+    assert declared == ["src/a.py", "tests/a_test.py", "docs/a.md",
+                        "tests/b_test.py"]
+    assert edit_paths == ["tests/b_test.py"]
+    assert reset_none is False
+
+
+def test_scripts_is_a_zone_not_a_kind():
+    # `scripts:` is not a declaration line: it ends the header, so the impl:
+    # line after it is never reached. The old docstring advertised it.
+    declared, edit_paths, _ = stanok.parse_ticket_header(
+        "scripts: x.sh\nimpl: src/a.py\n"
+    )
+    assert declared == []
+    assert edit_paths == []
