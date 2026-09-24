@@ -227,37 +227,47 @@ def dirty_tree_gate() -> bool:
 
 def hidden_files_gate() -> bool:
     # W4 hygiene gate (fail-closed): reject a launch if src/tests/docs/scripts
-    # holds a hidden file (name starting with '.', except .gitkeep) or a file
-    # carrying a 'TEMP:' marker in its first 40 lines. Such leftovers from past
-    # runs leak into the machine's context (the model reads them and derives
-    # requirements from them) and slip past dirty_tree_gate (git status is clean
-    # for committed/ignored dotfiles). Intentionally narrow (owner decision):
-    # only these two signals, not "any undeclared file".
+    # holds, at ANY DEPTH, a hidden file or directory (name starting with '.',
+    # except .gitkeep) or a file carrying a 'TEMP:' marker in its first 40
+    # lines. Such leftovers from past runs leak into the machine's context (the
+    # model reads them and derives requirements from them) and slip past
+    # dirty_tree_gate (git status is clean for committed/ignored dotfiles).
+    # Intentionally narrow (owner decision): only these two signals, not "any
+    # undeclared file".
+    #
+    # CC-139: this used to os.listdir only the zone TOP level, so a hidden
+    # leftover in a subdirectory (`src/pkg/.secret`) was invisible (audit
+    # Appendix A #3). The walk is recursive; a hidden DIRECTORY is flagged too,
+    # since it is the same class of leftover and a dot-dir holding only
+    # non-hidden files (src/.cache/notes.md) would otherwise still leak.
     for d in sandbox.WRITABLE_ZONES:
         dirpath = os.path.join(REPO_ROOT, d)
         if not os.path.isdir(dirpath):
             continue
-        try:
-            entries = os.listdir(dirpath)
-        except OSError:
-            log(f"WARN: listdir failed in hidden_files_gate for {dirpath} — fail-closed (treating as flagged)")
+        walk_errors: list[OSError] = []
+        for root, dirs, files in os.walk(dirpath, onerror=walk_errors.append):
+            for name in dirs:
+                if name.startswith(".") and name != ".gitkeep":
+                    log(f"HIDDEN-DIR: {os.path.join(root, name)}")
+                    return True
+            for name in files:
+                path = os.path.join(root, name)
+                if name.startswith(".") and name != ".gitkeep":
+                    log(f"HIDDEN-FILE: {path}")
+                    return True
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        head = [f.readline() for _ in range(40)]
+                except OSError:
+                    log(f"WARN: read failed in hidden_files_gate for {path} — fail-closed (treating as flagged)")
+                    return True
+                if any("TEMP:" in line for line in head):
+                    log(f"TEMP-MARKER: {path}")
+                    return True
+        if walk_errors:
+            log(f"WARN: walk failed in hidden_files_gate under {dirpath}: "
+                f"{walk_errors[0]} — fail-closed (treating as flagged)")
             return True
-        for name in entries:
-            path = os.path.join(dirpath, name)
-            if not os.path.isfile(path):
-                continue
-            if name.startswith(".") and name != ".gitkeep":
-                log(f"HIDDEN-FILE: {path}")
-                return True
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    head = [f.readline() for _ in range(40)]
-            except OSError:
-                log(f"WARN: read failed in hidden_files_gate for {path} — fail-closed (treating as flagged)")
-                return True
-            if any("TEMP:" in line for line in head):
-                log(f"TEMP-MARKER: {path}")
-                return True
     return False
 
 
