@@ -395,7 +395,7 @@ def preflight_image(image: str) -> bool:
     try:
         want = _image_digest()
     except OSError as e:
-        log(f"PREFLIGHT-IMAGE: cannot compute image digest: {e} (rc=25)")
+        log(f"PREFLIGHT-IMAGE: cannot compute image digest: {e} (doctor image preflight)")
         return False
     try:
         out = subprocess.run(
@@ -403,15 +403,15 @@ def preflight_image(image: str) -> bool:
              '{{index .Config.Labels "stanok.digest"}}', image],
             capture_output=True, text=True, timeout=30)
         if out.returncode != 0:
-            log(f"PREFLIGHT-IMAGE: image {image} not found (rc=25)")
+            log(f"PREFLIGHT-IMAGE: image {image} not found (doctor image preflight)")
             return False
         got = out.stdout.strip()
     except (OSError, subprocess.SubprocessError) as e:
-        log(f"PREFLIGHT-IMAGE: docker inspect failed: {e} (rc=25)")
+        log(f"PREFLIGHT-IMAGE: docker inspect failed: {e} (doctor image preflight)")
         return False
     if got != want:
         log(f"PREFLIGHT-IMAGE: digest mismatch — image label {got!r} != "
-            f"sha256(Dockerfile+run.sh) {want!r}; rebuild via ./setup.sh (rc=25)")
+            f"sha256(Dockerfile+run.sh) {want!r}; rebuild via ./setup.sh (doctor image preflight)")
         return False
     log(f"PREFLIGHT-IMAGE: digest OK ({want[:12]}…)")
     for pre in _stack_preflights():
@@ -421,10 +421,10 @@ def preflight_image(image: str) -> bool:
                 capture_output=True, text=True, timeout=60)
             if p.returncode != 0:
                 log(f"PREFLIGHT-IMAGE: runner unavailable in image: {pre!r} "
-                    f"(probe rc={p.returncode}) (rc=25)")
+                    f"(probe rc={p.returncode}) (doctor image preflight)")
                 return False
         except (OSError, subprocess.SubprocessError) as e:
-            log(f"PREFLIGHT-IMAGE: docker run failed for {pre!r}: {e} (rc=25)")
+            log(f"PREFLIGHT-IMAGE: docker run failed for {pre!r}: {e} (doctor image preflight)")
             return False
     log("PREFLIGHT-IMAGE: all stack runners available in the image — OK")
     return True
