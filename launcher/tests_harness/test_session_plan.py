@@ -29,7 +29,7 @@ from conftest import repo, write
 def _build_plan(ticket_text):
     """Mirror cmd_run's T1 construction: parse the header, then build the
     plan with mutable=declared, protected=(), rw_zones=DEFAULT_RW_ZONES."""
-    declared, _ = stanok.parse_ticket_header(ticket_text)
+    declared, edit_paths, _ = stanok.parse_ticket_header(ticket_text)
     return stanok.SessionPlan(
         declared_paths=tuple(declared),
         mutable_paths=tuple(declared),
@@ -37,6 +37,7 @@ def _build_plan(ticket_text):
         rw_zones=stanok.sandbox.DEFAULT_RW_ZONES,
         probe_specs=(),
         git_mode="ro",
+        edit_paths=tuple(edit_paths),
     )
 
 
@@ -102,3 +103,41 @@ def test_contract_lock_exempts_mutable_path(repo, monkeypatch):
             f"mutable run.sh modification wrongly flagged: {job2}"
     finally:
         runsh.write_text(orig, encoding="utf-8")
+
+
+_EDIT_TICKET = (
+    "# sample ticket\n"
+    "\n"
+    "test: tests/new_test.py\n"
+    "edit: tests/existing_test.py\n"
+)
+
+
+def test_edit_path_parsed_and_still_mutable():
+    # CC-125: `edit:` is declared like any path (union) but also reported
+    # separately so prepare_workspace can skip it.
+    declared, edit_paths, reset_none = stanok.parse_ticket_header(_EDIT_TICKET)
+    assert declared == ["tests/new_test.py", "tests/existing_test.py"]
+    assert edit_paths == ["tests/existing_test.py"]
+    assert reset_none is False
+    plan = _build_plan(_EDIT_TICKET)
+    assert plan.declared_paths == plan.mutable_paths
+    assert plan.edit_paths == ("tests/existing_test.py",)
+
+
+def test_prepare_workspace_quarantines_create_not_edit(repo, monkeypatch, tmp_path):
+    write(repo / "tests" / "new_test.py", "stale create artifact\n")
+    write(repo / "tests" / "existing_test.py", "modify me in place\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    live = tmp_path / "live"
+    live.mkdir()
+    monkeypatch.setattr(stanok, "_live_dir", str(live))
+
+    assert stanok.prepare_workspace(_build_plan(_EDIT_TICKET)) == 0
+
+    # The create-declared path is moved aside (proves it is built from scratch).
+    assert not (repo / "tests" / "new_test.py").exists()
+    assert (live / "pre-existing" / "tests" / "new_test.py").exists()
+    # The edit-declared path stays in the tree (no "recreate verbatim" dance).
+    assert (repo / "tests" / "existing_test.py").exists()
+    assert not (live / "pre-existing" / "tests" / "existing_test.py").exists()

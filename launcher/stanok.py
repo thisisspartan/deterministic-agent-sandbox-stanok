@@ -69,7 +69,7 @@ API_TIMEOUT_MS = str(int(API_TIMEOUT_S * 1000))
 CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_FILE_LINE_RE = re.compile(r"^(impl|test|docs):\s*([A-Za-z0-9_./-]+)\s*$")
+_FILE_LINE_RE = re.compile(r"^(impl|test|docs|edit):\s*([A-Za-z0-9_./-]+)\s*$")
 _RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
 _DECLARED_ZONES = ("src", "tests", "docs", "scripts")
 
@@ -97,6 +97,10 @@ class SessionPlan:
     rw_zones:       tuple[str, ...]  # T1: sandbox.DEFAULT_RW_ZONES; T4: derived from mutable_paths
     probe_specs:     tuple            # T1: always (); T2: probe registry entries
     git_mode:        str = "ro"       # .git is always RO (I7, verified 2026-09-24)
+    # CC-125: `edit:`-declared paths are MODIFIED IN PLACE, not created from
+    # scratch — prepare_workspace must not quarantine them. They stay in
+    # declared_paths/mutable_paths (positive contract + contract_lock exemption).
+    edit_paths:      tuple[str, ...] = ()
 
 
 # ==================================================================================
@@ -466,16 +470,23 @@ def _validate_declared_path(rel: str) -> bool:
     return rel.split("/", 1)[0] in _DECLARED_ZONES
 
 
-def parse_ticket_header(ticket_text: str) -> tuple[list[str], bool]:
+def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
     """Ticket-scoped invariant (W2.1): the header is the leading block of
-    literal `impl: <path>` / `test: <path>` / `docs: <path>` lines plus an
-    optional `reset: none` escape hatch for extension tickets. `#` title
-    lines and blank lines are skipped inside the header block; the first
-    other line ends it (a path mentioned in the body is never matched).
-    Paths are validated (relative, no `..`, inside src/tests/docs/scripts);
-    an invalid path raises ValueError (fail-closed, rc=13 upstream).
-    Returns (declared_paths, reset_none)."""
+    literal `impl: <path>` / `test: <path>` / `docs: <path>` / `edit: <path>`
+    lines plus an optional `reset: none` escape hatch for extension tickets.
+    `#` title lines and blank lines are skipped inside the header block; the
+    first other line ends it (a path mentioned in the body is never matched).
+
+    `edit:` marks a path that the ticket MODIFIES IN PLACE (typically an
+    existing test whose contract changes) — it is declared like any other path
+    but is NOT quarantined (CC-125). Paths are validated (relative, no `..`,
+    inside src/tests/docs/scripts); an invalid path raises ValueError
+    (fail-closed, rc=13 upstream).
+
+    Returns (declared_paths, edit_paths, reset_none); declared_paths is the
+    union (edit paths included), so mutable_paths/verify_gate are unchanged."""
     declared: list[str] = []
+    edit_paths: list[str] = []
     reset_none = False
     for line in ticket_text.splitlines():
         stripped = line.strip()
@@ -483,19 +494,21 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], bool]:
             continue
         m = _FILE_LINE_RE.match(stripped)
         if m:
-            rel = m.group(2)
+            kind, rel = m.group(1), m.group(2)
             if not _validate_declared_path(rel):
                 raise ValueError(
                     f"invalid declared path {rel!r}: must be relative, contain no "
                     f"'..', and start with one of {list(_DECLARED_ZONES)}"
                 )
             declared.append(rel)
+            if kind == "edit":
+                edit_paths.append(rel)
             continue
         if _RESET_NONE_RE.match(stripped):
             reset_none = True
             continue
         break
-    return declared, reset_none
+    return declared, edit_paths, reset_none
 
 
 def prepare_workspace(plan: "SessionPlan") -> int:
@@ -510,8 +523,13 @@ def prepare_workspace(plan: "SessionPlan") -> int:
         # exist. Non-destructive: moved to _live_dir/pre-existing/ (outside the
         # repo — dirty_tree_gate is unaffected). Called ONCE before the session:
         # retries never wipe the model's work.
+        # CC-125: `edit:`-declared paths are the exception — the ticket modifies
+        # them IN PLACE (e.g. an existing test whose contract changes), so moving
+        # them aside would force a "recreate verbatim from git show" dance.
         quarantined = []
         for rel in plan.declared_paths:
+            if rel in plan.edit_paths:
+                continue
             src_path = os.path.join(REPO_ROOT, rel)
             if not os.path.exists(src_path):
                 continue
@@ -1421,18 +1439,18 @@ def cmd_run(args) -> int:
     _install_signal_handlers()
 
     job = {"label": args.label, "ticket": args.ticket}
-    log(f"STANOK 4.2 RUNNER | Repo: {REPO_ROOT} | Label: {args.label}")
+    log(f"STANOK RUNNER | Repo: {REPO_ROOT} | Label: {args.label}")
     if args.direct:
         log("--direct MODE: the ticket path is resolved relative to the repository")
 
     # Ticket-scoped invariant (W2.1): parse the header BEFORE any workspace
-    # mutation. Fail-closed: no `impl:`/`test:`/`docs:` line and no
+    # mutation. Fail-closed: no `impl:`/`test:`/`docs:`/`edit:` line and no
     # `reset: none` means the invariant cannot be enforced (the old false
     # CLEAN-FIRST returns); an invalid literal path is rejected the same way.
     try:
         with open(args.ticket_path, encoding="utf-8") as f:
             ticket_prompt = f.read().strip()
-        declared_paths, reset_none = parse_ticket_header(ticket_prompt)
+        declared_paths, edit_paths, reset_none = parse_ticket_header(ticket_prompt)
     except (OSError, ValueError) as e:
         job["rc"] = 13
         job["error"] = f"ticket parse error: {e}"
@@ -1444,7 +1462,7 @@ def cmd_run(args) -> int:
 
     if not declared_paths and not reset_none:
         job["rc"] = 13
-        job["error"] = ("ticket declares no `impl:`/`test:`/`docs:` line and no "
+        job["error"] = ("ticket declares no `impl:`/`test:`/`docs:`/`edit:` line and no "
                         "`reset: none` — the ticket-scoped invariant cannot be "
                         "enforced (fail-closed)")
         write_summary(job, int(time.time()) - start_ts)
@@ -1454,6 +1472,8 @@ def cmd_run(args) -> int:
         return 13
     if declared_paths:
         log(f"DECLARED PATHS: {declared_paths}")
+    if edit_paths:
+        log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
 
     # T1 (CC-120): build the SessionPlan — the single source of file policy
     # (I1). protected_paths is finalized in run_continuous_session from the
@@ -1465,6 +1485,7 @@ def cmd_run(args) -> int:
         rw_zones=sandbox.DEFAULT_RW_ZONES,
         probe_specs=(),
         git_mode="ro",
+        edit_paths=tuple(edit_paths),
     )
 
     if not preflight_server():
