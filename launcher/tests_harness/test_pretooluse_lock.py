@@ -39,10 +39,15 @@ _UNSET = object()
 
 def _arm(repo, monkeypatch, manifest=_UNSET):
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    monkeypatch.setitem(
-        stanok._CONTRACT_LOCK_STATE, "manifest",
-        stanok._tests_manifest() if manifest is _UNSET else manifest,
-    )
+    if manifest is None:
+        monkeypatch.setitem(stanok._CONTRACT_LOCK_STATE, "plan", None)
+        return
+    m = stanok._tests_manifest() if manifest is _UNSET else manifest
+    monkeypatch.setitem(stanok._CONTRACT_LOCK_STATE, "plan", stanok.SessionPlan(
+        declared_paths=(), mutable_paths=(),
+        protected_paths=tuple(m.keys()),
+        rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=(),
+    ))
 
 
 def test_deny_edit_pre_existing_test(repo, monkeypatch):

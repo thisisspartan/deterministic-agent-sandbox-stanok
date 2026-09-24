@@ -116,7 +116,7 @@ def test_contract_lock_runsh():
     # P2: scripts/run.sh is under contract_lock unless the ticket declares it
     # (runner-update ticket) or it did not exist at start (bootstrap).
     # Unit-level: snapshot the manifest, modify run.sh, expect a violation;
-    # with declared_paths=["scripts/run.sh"] — no violation.
+    # with mutable_paths=("scripts/run.sh",) — no violation.
     sys.path.insert(0, str(REPO_ROOT / "launcher"))
     import stanok
     runsh = REPO_ROOT / "scripts" / "run.sh"
@@ -127,12 +127,20 @@ def test_contract_lock_runsh():
     try:
         runsh.write_text(orig + "# contract-lock probe\n", encoding="utf-8")
         job = {}
-        stanok._check_contract_lock(before, job, 1, [])
+        plan = stanok.SessionPlan(
+            declared_paths=(), mutable_paths=(),
+            protected_paths=tuple(before.keys()),
+            rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=())
+        stanok._check_contract_lock(before, job, 1, plan)
         assert any("scripts/run.sh" in v
                    for v in job.get("contract_lock_violations", [])), \
             f"undeclared run.sh modification not flagged: {job}"
         job2 = {}
-        stanok._check_contract_lock(before, job2, 1, ["scripts/run.sh"])
+        plan2 = stanok.SessionPlan(
+            declared_paths=("scripts/run.sh",), mutable_paths=("scripts/run.sh",),
+            protected_paths=tuple(before.keys()),
+            rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=())
+        stanok._check_contract_lock(before, job2, 1, plan2)
         assert not job2.get("contract_lock_violations"), \
             f"declared run.sh modification wrongly flagged: {job2}"
     finally:

@@ -14,8 +14,13 @@ container), same --network=host (loopback to the local llama-server).
 import os
 import subprocess
 
+# T1 (CC-120): the writable zone carve-outs, shared by SessionPlan.rw_zones
+# and sandbox_argv. T4 will derive per-run zones from plan.mutable_paths.
+DEFAULT_RW_ZONES = ("src", "tests", "docs", "scripts", "evidence")
 
-def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list) -> tuple:
+
+def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
+                 rw_zones: tuple = DEFAULT_RW_ZONES) -> tuple:
     """Return (container_name, docker_argv).
 
     inner_argv is the container-side command (e.g.
@@ -51,16 +56,13 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list) -> 
     # base mount — git reads work, git writes fail at the filesystem layer.
     # Parent of the repo mounted ro FIRST: tickets live in $PARENT_DIR/tickets
     # and the role-leak gate (rc=24) checks $PARENT_DIR/CLAUDE.md.
-    for spec in (
+    specs = [
         f"{parent_dir}:{parent_dir}:ro",
         f"{repo_root}:{repo_root}:ro",
-        f"{repo_root}/src:{repo_root}/src:rw",
-        f"{repo_root}/tests:{repo_root}/tests:rw",
-        f"{repo_root}/docs:{repo_root}/docs:rw",
-        f"{repo_root}/scripts:{repo_root}/scripts:rw",
-        f"{repo_root}/evidence:{repo_root}/evidence:rw",
-        f"{log_dir}:{log_dir}:rw",
-    ):
+    ]
+    specs += [f"{repo_root}/{zone}:{repo_root}/{zone}:rw" for zone in rw_zones]
+    specs.append(f"{log_dir}:{log_dir}:rw")
+    for spec in specs:
         argv += ["-v", spec]
 
     # Env passthrough: stanok.py reads only STANOK_* (Prefix Invariance).
