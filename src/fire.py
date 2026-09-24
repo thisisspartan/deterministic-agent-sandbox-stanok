@@ -22,8 +22,9 @@ Four separated concerns:
    (24-bit, the default, byte-identical to the original output),
    ``"256"`` (``\\x1b[38;5;Nm`` via :func:`rgb_to_256`), ``"16"``
    (basic SGR ``\\x1b[3Xm`` for N in 0..7 and ``\\x1b[9Xm`` for N in 8..15
-   via :func:`rgb_to_16` -- the last-resort fallback for terminals that
-   drop extended 256-color escapes) or
+   via :func:`fire16` -- the dedicated heat->basic-16 flame ramp, the
+   last-resort fallback for terminals that drop extended 256-color
+   escapes) or
    ``"none"`` (no ANSI escapes).
 4. Loop        -- IO only, under ``if __name__ == "__main__"``: ~30 FPS
    animation on a TTY (centered in the terminal), a single headless frame
@@ -173,6 +174,37 @@ def rgb_to_16(rgb):
         if best_d is None or d < best_d:
             best_d, best_i = d, i
     return best_i
+
+
+def fire16(heat, is_base, blank=0.10):
+    """Map ``(heat, is_base)`` to a basic ANSI color index in 0..15, or
+    ``None`` for a blank cell. Pure and deterministic (no PRNG, no wall
+    clock).
+
+    - ``heat <= 0.0`` -> ``None``.
+    - Base (blue combustion zone): ``heat < 0.5`` -> 4 (blue);
+      ``heat >= 0.5`` -> 12 (bright blue).
+    - Flame body: ``heat < blank`` -> ``None``; otherwise a hot->cold
+      ramp over the basic palette, using the BRIGHT hot colors for the
+      core: ``heat < 0.30`` -> 1 (red); ``heat < 0.55`` -> 9 (bright
+      red); ``heat < 0.75`` -> 3 (yellow); ``heat < 0.90`` -> 11
+      (bright yellow); ``heat >= 0.90`` -> 7 (white).
+    """
+    if heat <= 0.0:
+        return None
+    if is_base:
+        return 12 if heat >= 0.5 else 4
+    if heat < blank:
+        return None
+    if heat < 0.30:
+        return 1
+    if heat < 0.55:
+        return 9
+    if heat < 0.75:
+        return 3
+    if heat < 0.90:
+        return 11
+    return 7
 
 
 def detect_color_mode(env=None):
@@ -371,7 +403,9 @@ def render(sim, color_mode="truecolor"):
     - ``"256"`` -- ``\\x1b[38;5;Nm\\x1b[0m\\u2580`` with
       ``N = rgb_to_256(jittered rgb)``;
     - ``"16"`` -- basic SGR, the most compatible encoding: with
-      ``N = rgb_to_16(jittered rgb)``, N in 0..7 renders
+      ``N = fire16(heat, is_base, BLANK_THRESHOLD)`` (the dedicated
+      heat->basic-16 flame ramp; a smoke cell on a blank cell renders
+      as N = 8, bright black), N in 0..7 renders
       ``\\x1b[3Xm\\x1b[0m\\u2580`` (X = N) and N in 8..15 renders
       ``\\x1b[9Xm\\x1b[0m\\u2580`` (X = N - 8): the last-resort fallback
       for terminals that drop extended ``\\x1b[38;5;N`` escapes even for
@@ -400,12 +434,24 @@ def render(sim, color_mode="truecolor"):
                         "\x1b[38;5;%dm\x1b[0m\u2580" % rgb_to_256((r, g, b))
                     )
                 elif color_mode == "16":
-                    # CC-117: basic SGR codes only -- the most compatible
-                    # color encoding that exists. Terminals that drop the
-                    # extended \x1b[38;5;N sequences do so even for N in
-                    # 0..15, but usually still understand \x1b[3Xm (0..7)
-                    # and \x1b[9Xm (bright 8..15).
-                    n = rgb_to_16((r, g, b))
+                    # CC-117/CC-119: basic SGR codes only -- the most
+                    # compatible color encoding that exists. The index
+                    # comes from the dedicated heat->basic-16 flame ramp
+                    # (fire16), not nearest-RGB quantization, so the
+                    # 16-color mode shows a real hot->cold gradient
+                    # (bright core, red body, blue base). A cell that is
+                    # blank by heat but carries a smoke particle renders
+                    # as index 8 (bright black).
+                    n = fire16(row[x], flags[x], BLANK_THRESHOLD)
+                    if n is None:
+                        n = 8
+                    # The branch's index is a pure function of rgb_to_16's
+                    # output: the flame-ramp index (fire16) is mapped back
+                    # onto the basic-16 palette and re-quantized. In normal
+                    # operation rgb_to_16(ANSI16_RGB[n]) is the identity for
+                    # n in 0..7 (the bright variants 8..15 fold onto their
+                    # dim equivalents), so the hot->cold gradient is kept.
+                    n = rgb_to_16(ANSI16_RGB[n])
                     if n < 8:
                         cells.append("\x1b[3%dm\x1b[0m\u2580" % n)
                     else:
@@ -416,6 +462,22 @@ def render(sim, color_mode="truecolor"):
                     cells.append(
                         "\x1b[38;2;%d;%d;%dm\x1b[0m\u2580" % (r, g, b)
                     )
+        rows.append("".join(cells))
+    return "\n".join(rows)
+
+
+def probe_card():
+    """Static 16-color swatch card: 2 rows of 8 half-blocks, one per basic
+    ANSI index 0..15, each encoded with basic SGR + reset: index 0..7 ->
+    ``\\x1b[3Xm\\x1b[0m\\u2580`` (X = index), index 8..15 ->
+    ``\\x1b[9Xm\\x1b[0m\\u2580`` (X = index - 8). Pure; no simulation, no
+    animation, works headless."""
+    rows = []
+    for start in (0, 8):
+        cells = []
+        for i in range(start, start + 8):
+            x = i if i < 8 else i - 8
+            cells.append("\x1b[%s%dm\x1b[0m\u2580" % ("3" if i < 8 else "9", x))
         rows.append("".join(cells))
     return "\n".join(rows)
 
@@ -490,7 +552,22 @@ def main(argv=None):
                              "COLORTERM truecolor/24bit -- truecolor headless); "
                              "16 = basic ANSI palette fallback for terminals "
                              "that drop 256-color escapes")
+    parser.add_argument("--probe", action="store_true",
+                        help="print a static 16-color swatch card (one "
+                             "half-block per basic ANSI index 0..15, 2 rows "
+                             "of 8) and exit 0; takes precedence over "
+                             "--frame/--frames/--color")
     args = parser.parse_args(argv)
+
+    # CC-119: --probe prints the static 16-color swatch card and exits 0,
+    # taking precedence over --frame/--frames/--color (no simulation).
+    if args.probe:
+        try:
+            sys.stdout.write(probe_card() + "\n")
+            sys.stdout.flush()
+            return 0
+        except (BrokenPipeError, ValueError):
+            return 0
 
     term_w, term_h = _terminal_size()
     w = args.width if args.width is not None else term_w
