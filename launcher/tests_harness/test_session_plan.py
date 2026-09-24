@@ -3,7 +3,7 @@
 Hermetic: parse a sample ticket header, build the plan exactly as
 cmd_run does, and pin the T1 invariants:
   - declared_paths == mutable_paths (T1: no divergence)
-  - rw_zones == the current hardcoded 5-tuple (sandbox.DEFAULT_RW_ZONES)
+  - rw_zones == sandbox.WRITABLE_ZONES (the 4 rw zones; CC-134)
   - git_mode == "ro" (T4 not yet wired)
   - protected_paths populated from the pre-session manifest snapshot
     (dataclasses.replace, exactly as run_continuous_session does)
@@ -11,11 +11,15 @@ cmd_run does, and pin the T1 invariants:
     a mutable protected path is not flagged; a non-mutable one is.
 
 CC-132 adds the single-source zone/kind pins:
-  - sandbox.WRITABLE_ZONES is the only literal zone list; DEFAULT_RW_ZONES
-    is derived from it, and every consumer (prepare_workspace,
-    hidden_files_gate, _validate_declared_path) reads the constant
+  - sandbox.WRITABLE_ZONES is the only literal zone list; every consumer
+    (prepare_workspace, hidden_files_gate, _validate_declared_path) reads
+    the constant
   - the ticket header kinds are exactly impl|test|docs|edit (`scripts` is
     a zone, not a kind)
+
+CC-134 drops the former "evidence" carve-out from that list: evidence/ is no
+longer mounted rw (the host publishes the verdict into it) — the boundary
+itself is pinned in test_evidence_boundary.py.
 
 CC-133 adds the create-vs-edit filesystem check:
   - assert_create_paths_are_new: a create-declared path that exists -> rc=13
@@ -39,13 +43,13 @@ from conftest import repo, write
 
 def _build_plan(ticket_text):
     """Mirror cmd_run's T1 construction: parse the header, then build the
-    plan with mutable=declared, protected=(), rw_zones=DEFAULT_RW_ZONES."""
+    plan with mutable=declared, protected=(), rw_zones=WRITABLE_ZONES."""
     declared, edit_paths, _ = stanok.parse_ticket_header(ticket_text)
     return stanok.SessionPlan(
         declared_paths=tuple(declared),
         mutable_paths=tuple(declared),
         protected_paths=(),
-        rw_zones=stanok.sandbox.DEFAULT_RW_ZONES,
+        rw_zones=stanok.sandbox.WRITABLE_ZONES,
         git_mode="ro",
         edit_paths=tuple(edit_paths),
     )
@@ -64,7 +68,7 @@ def test_plan_fields_from_ticket_header():
     plan = _build_plan(_TICKET)
     assert plan.declared_paths == ("src/mod.py", "tests/mod_test.py", "docs/mod.md")
     assert plan.declared_paths == plan.mutable_paths
-    assert plan.rw_zones == ("src", "tests", "docs", "scripts", "evidence")
+    assert plan.rw_zones == ("src", "tests", "docs", "scripts")
     assert plan.git_mode == "ro"
     assert plan.protected_paths == ()
 
@@ -155,11 +159,12 @@ def test_prepare_workspace_quarantines_create_not_edit(repo, monkeypatch, tmp_pa
 # --- CC-132: one source for zones/kinds ----------------------------------------
 
 def test_zones_have_one_source():
-    # The zone list is one literal in sandbox.py; the rw mount set is derived
-    # from it rather than repeated.
-    assert stanok.sandbox.DEFAULT_RW_ZONES == \
-        stanok.sandbox.WRITABLE_ZONES + ("evidence",)
-    assert _build_plan(_TICKET).rw_zones == stanok.sandbox.DEFAULT_RW_ZONES
+    # The zone list is one literal in sandbox.py and one NAME (CC-132's
+    # DEFAULT_RW_ZONES alias is gone — CC-134); the rw mount set and the plan
+    # both read it rather than repeating it.
+    assert not hasattr(stanok.sandbox, "DEFAULT_RW_ZONES")
+    assert stanok.sandbox.WRITABLE_ZONES == ("src", "tests", "docs", "scripts")
+    assert _build_plan(_TICKET).rw_zones == stanok.sandbox.WRITABLE_ZONES
 
 
 def test_zone_consumers_read_the_constant(tmp_path, monkeypatch):

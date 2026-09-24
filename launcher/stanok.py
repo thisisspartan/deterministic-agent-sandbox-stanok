@@ -99,7 +99,7 @@ class SessionPlan:
     declared_paths:  tuple[str, ...]  # ticket header: impl:/test:/docs:/edit:
     mutable_paths:   tuple[str, ...]  # always == declared_paths (edit: paths included, CC-125)
     protected_paths: tuple[str, ...]  # pre-existing manifest keys (tests/**, scripts/run.sh)
-    rw_zones:       tuple[str, ...]  # sandbox.DEFAULT_RW_ZONES (T4 would derive them — deferred)
+    rw_zones:       tuple[str, ...]  # sandbox.WRITABLE_ZONES (T4 would derive them — deferred)
     git_mode:        str = "ro"       # .git is always RO (I7, verified 2026-09-24)
     # CC-125: `edit:`-declared paths are MODIFIED IN PLACE, not created from
     # scratch — prepare_workspace must not quarantine them. They stay in
@@ -150,7 +150,40 @@ def _write_stream_msg(file_obj, turn: int, msg) -> None:
 
 
 def label_paths(label: str) -> tuple[str, str]:
-    return (os.path.join(REPO_ROOT, "evidence", label), os.path.join(LOG_DIR, label))
+    """(evidence_dir, live_dir) for a label.
+
+    Host: evidence/<label> holds the verdict (summary.json) the supervisor
+    reads, LOG_DIR/<label> the session jsonl + quarantine.
+
+    Container (CC-134): evidence/ is read-only through the repo :ro mount, so
+    BOTH paths resolve into the rw LOG_DIR/<label>; the host publishes the
+    verdict back into evidence/<label> after the container exits
+    (_publish_evidence). Routed here, so every writer — summary.json,
+    launcher.stdout.log, the .running marker — follows automatically.
+    """
+    live = os.path.join(LOG_DIR, label)
+    if os.environ.get("STANOK_IN_CONTAINER") == "1":
+        return (live, live)
+    return (os.path.join(REPO_ROOT, "evidence", label), live)
+
+
+def _publish_evidence(label: str) -> None:
+    """Copy the container-written verdict from the rw LOG_DIR/<label> into the
+    host-owned evidence/<label> (CC-134).
+
+    Called in run_sandboxed's finally AFTER docker stop — the container has no
+    rw view of evidence/, so the host is the only publisher. Missing files are
+    skipped: an aborted launch publishes nothing rather than a fake verdict."""
+    src = os.path.join(LOG_DIR, label)
+    files = ("summary.json", "launcher.stdout.log")
+    if not any(os.path.isfile(os.path.join(src, f)) for f in files):
+        return
+    dst = os.path.join(REPO_ROOT, "evidence", label)
+    os.makedirs(dst, exist_ok=True)
+    for name in files:
+        s = os.path.join(src, name)
+        if os.path.isfile(s):
+            shutil.copyfile(s, os.path.join(dst, name))
 
 
 def _rotate_stale_summary(label: str) -> None:
@@ -1522,7 +1555,7 @@ def cmd_run(args) -> int:
         declared_paths=tuple(declared_paths),
         mutable_paths=tuple(declared_paths),
         protected_paths=(),
-        rw_zones=sandbox.DEFAULT_RW_ZONES,
+        rw_zones=sandbox.WRITABLE_ZONES,
         git_mode="ro",
         edit_paths=tuple(edit_paths),
     )
@@ -1671,7 +1704,7 @@ def run_sandboxed(args) -> int:
     os.makedirs(evidence_dir, exist_ok=True)
     # Mount points must exist before `docker run` (else Docker creates them
     # root-owned).
-    for d in sandbox.DEFAULT_RW_ZONES:
+    for d in sandbox.WRITABLE_ZONES:
         os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
 
     marker = os.path.join(evidence_dir, ".running")
@@ -1688,7 +1721,7 @@ def run_sandboxed(args) -> int:
     name, argv = sandbox.sandbox_argv(
         REPO_ROOT, LOG_DIR, image,
         ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args),
-        rw_zones=sandbox.DEFAULT_RW_ZONES)
+        rw_zones=sandbox.WRITABLE_ZONES)
     log(f"SANDBOX: docker container {name}")
     try:
         proc = subprocess.Popen(argv, start_new_session=True)
@@ -1697,6 +1730,11 @@ def run_sandboxed(args) -> int:
         rc = _INTERRUPTED_RC or 130
     finally:
         sandbox.docker_stop(name)
+        # CC-134: the container wrote the verdict into LOG_DIR (evidence/ is
+        # read-only there); publish it to the host-owned evidence/<label> now
+        # that the container is gone. BEFORE the marker removal, so the
+        # supervisor never sees "not running" with the summary still missing.
+        _publish_evidence(args.label)
         try:
             os.remove(marker)
         except OSError:

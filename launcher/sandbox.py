@@ -14,22 +14,24 @@ container), same --network=host (loopback to the local llama-server).
 import os
 import subprocess
 
-# The default project zones — the ONE literal zone list (CC-132). Two
-# consumers: sandbox_argv mounts them rw, and stanok.py imports them for
-# path validation, hidden_files_gate and prepare_workspace. T4 (CC-135)
+# The zones the container gets rw — the ONE literal zone list (CC-132).
+# Three consumers: sandbox_argv mounts them rw, and stanok.py imports them
+# for path validation, hidden_files_gate and prepare_workspace. T4 (CC-135)
 # will derive the rw set per run from plan.mutable_paths, and this tuple
 # becomes the fallback — the derivation happens in ONE place because the
 # list exists in one place.
+#
+# CC-134 removed the former "evidence" carve-out: evidence/ is now read-only
+# in the container (still reachable through the repo :ro mount, so an
+# in-container write is an EROFS refusal, not "not found"). The container
+# writes the verdict (summary.json, launcher.stdout.log, the .running marker)
+# into the rw LOG_DIR/<label>; the HOST publishes it into evidence/<label>
+# after the container exits (stanok._publish_evidence).
 WRITABLE_ZONES = ("src", "tests", "docs", "scripts")
-# evidence/ holds the host-side verdict (summary.json, .running, the
-# launcher stdout log); it stays mounted rw because the container's
-# `stanok.py run` writes summary.json there. CC-134 takes it out of the
-# container's view, at which point this becomes WRITABLE_ZONES itself.
-DEFAULT_RW_ZONES = WRITABLE_ZONES + ("evidence",)
 
 
 def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
-                 rw_zones: tuple = DEFAULT_RW_ZONES) -> tuple:
+                 rw_zones: tuple = WRITABLE_ZONES) -> tuple:
     """Return (container_name, docker_argv).
 
     inner_argv is the container-side command (e.g.

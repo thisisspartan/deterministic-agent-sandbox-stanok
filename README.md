@@ -54,7 +54,9 @@ launcher/stanok.py            — THE single Runner (CLI run/status/stop,
                                 typed summary.json)
 launcher/sandbox.py           — the Docker boundary (R2, former sandbox-run.sh):
                                 repo mounted read-only with writable carve-outs
-                                (src/, tests/, docs/, scripts/, evidence/);
+                                (src/, tests/, docs/, scripts/ — evidence/ is
+                                HOST-ONLY: read-only in the container, the host
+                                publishes the verdict into it, CC-134);
                                 .git read-only; cap-drop=ALL, no-new-privileges,
                                 resource limits
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
@@ -82,7 +84,7 @@ src/ tests/ docs/ scripts/    — the machine working directories (empty at star
 | `STANOK_CLAUDE_BIN`  | `claude` (from PATH)      | claude-code binary               |
 | `STANOK_PY`          | `<repo>/.venv/bin/python` | python for the Runner (host-side; remapped to the image python inside the container) |
 | `STANOK_REPO`        | `<repo>/stanok`           | machine root (override)          |
-| `STANOK_EVIDENCE`    | `<repo>/evidence`         | evidence dir (summary.json, logs) |
+| `STANOK_LOG_DIR`     | `/tmp/stanok-logs`        | session logs + container-side verdict staging (published to `evidence/<label>/` by the host) |
 | `STANOK_LOCAL_RETRIES` | `2`                     | in-session retry turns on verifier FAIL |
 | `STANOK_REQUIRED_WINDOW` | env (`P0-launch.sh`, = `$TOK`) | preflight: minimal server `n_ctx` (rc=20 if less) |
 | `STANOK_SKIP_SERVER_CHECK` | unset                   | `1` — skip the preflight `/props` check entirely |
@@ -134,7 +136,10 @@ src/ tests/ docs/ scripts/    — the machine working directories (empty at star
    (`--local-retries`, default 2) with the failure block.
 5. Final: `verifier: PASS/FAIL`, `probe_result: CLEAN-FIRST |
    PASS-AFTER-LOCAL-RETRY | VERIFY-FAIL | EARLY-ABORT`, Runner rc — typed
-   `evidence/<label>/summary.json` (no regex parsing of stdout).
+   `evidence/<label>/summary.json` (no regex parsing of stdout). The
+   container cannot write `evidence/` (read-only there, CC-134): it stages
+   `summary.json` in `$STANOK_LOG_DIR/<label>` and the HOST publishes it into
+   `evidence/<label>/` after the container exits.
 
 ## Architecture references
 
