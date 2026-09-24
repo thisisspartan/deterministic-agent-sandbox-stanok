@@ -1647,7 +1647,13 @@ def cmd_run(args) -> int:
 # ==================================================================================
 # Control utilities (status, stop)
 # ==================================================================================
-def cmd_status(label: str) -> int:
+def _status_dict(label: str) -> dict:
+    """The status JSON `status` prints — single source, also used by `wait`.
+
+    Precedence: a live `.running` marker (running/dead) over a summary.json
+    (done) over missing. `run_sandboxed` publishes the verdict BEFORE removing
+    the marker, so the marker's disappearance implies a readable summary.
+    """
     evidence_dir, _ = label_paths(label)
     marker = os.path.join(evidence_dir, ".running")
     summary = os.path.join(evidence_dir, "summary.json")
@@ -1657,20 +1663,15 @@ def cmd_status(label: str) -> int:
             parts = open(marker, encoding="utf-8").read().split()
             start_ts = int(parts[0]) if len(parts) >= 1 else int(time.time())
             pid = int(parts[1]) if len(parts) >= 2 else 0
-
             alive = _pid_alive(pid) if pid > 0 else False
-            state = "running" if alive else "dead"
-            print(json.dumps({
-                "state": state,
-                "pid": pid,
-                "elapsed_s": int(time.time()) - start_ts
-            }))
+            return {"state": "running" if alive else "dead", "pid": pid,
+                    "elapsed_s": int(time.time()) - start_ts}
         except (ValueError, OSError):
-            print(json.dumps({"state": "dead", "error": "corrupted marker"}))
-    elif os.path.exists(summary):
+            return {"state": "dead", "error": "corrupted marker"}
+    if os.path.exists(summary):
         try:
             data = json.load(open(summary, encoding="utf-8"))
-            print(json.dumps({
+            return {
                 "state": "done",
                 "rc": data.get("rc"),
                 "verifier": data.get("verifier"),
@@ -1680,12 +1681,47 @@ def cmd_status(label: str) -> int:
                 "cache_hit_rate": data.get("cache_hit_rate"),
                 "elapsed_s": data.get("elapsed_s"),
                 "errors": data.get("errors", [])
-            }))
+            }
         except Exception as e:
-            print(json.dumps({"state": "done", "error": f"summary read error: {e}"}))
-    else:
-        print(json.dumps({"state": "missing"}))
+            return {"state": "done", "error": f"summary read error: {e}"}
+    return {"state": "missing"}
+
+
+def cmd_status(label: str) -> int:
+    print(json.dumps(_status_dict(label)))
     return 0
+
+
+WAIT_POLL_S = 5
+WAIT_TIMEOUT_S = 2700  # 45 min — the cap §3 of CLAUDE.supervisor.md names
+
+
+def cmd_wait(label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:
+    """Block until the run reaches a terminal state, print its final status.
+
+    This is the ONE primitive behind `run --background --follow` and the
+    standalone `wait` subcommand (CC-140). It exists because the supervisor's
+    former §3 made "poll until done" a separate Bash task that could simply not
+    be issued: in the SMOKE-02 run the supervisor launched `--background`, wrote
+    "waiting", and ended its turn WITHOUT the wait task, so no completion
+    notification ever reached the TUI (evidence/smoke-tools was a PASS the whole
+    time). Collapsing launch+wait into one background call makes the
+    notification the verdict trigger — there is no step left to forget.
+
+    Returns 0 once a terminal state (done/dead/missing) is observed, 124 if the
+    run is still `running` at `timeout_s` (the §3 45-min cap). Either way the
+    printed JSON is the same shape as `status`.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        st = _status_dict(label)
+        if st.get("state") != "running":
+            print(json.dumps(st))
+            return 0
+        if time.monotonic() >= deadline:
+            print(json.dumps({"state": "timeout", "elapsed_s": st.get("elapsed_s")}))
+            return 124
+        time.sleep(WAIT_POLL_S)
 
 
 def cmd_stop(label: str) -> int:
@@ -1781,7 +1817,11 @@ def launch_background(args) -> int:
     before returning: a return before the marker is written is a start race —
     the first `status` reports a false `missing` and a blocking wait loop
     exits early (w12-verify incident). rc=17: the child died (or stalled)
-    before writing the marker — a launch failure, not a run defect."""
+    before writing the marker — a launch failure, not a run defect.
+
+    `--follow` (CC-140): after the marker is confirmed, block in `cmd_wait`
+    until the run is terminal and print its final status — so ONE background
+    Bash call carries both the launch and the verdict notification."""
     log_path = os.path.join(LOG_DIR, f"{args.label}.launch.log")
     evidence_dir, _ = label_paths(args.label)
     marker = os.path.join(evidence_dir, ".running")
@@ -1801,7 +1841,7 @@ def launch_background(args) -> int:
             if os.path.exists(summary):
                 log(f"Background child (PID {child.pid}) exited "
                     f"rc={child.returncode} with a summary (fast abort)")
-                return 0
+                return cmd_wait(args.label) if args.follow else 0
             log(f"ERROR: background child (PID {child.pid}) exited "
                 f"rc={child.returncode} before writing the .running marker")
             return 17
@@ -1811,6 +1851,8 @@ def launch_background(args) -> int:
             return 17
         time.sleep(0.2)
     log(f"Machine launched in the background (PID {child.pid}). Log: {log_path}")
+    if args.follow:
+        return cmd_wait(args.label)
     return 0
 
 
@@ -1849,9 +1891,17 @@ def main() -> int:
     r.add_argument("--direct", action="store_true")
     r.add_argument("--local-retries", type=int, default=DEFAULT_RETRIES)
     r.add_argument("--background", action="store_true")
+    # CC-140: --follow makes the background launch block until the run is
+    # terminal (implies --background). The supervisor's §3 uses it so the
+    # completion notification of ONE background task is the verdict.
+    r.add_argument("--follow", action="store_true")
 
     s = sub.add_parser("status")
     s.add_argument("label")
+
+    w = sub.add_parser("wait")
+    w.add_argument("label")
+    w.add_argument("--timeout", type=int, default=WAIT_TIMEOUT_S)
 
     st = sub.add_parser("stop")
     st.add_argument("label")
@@ -1860,6 +1910,8 @@ def main() -> int:
 
     if args.cmd == "status":
         return cmd_status(args.label)
+    if args.cmd == "wait":
+        return cmd_wait(args.label, args.timeout)
     if args.cmd == "stop":
         return cmd_stop(args.label)
 
@@ -1932,9 +1984,12 @@ def main() -> int:
         in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
         no_sandbox = os.environ.get("STANOK_NO_SANDBOX") == "1"
 
-        if args.background:
+        if args.background or args.follow:
             # The child re-runs these gates and takes the lock itself; the
             # parent must not hold the lock (flock would deadlock the child).
+            # --follow implies background: it only makes sense as the tail of a
+            # detached launch (a foreground follow would exceed the Bash tool's
+            # 10-min cap on a 45-min run).
             return launch_background(args)
 
         if in_container or no_sandbox:

@@ -31,7 +31,7 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 ## Running
 
 ```bash
-./launch.sh run <ticket.md> <label> [--background|--direct] [--local-retries N] [-- extra...]
+./launch.sh run <ticket.md> <label> [--background] [--follow] [--direct] [--local-retries N] [-- extra...]
 # `run` is optional: `./launch.sh <ticket.md> <label> ...` is equivalent.
 # The ticket is resolved against three bases (project root -> machine root -> as given),
 # so the canonical call from the project root is: `./stanok/launch.sh tickets/x.md <label>`.
@@ -39,17 +39,21 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 # the call works from any cwd; --background with a nonexistent ticket fails
 # immediately (rc=13) instead of spawning a dead detach.
 ./launch.sh status <label>      # JSON: running/dead/done/missing
+./launch.sh wait <label> [--timeout N]  # block until terminal, print the status JSON (CC-140)
 ./launch.sh stop <label>        # interrupt the run (TERM by pid from .running)
 ```
 
 - `--background` — detach to the background (observe: `tail -f /tmp/stanok-logs/<label>.launch.log`)
+- `--follow` — implies `--background`; block until the run is terminal, then print its
+  status. One `run --background --follow` call is both the launch and the verdict
+  notification the supervisor waits on (CC-140)
 - `--direct` — headless directly, ticket path relative to the repo
 - `--local-retries N` — in-session retry turns on verifier FAIL (default 2)
 
 ## Structure
 
 ```
-launcher/stanok.py            — THE single Runner (CLI run/status/stop,
+launcher/stanok.py            — THE single Runner (CLI run/status/wait/stop,
                                 gates, background self-spawn, Job/Attempt,
                                 typed summary.json)
 launcher/sandbox.py           — the Docker boundary (R2, former sandbox-run.sh):
