@@ -10,8 +10,8 @@ Full integration with the L1 Supervisor:
      circuit breaker — asyncio.shield() keeps the turn task alive past wait_for,
      so client.interrupt() runs cleanly and summary.json is written with the
      TURN-TIMEOUT code (rc=1) without the process dying on CancelledError.
-  6. Verifier-output compression: dependency-noise filter + last-N tail (no
-     pattern heuristics — see REVIEW-KISS-CLI-FIRST §3.3).
+  6. Verifier-output compression: last-N raw tail, no pattern heuristics at
+     all (REVIEW-KISS-CLI-FIRST §3.3; the last substring filter — CC-138).
   7. Process Reaper: a single process group with guaranteed termination of all children.
 """
 
@@ -49,10 +49,6 @@ CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "clau
 
 MAX_TEST_LINES = 60
 MAX_TEST_BYTES = 4096
-# W10: noise-line registry for _extract_smart_diff — substrings that mark a
-# verifier-output line as dependency noise (not a test signal). One entry per
-# pattern; add here, not inline in the filter.
-NOISE_LINE_PATTERNS = ("node_modules/",)
 DEFAULT_RETRIES = int(os.environ.get("STANOK_LOCAL_RETRIES", "2"))
 
 API_TIMEOUT_S = max(1.0, float(os.environ.get("STANOK_API_TIMEOUT_S", "600")))
@@ -685,17 +681,16 @@ def prepare_workspace(plan: "SessionPlan") -> int:
 # Smart compression of verifier errors (Smart Diff Extraction)
 # ==================================================================================
 def _extract_smart_diff(raw_text: str) -> str:
-    """Compress verifier output for the fix prompt: drop dependency noise and
-    keep the LAST lines (a test failure is reported at the tail).
+    """Compress verifier output for the fix prompt: keep the LAST lines (a test
+    failure is reported at the tail).
 
-    No pattern heuristics: the previous JS/TAP-weighted regex could pick the
-    wrong window for other runners (HANDOFF-ARCH-REVIEW §3 #9). A raw tail
-    cannot mislead that way (REVIEW-KISS-CLI-FIRST §3.3).
+    No pattern heuristics at all: neither the old JS/TAP-weighted priority
+    regex (HANDOFF-ARCH-REVIEW §3 #9) nor a noise-line filter remains — a raw
+    tail cannot pick the wrong window or hide a line the model needs
+    (REVIEW-KISS-CLI-FIRST §3.3; the last `node_modules/` filter was the §1#1
+    leftover, CC-138).
     """
-    lines = [ln for ln in raw_text.strip().splitlines()
-             if not any(p in ln for p in NOISE_LINE_PATTERNS)]
-    if not lines:
-        lines = raw_text.strip().splitlines()
+    lines = raw_text.strip().splitlines()
 
     if len(lines) > MAX_TEST_LINES:
         start = len(lines) - MAX_TEST_LINES
