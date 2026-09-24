@@ -93,6 +93,20 @@ def test_no_filesystem_block_ok(tmp_path, monkeypatch):
     assert stanok.sandbox_config_gate() is False
 
 
+# --- 5b: unsupported forms are rejected, not guessed (no cli.js mirror) ----
+
+def test_tilde_entry_rejected(tmp_path, monkeypatch):
+    repo = _repo_with_settings(tmp_path, {"denyWrite": ["~/.ssh"]})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    assert stanok.sandbox_config_gate() is True
+
+
+def test_absolute_existing_ok(tmp_path, monkeypatch):
+    repo = _repo_with_settings(tmp_path, {"denyWrite": [str(tmp_path / "repo" / ".claude")]})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    assert stanok.sandbox_config_gate() is False
+
+
 # --- 6: full path rc=28 -----------------------------------------------------
 
 def test_full_path_rc28(tmp_path):
