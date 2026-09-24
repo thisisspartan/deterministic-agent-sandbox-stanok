@@ -78,9 +78,25 @@ _marker_path = None
 _evidence_dir = None
 _live_dir = None
 _INTERRUPTED_RC = 0
-# contract_lock first echelon (CC-104): the pre-session manifest, read by
+# contract_lock first echelon (CC-104): the finalized SessionPlan, read by
 # _pretooluse_lock_hook at call time (set in run_continuous_session).
-_CONTRACT_LOCK_STATE: dict = {"manifest": None}
+_CONTRACT_LOCK_STATE: dict = {"plan": None}
+
+
+# T1 (CC-120): the single source of file policy (invariant I1). All six
+# policy consumers (parse/quarantine/manifest/hook+contract_lock/
+# verify_gate/sandbox_argv) read from this object; no consumer keeps a
+# free-floating policy list. T1 is plumbing only: mutable_paths ==
+# declared_paths, rw_zones is the current hardcoded tuple, probe_specs is
+# empty, git is always ro — observable behavior is byte-for-byte unchanged.
+@dataclasses.dataclass(frozen=True)
+class SessionPlan:
+    declared_paths:  tuple[str, ...]  # ticket header: impl:/test:/docs:/scripts:
+    mutable_paths:   tuple[str, ...]  # T1: always == declared_paths; T2+ may diverge
+    protected_paths: tuple[str, ...]  # pre-existing manifest keys (tests/**, scripts/run.sh)
+    rw_zones:       tuple[str, ...]  # T1: sandbox.DEFAULT_RW_ZONES; T4: derived from mutable_paths
+    probe_specs:     tuple            # T1: always (); T2: probe registry entries
+    git_mode:        str = "ro"       # .git is always RO (I7, verified 2026-09-24)
 
 
 # ==================================================================================
@@ -491,7 +507,7 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], bool]:
     return declared, reset_none
 
 
-def prepare_workspace(declared_paths: list[str]) -> int:
+def prepare_workspace(plan: "SessionPlan") -> int:
     # SEC-01: .git is read-only inside the container — NO git writes here.
     # The cleanliness gate is dirty_tree_gate() (single source, called by main()
     # rc=22). This function only prepares the writable workspace.
@@ -504,7 +520,7 @@ def prepare_workspace(declared_paths: list[str]) -> int:
         # repo — dirty_tree_gate is unaffected). Called ONCE before the session:
         # retries never wipe the model's work.
         quarantined = []
-        for rel in declared_paths:
+        for rel in plan.declared_paths:
             src_path = os.path.join(REPO_ROOT, rel)
             if not os.path.exists(src_path):
                 continue
@@ -600,7 +616,7 @@ def _run_one_test(rel: str) -> tuple[str, str] | None:
     return None
 
 
-def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tuple[str, str]], bool]:
+def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]:
     """Verdict = positive contract on the ticket's declared paths (W2.3)
     + every test the project's runner declares (D3).
 
@@ -614,7 +630,7 @@ def verify_gate(declared_paths: list[str] | None = None) -> tuple[bool, list[tup
     failures: list[tuple[str, str]] = []
     # Positive contract: every artifact the ticket declares must exist.
     # Closes the hole where a model that skipped docs/<m>.md still passed.
-    for rel in (declared_paths or []):
+    for rel in plan.declared_paths:
         if not os.path.exists(os.path.join(REPO_ROOT, rel)):
             failures.append((rel, f"MISSING: declared by the ticket but not created: {rel}"))
 
@@ -718,17 +734,18 @@ def _tests_manifest() -> dict[str, str]:
 
 
 def _check_contract_lock(before: dict[str, str], job: dict, turn: int,
-                         declared_paths: list[str] | None = None) -> None:
+                         plan: "SessionPlan") -> None:
     """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
     that was MODIFIED or DELETED is a contract_lock violation (replaces the
     chmod a-w freeze, W2.5). New files are allowed (a ticket may declare
-    several). scripts/run.sh is exempt when the ticket declares it
-    (runner-update ticket, P2)."""
+    several). A mutable path is exempt (runner-update ticket, P2; T1:
+    mutable_paths == declared_paths — behavior-identical to the old
+    scripts/run.sh exemption, since the manifest is snapshotted AFTER
+    quarantine and a mutable path is therefore never in the manifest)."""
     after = _tests_manifest()
-    declared = set(declared_paths or [])
     violations = []
     for rel, digest in before.items():
-        if rel == "scripts/run.sh" and rel in declared:
+        if rel in plan.mutable_paths:
             continue
         if rel not in after:
             violations.append(f"DELETED: {rel}")
@@ -892,8 +909,8 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
 
 
 async def _pretooluse_lock_hook(hook_input: dict, tool_use_id: "str | None", context) -> dict:
-    manifest = _CONTRACT_LOCK_STATE["manifest"]
-    if not manifest:
+    plan = _CONTRACT_LOCK_STATE["plan"]
+    if not plan:
         return {}
     try:
         path = (hook_input.get("tool_input") or {}).get("file_path")
@@ -901,7 +918,7 @@ async def _pretooluse_lock_hook(hook_input: dict, tool_use_id: "str | None", con
             return {}
         full = path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)
         rel = os.path.relpath(os.path.realpath(full), REPO_ROOT)
-        if rel in manifest:
+        if rel in plan.protected_paths and rel not in plan.mutable_paths:
             log(f"CONTRACT-LOCK DENY: {rel} (pre-existing protected file)")
             return {
                 "hookSpecificOutput": {
@@ -1033,7 +1050,7 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
         return {}
 
 
-async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, declared_paths: list[str]) -> int:
+async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, plan: "SessionPlan") -> int:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 
     local_run_id = str(uuid.uuid4())[:8]
@@ -1085,9 +1102,13 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
     # contract_lock (W2.5): snapshot tests/ before the session; a pre-existing
     # test file modified/deleted during the run is a violation in summary.json.
     tests_manifest_before = _tests_manifest()
-    # First echelon (CC-104): expose the manifest to the PreToolUse hook
-    # (read at call time; the hook only fires during the session).
-    _CONTRACT_LOCK_STATE["manifest"] = tests_manifest_before
+    # T1 (CC-120): finalize the plan — the manifest keys become
+    # protected_paths (I1: the manifest is no longer a free-floating policy
+    # input). First echelon (CC-104): expose the finalized plan to the
+    # PreToolUse hook (read at call time; the hook only fires during the
+    # session).
+    plan = dataclasses.replace(plan, protected_paths=tuple(tests_manifest_before.keys()))
+    _CONTRACT_LOCK_STATE["plan"] = plan
 
     with open(stream_out_path, "a", encoding="utf-8") as stream_f:
         async with ClaudeSDKClient(options=options) as client:
@@ -1187,7 +1208,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
                 # contract_lock (W2.5 + P2): did the turn touch pre-existing
                 # tests/ or scripts/run.sh?
-                _check_contract_lock(tests_manifest_before, job, turn, declared_paths)
+                _check_contract_lock(tests_manifest_before, job, turn, plan)
 
                 # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
                 # spike in the turn's input_tokens (uncached re-send).
@@ -1207,7 +1228,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
                         f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
 
-                verify_ok, failures, env_fail = verify_gate(declared_paths)
+                verify_ok, failures, env_fail = verify_gate(plan)
 
                 if env_fail:
                     # ENV-FAIL (run.sh rc=6): the test runner is unavailable
@@ -1463,6 +1484,18 @@ def cmd_run(args) -> int:
     if declared_paths:
         log(f"DECLARED PATHS: {declared_paths}")
 
+    # T1 (CC-120): build the SessionPlan — the single source of file policy
+    # (I1). protected_paths is finalized in run_continuous_session from the
+    # pre-session manifest snapshot.
+    plan = SessionPlan(
+        declared_paths=tuple(declared_paths),
+        mutable_paths=tuple(declared_paths),
+        protected_paths=(),
+        rw_zones=sandbox.DEFAULT_RW_ZONES,
+        probe_specs=(),
+        git_mode="ro",
+    )
+
     if not preflight_server():
         job["rc"] = 20
         job["error"] = f"Server unavailable ({SERVER_URL})"
@@ -1472,7 +1505,7 @@ def cmd_run(args) -> int:
             except OSError: pass
         return 20
 
-    if prepare_workspace(declared_paths) != 0:
+    if prepare_workspace(plan) != 0:
         job["rc"] = 14
         job["error"] = "workspace prep error"
         write_summary(job, int(time.time()) - start_ts)
@@ -1483,7 +1516,7 @@ def cmd_run(args) -> int:
 
     rc = 1
     try:
-        rc = asyncio.run(run_continuous_session(job, ticket_prompt, args.local_retries, declared_paths))
+        rc = asyncio.run(run_continuous_session(job, ticket_prompt, args.local_retries, plan))
     except KeyboardInterrupt:
         rc = _INTERRUPTED_RC or 130
     except Exception as e:
@@ -1607,7 +1640,7 @@ def run_sandboxed(args) -> int:
     os.makedirs(evidence_dir, exist_ok=True)
     # Mount points must exist before `docker run` (else Docker creates them
     # root-owned).
-    for d in ("src", "tests", "docs", "scripts", "evidence"):
+    for d in sandbox.DEFAULT_RW_ZONES:
         os.makedirs(os.path.join(REPO_ROOT, d), exist_ok=True)
 
     marker = os.path.join(evidence_dir, ".running")
@@ -1618,9 +1651,13 @@ def run_sandboxed(args) -> int:
     image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
     # The container runs the IMAGE's system python (the SDK is baked in);
     # the host venv python is only for the host-side gates.
+    # T1 (CC-120): the host has no per-run plan yet (T4 derives zones from
+    # plan.mutable_paths); the shared constant keeps host and container in
+    # lockstep with SessionPlan.rw_zones.
     name, argv = sandbox.sandbox_argv(
         REPO_ROOT, LOG_DIR, image,
-        ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args))
+        ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args),
+        rw_zones=sandbox.DEFAULT_RW_ZONES)
     log(f"SANDBOX: docker container {name}")
     try:
         proc = subprocess.Popen(argv, start_new_session=True)

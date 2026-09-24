@@ -48,6 +48,13 @@ def test_declared_path_traversal_rejected():
 
 # --- 2-4: verify_gate `list` rc handling ---------------------------------------
 
+def _empty_plan():
+    return stanok.SessionPlan(
+        declared_paths=(), mutable_paths=(), protected_paths=(),
+        rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=(),
+    )
+
+
 def _list_repo(base: Path, name: str, list_stdout: str, list_stderr: str,
                list_rc: int) -> Path:
     """A tmp repo whose stub run.sh `list` cats list.out/list.err and exits
@@ -81,7 +88,7 @@ def test_verify_gate_list_red_with_claimed_tests(tmp_path, monkeypatch):
         list_rc=1,
     )
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    ok, failures, env_fail = stanok.verify_gate([])
+    ok, failures, env_fail = stanok.verify_gate(_empty_plan())
     assert ok is False
     assert env_fail is False
     list_fails = [msg for name, msg in failures if name == "(list)"]
@@ -97,7 +104,7 @@ def test_verify_gate_list_red_empty_stdout(tmp_path, monkeypatch):
         list_rc=1,
     )
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    ok, failures, env_fail = stanok.verify_gate([])
+    ok, failures, env_fail = stanok.verify_gate(_empty_plan())
     assert ok is False
     assert env_fail is False
     assert any(name == "(list)" and "no tests/ directory" in msg
@@ -108,7 +115,7 @@ def test_verify_gate_list_green_no_tests(tmp_path, monkeypatch):
     repo = _list_repo(tmp_path, "listnone", list_stdout="", list_stderr="",
                       list_rc=0)
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    ok, failures, env_fail = stanok.verify_gate([])
+    ok, failures, env_fail = stanok.verify_gate(_empty_plan())
     assert ok is False
     assert env_fail is False
     assert any(name == "(no tests)" for name, _ in failures)

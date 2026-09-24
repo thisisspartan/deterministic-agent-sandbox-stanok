@@ -119,7 +119,10 @@ def test_verify_gate_env_fail(tmp_path, monkeypatch):
         "exit 0\n",
     )
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    ok, failures, env_fail = stanok.verify_gate([])
+    plan = stanok.SessionPlan(
+        declared_paths=(), mutable_paths=(), protected_paths=(),
+        rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=())
+    ok, failures, env_fail = stanok.verify_gate(plan)
     assert ok is False
     assert env_fail is True
     assert any(msg.startswith("ENV-FAIL:") for _, msg in failures)
