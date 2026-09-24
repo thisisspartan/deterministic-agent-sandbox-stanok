@@ -84,7 +84,7 @@ src/ tests/ docs/ scripts/    — the machine working directories (empty at star
 | `STANOK_REPO`        | `<repo>/stanok`           | machine root (override)          |
 | `STANOK_EVIDENCE`    | `<repo>/evidence`         | evidence dir (summary.json, logs) |
 | `STANOK_LOCAL_RETRIES` | `2`                     | in-session retry turns on verifier FAIL |
-| `STANOK_REQUIRED_WINDOW` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from settings | preflight: minimal server `n_ctx` (rc=20 if less) |
+| `STANOK_REQUIRED_WINDOW` | env (`P0-launch.sh`, = `$TOK`) | preflight: minimal server `n_ctx` (rc=20 if less) |
 | `STANOK_SKIP_SERVER_CHECK` | unset                   | `1` — skip the preflight `/props` check entirely |
 | `STANOK_OPIK_URL`      | `http://localhost:8080` | Opik backend (trace-count check) |
 | `STANOK_DOCKER_IMAGE`| `stanok-machine:latest`   | the machine image                |

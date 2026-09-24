@@ -294,21 +294,17 @@ def sandbox_config_gate() -> bool:
 
 
 def _required_context_window() -> int | None:
-    """Required context window: env STANOK_REQUIRED_WINDOW overrides
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW from .claude/settings.stanok.json."""
+    """Required context window, from the env only: STANOK_REQUIRED_WINDOW
+    (exported by P0-launch.sh). cli.js likewise reads
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW from env (rQ); there is no settings source —
+    the former .claude/settings.stanok.json fallback read a key that no longer
+    exists (CC-127)."""
     env_val = os.environ.get("STANOK_REQUIRED_WINDOW")
     if env_val:
         try:
             return int(env_val)
         except ValueError:
             log(f"WARN: STANOK_REQUIRED_WINDOW={env_val!r} is not an integer; ignoring")
-    try:
-        with open(os.path.join(REPO_ROOT, ".claude", "settings.stanok.json"), encoding="utf-8") as f:
-            val = json.load(f).get("env", {}).get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
-        if val is not None:
-            return int(val)
-    except (OSError, ValueError):
-        pass
     return None
 
 
