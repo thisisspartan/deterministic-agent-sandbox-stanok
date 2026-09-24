@@ -4,7 +4,7 @@ Hermetic: parse a sample ticket header, build the plan exactly as
 cmd_run does, and pin the T1 invariants:
   - declared_paths == mutable_paths (T1: no divergence)
   - rw_zones == the current hardcoded 5-tuple (sandbox.DEFAULT_RW_ZONES)
-  - probe_specs == () and git_mode == "ro" (T2/T4 not yet wired)
+  - git_mode == "ro" (T4 not yet wired)
   - protected_paths populated from the pre-session manifest snapshot
     (dataclasses.replace, exactly as run_continuous_session does)
   - the contract_lock exemption is generalized to mutable_paths:
@@ -35,7 +35,6 @@ def _build_plan(ticket_text):
         mutable_paths=tuple(declared),
         protected_paths=(),
         rw_zones=stanok.sandbox.DEFAULT_RW_ZONES,
-        probe_specs=(),
         git_mode="ro",
         edit_paths=tuple(edit_paths),
     )
@@ -55,7 +54,6 @@ def test_plan_fields_from_ticket_header():
     assert plan.declared_paths == ("src/mod.py", "tests/mod_test.py", "docs/mod.md")
     assert plan.declared_paths == plan.mutable_paths
     assert plan.rw_zones == ("src", "tests", "docs", "scripts", "evidence")
-    assert plan.probe_specs == ()
     assert plan.git_mode == "ro"
     assert plan.protected_paths == ()
 

@@ -46,7 +46,7 @@ def _arm(repo, monkeypatch, manifest=_UNSET):
     monkeypatch.setitem(stanok._CONTRACT_LOCK_STATE, "plan", stanok.SessionPlan(
         declared_paths=(), mutable_paths=(),
         protected_paths=tuple(m.keys()),
-        rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=(),
+        rw_zones=stanok.sandbox.DEFAULT_RW_ZONES,
     ))
 
 

@@ -51,7 +51,7 @@ def test_declared_path_traversal_rejected():
 def _empty_plan():
     return stanok.SessionPlan(
         declared_paths=(), mutable_paths=(), protected_paths=(),
-        rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=(),
+        rw_zones=stanok.sandbox.DEFAULT_RW_ZONES,
     )
 
 

@@ -88,15 +88,15 @@ _CONTRACT_LOCK_STATE: dict = {"plan": None}
 # policy consumers (parse/quarantine/manifest/hook+contract_lock/
 # verify_gate/sandbox_argv) read from this object; no consumer keeps a
 # free-floating policy list. T1 is plumbing only: mutable_paths ==
-# declared_paths, rw_zones is the current hardcoded tuple, probe_specs is
-# empty, git is always ro — observable behavior is byte-for-byte unchanged.
+# declared_paths, rw_zones is the current hardcoded tuple, git is always ro
+# — observable behavior is byte-for-byte unchanged. (The T2 probe_specs
+# placeholder was dropped when T2 was burned — CC-131.)
 @dataclasses.dataclass(frozen=True)
 class SessionPlan:
     declared_paths:  tuple[str, ...]  # ticket header: impl:/test:/docs:/scripts:
-    mutable_paths:   tuple[str, ...]  # T1: always == declared_paths; T2+ may diverge
+    mutable_paths:   tuple[str, ...]  # always == declared_paths (edit: paths included, CC-125)
     protected_paths: tuple[str, ...]  # pre-existing manifest keys (tests/**, scripts/run.sh)
-    rw_zones:       tuple[str, ...]  # T1: sandbox.DEFAULT_RW_ZONES; T4: derived from mutable_paths
-    probe_specs:     tuple            # T1: always (); T2: probe registry entries
+    rw_zones:       tuple[str, ...]  # sandbox.DEFAULT_RW_ZONES (T4 would derive them — deferred)
     git_mode:        str = "ro"       # .git is always RO (I7, verified 2026-09-24)
     # CC-125: `edit:`-declared paths are MODIFIED IN PLACE, not created from
     # scratch — prepare_workspace must not quarantine them. They stay in
@@ -1480,7 +1480,6 @@ def cmd_run(args) -> int:
         mutable_paths=tuple(declared_paths),
         protected_paths=(),
         rw_zones=sandbox.DEFAULT_RW_ZONES,
-        probe_specs=(),
         git_mode="ro",
         edit_paths=tuple(edit_paths),
     )
