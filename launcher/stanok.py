@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stanok 4.2 Production — Context-Engineered Runner on a local model.
+"""Stanok — context-engineered Runner on a local model.
 
 Full integration with the L1 Supervisor:
   1. Single Continuous Session (ClaudeSDKClient): retries inside ONE session (99% KV cache).
@@ -10,7 +10,8 @@ Full integration with the L1 Supervisor:
      circuit breaker — asyncio.shield() keeps the turn task alive past wait_for,
      so client.interrupt() runs cleanly and summary.json is written with the
      TURN-TIMEOUT code (rc=1) without the process dying on CancelledError.
-  6. Smart Diff Extraction: prioritized assert/diff search with a UTF-8 slice.
+  6. Verifier-output compression: dependency-noise filter + last-N tail (no
+     pattern heuristics — see REVIEW-KISS-CLI-FIRST §3.3).
   7. Process Reaper: a single process group with guaranteed termination of all children.
 """
 
@@ -1723,7 +1724,7 @@ def _resolve_ticket(arg: str, direct: bool = False) -> str:
 def main() -> int:
     root_refusal()
 
-    p = argparse.ArgumentParser(prog="stanok", description="Stanok 4.2 Runner")
+    p = argparse.ArgumentParser(prog="stanok", description="Stanok Runner")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # R2: argparse is the single source of the CLI (the former launch.sh flag
