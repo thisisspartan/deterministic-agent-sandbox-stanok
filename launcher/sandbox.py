@@ -53,14 +53,18 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     uid, gid = os.getuid(), os.getgid()
     name = f"stanok-{os.path.basename(repo_root)}-{os.getpid()}"
 
-    # Pre-create the per-uid Claude tmp dir before `docker run`: bwrap
-    # resolves mount points via realpathSync and silently skips non-existent
-    # folders, so the FIRST Bash invocation of a session misses the
-    # /tmp/claude-<uid> bind if the dir is created lazily after bwrap args
-    # are formed.
+    # The CLI's nested bwrap binds its per-uid tmp dir rw — but ONLY when the
+    # path exists as the bwrap args are formed: cli.js's allowOnly loop skips
+    # non-existent write paths ("Skipping non-existent write path") and
+    # sandboxTmpDir = (CLAUDE_CODE_TMPDIR || "/tmp") + Na1() ("claude-<uid>")
+    # is created lazily. On the FIRST Bash call of a session the bind is
+    # therefore absent and the cwd-file write hits EROFS (CC-141, the
+    # "Слой 2" defect). Pre-creating the dir on the HOST does not help — it is
+    # not visible in the container (nothing binds /tmp). Mount a tmpfs AT that
+    # exact container path instead: it exists before the CLI starts, so the
+    # bind is emitted from the very first invocation. Na1() uses getuid(),
+    # and `--user {uid}` makes the container uid ours — the paths agree.
     claude_tmp = f"/tmp/claude-{uid}"
-    os.makedirs(claude_tmp, exist_ok=True)
-    os.chmod(claude_tmp, 0o700)
 
     argv = [
         "docker", "run", "--rm", "--name", name, "--init",
@@ -71,6 +75,10 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
         # Ephemeral HOME on a tmpfs: no host coupling, the CLI's ~/.claude
         # and ~/.claude.json live and die with the container.
         "--tmpfs", f"/home/stanok:uid={uid},gid={gid},mode=700",
+        # The CLI's per-uid tmp dir (see above): a tmpfs, not a host bind —
+        # hermetic, dies with the container, and present before bwrap forms
+        # its args, which is the whole point (CC-141).
+        "--tmpfs", f"{claude_tmp}:uid={uid},gid={gid},mode=700",
         "-w", repo_root,
     ]
 
