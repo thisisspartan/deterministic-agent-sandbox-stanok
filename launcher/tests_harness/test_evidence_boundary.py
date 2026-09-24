@@ -12,6 +12,10 @@ in-container Runner shared a writable verdict dir with the host. Now:
   - `_publish_evidence()` copies the verdict into evidence/<label> on the
     HOST, after the container exits.
 
+CC-135 (T4) landed after this file: `sandbox_argv` no longer mounts the zones
+rw wholesale — the caller passes per-ticket `rw_paths` and the default is
+`()` (nothing writable but log_dir), so the tests below pass them explicitly.
+
 The last test is a real `docker run` (the image is a hard doctor requirement
 already): a zone write succeeds, an evidence/ write is refused.
 """
@@ -48,17 +52,28 @@ def test_evidence_is_not_a_writable_zone():
 
 def test_sandbox_argv_mounts_evidence_read_only(tmp_path):
     repo = tmp_path / "repo"
-    (repo / "evidence").mkdir(parents=True)
+    for rel in ("evidence", "src", "tests"):
+        (repo / rel).mkdir(parents=True)
     log = tmp_path / "logs"
     log.mkdir()
+    # T4/CC-135: the carve-outs are per-ticket (rw_paths), not the zone list —
+    # the default is fail-closed (nothing writable but log_dir).
     _, argv = sandbox.sandbox_argv(str(repo), str(log), "img", ["true"])
     mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
     rw = [m for m in mounts if m.endswith(":rw")]
-    assert f"{repo}/evidence:{repo}/evidence:rw" not in rw
     assert f"{repo}:{repo}:ro" in mounts
-    for zone in sandbox.WRITABLE_ZONES:
-        assert f"{repo}/{zone}:{repo}/{zone}:rw" in rw
+    assert f"{tmp_path}:{tmp_path}:ro" in mounts  # the parent dir (tickets/CLAUDE.md gate)
     assert f"{log}:{log}:rw" in rw
+    assert rw == [f"{log}:{log}:rw"], rw  # default: no carve-out at all
+
+    _, argv = sandbox.sandbox_argv(str(repo), str(log), "img", ["true"],
+                                   rw_paths=("src/mod.py",))
+    mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+    rw = [m for m in mounts if m.endswith(":rw")]
+    assert f"{repo}/src/mod.py:{repo}/src/mod.py:rw" in rw
+    assert f"{repo}/evidence:{repo}/evidence:rw" not in rw
+    assert f"{repo}/tests:{repo}/tests:rw" not in rw  # a sibling zone stays ro
+    assert not any("/evidence" in m for m in rw)
 
 
 def test_label_paths_container_writes_into_log_dir(tmp_path, monkeypatch):
@@ -110,7 +125,8 @@ def test_container_cannot_write_evidence(tmp_path):
         f"then echo EVIDENCE-OK; else echo EVIDENCE-DENIED; fi"
     )
     image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
-    name, argv = sandbox.sandbox_argv(str(repo), str(log), image, ["bash", "-c", cmd])
+    name, argv = sandbox.sandbox_argv(str(repo), str(log), image,
+                                      ["bash", "-c", cmd], rw_paths=("src",))
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     finally:

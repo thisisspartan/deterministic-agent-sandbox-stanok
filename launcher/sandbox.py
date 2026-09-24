@@ -14,28 +14,34 @@ container), same --network=host (loopback to the local llama-server).
 import os
 import subprocess
 
-# The zones the container gets rw — the ONE literal zone list (CC-132).
-# Three consumers: sandbox_argv mounts them rw, and stanok.py imports them
-# for path validation, hidden_files_gate and prepare_workspace. T4 (CC-135)
-# will derive the rw set per run from plan.mutable_paths, and this tuple
-# becomes the fallback — the derivation happens in ONE place because the
-# list exists in one place.
+# The default project zones — the ONE literal zone list (CC-132). Two
+# consumers, both in stanok.py: hidden_files_gate (which dirs to scan) and
+# declared_carveout (a bare zone name is undeclarable). It is NOT the rw mount
+# set: since T4 (CC-135) the container's rw carve-outs are derived per ticket
+# from the declared paths (stanok.declared_carveout) and passed to sandbox_argv
+# as `rw_paths`. The zones are merely the dirs hidden_files_gate watches and
+# the names a declared path may not BE.
 #
-# CC-134 removed the former "evidence" carve-out: evidence/ is now read-only
-# in the container (still reachable through the repo :ro mount, so an
-# in-container write is an EROFS refusal, not "not found"). The container
-# writes the verdict (summary.json, launcher.stdout.log, the .running marker)
-# into the rw LOG_DIR/<label>; the HOST publishes it into evidence/<label>
-# after the container exits (stanok._publish_evidence).
+# CC-134 removed the former "evidence" carve-out: evidence/ is read-only in
+# the container (still reachable through the repo :ro mount, so an in-container
+# write is an EROFS refusal, not "not found"). The container writes the verdict
+# (summary.json, launcher.stdout.log, the .running marker) into the rw
+# LOG_DIR/<label>; the HOST publishes it into evidence/<label> after the
+# container exits (stanok._publish_evidence).
 WRITABLE_ZONES = ("src", "tests", "docs", "scripts")
 
 
 def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
-                 rw_zones: tuple = WRITABLE_ZONES) -> tuple:
+                 rw_paths: tuple = ()) -> tuple:
     """Return (container_name, docker_argv).
 
     inner_argv is the container-side command (e.g.
     ["/usr/bin/python3", "launcher/stanok.py", "run", ...]).
+
+    rw_paths are repo-relative paths (files or dirs) to carve out rw — the
+    derivation is stanok.declared_carveout (T4, CC-135), the host computes them
+    before `docker run`. The default is () = nothing writable: a caller that
+    forgets the carve-outs gets a read-only container, not an open one.
     """
     parent_dir = os.path.dirname(repo_root)
     uid, gid = os.getuid(), os.getgid()
@@ -62,16 +68,18 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
         "-w", repo_root,
     ]
 
-    # Writable carve-outs: base repo read-only, subpaths re-mounted rw on top
-    # (Docker layers -v mounts by specificity). .git inherits :ro from the
-    # base mount — git reads work, git writes fail at the filesystem layer.
+    # Writable carve-outs: base repo read-only, the ticket's declared paths
+    # re-mounted rw on top (Docker layers -v mounts by specificity) — the T3
+    # experiment (2026-09-24): an existing file bound rw over the ro repo is
+    # writable while its siblings stay EROFS. .git inherits :ro from the base
+    # mount — git reads work, git writes fail at the filesystem layer.
     # Parent of the repo mounted ro FIRST: tickets live in $PARENT_DIR/tickets
     # and the role-leak gate (rc=24) checks $PARENT_DIR/CLAUDE.md.
     specs = [
         f"{parent_dir}:{parent_dir}:ro",
         f"{repo_root}:{repo_root}:ro",
     ]
-    specs += [f"{repo_root}/{zone}:{repo_root}/{zone}:rw" for zone in rw_zones]
+    specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:rw" for rel in rw_paths]
     specs.append(f"{log_dir}:{log_dir}:rw")
     for spec in specs:
         argv += ["-v", spec]
@@ -84,6 +92,11 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
     env["HOME"] = "/home/stanok"
     env["CLAUDE_TMPDIR"] = claude_tmp
+    # T4 baseline (CC-135): declared paths may be files inside otherwise-ro
+    # dirs, so CPython must not drop __pycache__/*.pyc next to an imported
+    # module. run.sh's py runner already sets this for pytest; this covers the
+    # agent's own python invocations (deterministic env, not a workaround).
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     for var in ("http_proxy", "https_proxy", "no_proxy", "NO_PROXY"):
         if os.environ.get(var):
             env[var] = os.environ[var]

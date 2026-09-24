@@ -53,12 +53,14 @@ launcher/stanok.py            — THE single Runner (CLI run/status/stop,
                                 gates, background self-spawn, Job/Attempt,
                                 typed summary.json)
 launcher/sandbox.py           — the Docker boundary (R2, former sandbox-run.sh):
-                                repo mounted read-only with writable carve-outs
-                                (src/, tests/, docs/, scripts/ — evidence/ is
-                                HOST-ONLY: read-only in the container, the host
-                                publishes the verdict into it, CC-134);
-                                .git read-only; cap-drop=ALL, no-new-privileges,
-                                resource limits
+                                repo mounted read-only with per-ticket writable
+                                carve-outs (T4/CC-135: derived from the declared
+                                paths — an existing declared path binds itself,
+                                an absent one its nearest existing ancestor dir);
+                                evidence/ is HOST-ONLY: read-only in the
+                                container, the host publishes the verdict into it
+                                (CC-134); .git read-only; cap-drop=ALL,
+                                no-new-privileges, resource limits
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 Dockerfile                    — the machine image (debian + toolchain +
                                 uv + claude-agent-sdk + pytest + Node.js +
@@ -72,7 +74,9 @@ launcher/tests_harness/       — the doctor checks as pytest (R5)
                                 native sandbox + allowedDomains)
 CLAUDE.md                     — the machine role (auto-loaded inside the repo)
 setup.sh                      — environment deployment (.venv + docker image)
-src/ tests/ docs/ scripts/    — the machine working directories (empty at start)
+src/ tests/ docs/ scripts/    — the machine working directories (the zones the
+                                hidden-file gate watches; T4 mounts only what
+                                the ticket declares)
 ```
 
 ## Configuration (all via env)
@@ -110,13 +114,19 @@ src/ tests/ docs/ scripts/    — the machine working directories (empty at star
    (`test_docker_image_digest_matches`): a stale image is a doctor failure,
    not a mid-run ENV-FAIL -> ticket header (rc=13: an `impl:`/`test:`/`docs:` line
    or `reset: none` is required — the ticket-scoped invariant, W2.1; literal
-   paths are validated: relative, no `..`, top-level dir inside
-   src/tests/docs/scripts) -> pre-flight `/props` of the server (rc=20;
+   paths are validated against the filesystem: relative, no `..`, no symlink
+   out of the repo, and either existing or under an existing directory —
+   T4/CC-135, the same rule that derives the container's rw carve-outs, so a
+   path with no carve-out is refused before any container starts) -> pre-flight `/props` of the server (rc=20;
    fail-closed also when the server `n_ctx` is below the required window).
    The dirty-tree gate is fail-closed: no destructive reset/clean — the
    operator commits before launch.
 2. The Runner opens ONE Claude session (cwd = repo) inside the Docker
-   container (`launcher/sandbox.py`): settings from `.claude/settings.stanok.json`,
+   container (`launcher/sandbox.py`): the repo is `:ro` and exactly the
+   declared paths are re-mounted `:rw` on top (an existing declared path binds
+   itself; an absent one binds its nearest existing ancestor dir, since Docker
+   creates a missing bind source as a root-owned directory — T4/CC-135);
+   settings from `.claude/settings.stanok.json`,
    tools Read/Write/Edit/Grep/Glob/Bash — Bash is native and UNRESTRICTED;
    the boundary is the container (cap-drop=ALL, no-new-privileges,
    resource limits) plus the claude-code native sandbox (bwrap per Bash
