@@ -532,42 +532,22 @@ def prepare_workspace(plan: "SessionPlan") -> int:
 # Smart compression of verifier errors (Smart Diff Extraction)
 # ==================================================================================
 def _extract_smart_diff(raw_text: str) -> str:
-    cleaned_lines = [
-        line for line in raw_text.strip().splitlines()
-        if not any(p in line for p in NOISE_LINE_PATTERNS)
-    ]
-    if not cleaned_lines:
-        cleaned_lines = raw_text.strip().splitlines()
+    """Compress verifier output for the fix prompt: drop dependency noise and
+    keep the LAST lines (a test failure is reported at the tail).
 
-    if len(cleaned_lines) <= MAX_TEST_LINES:
-        res = "\n".join(cleaned_lines)
-    else:
-        high_pri = re.compile(
-            r"(assertionerror|strictequal|deepstrictequal|expected|actual|not ok\s+\d+"
-            r"|#\s+fail\s+\d+|diff:|traceback \(most recent call last\)|^\s*e\s+assert)",
-            re.I)
-        matches = [i for i, line in enumerate(cleaned_lines) if high_pri.search(line)]
+    No pattern heuristics: the previous JS/TAP-weighted regex could pick the
+    wrong window for other runners (HANDOFF-ARCH-REVIEW §3 #9). A raw tail
+    cannot mislead that way (REVIEW-KISS-CLI-FIRST §3.3).
+    """
+    lines = [ln for ln in raw_text.strip().splitlines()
+             if not any(p in ln for p in NOISE_LINE_PATTERNS)]
+    if not lines:
+        lines = raw_text.strip().splitlines()
 
-        if not matches:
-            low_pri = re.compile(r"(fail|assert|error:)", re.I)
-            matches = [i for i, line in enumerate(cleaned_lines) if low_pri.search(line)]
-
-        if matches:
-            center = matches[-1]
-            start = max(0, center - 20)
-            end = min(len(cleaned_lines), start + MAX_TEST_LINES)
-            if end - start < MAX_TEST_LINES:
-                start = max(0, end - MAX_TEST_LINES)
-            window = cleaned_lines[start:end]
-            hdr = [f"... [{start} lines skipped above] ..."] if start > 0 else []
-            ftr = [f"... [{len(cleaned_lines) - end} lines skipped below] ..."] if end < len(cleaned_lines) else []
-            res = "\n".join(hdr + window + ftr)
-        else:
-            # Mandatory fallback (P6): no specific pattern matched — keep the
-            # last 25 lines of the test output (the failure is at the tail).
-            start = max(0, len(cleaned_lines) - 25)
-            hdr = [f"... [{start} lines skipped above] ..."] if start > 0 else []
-            res = "\n".join(hdr + cleaned_lines[start:])
+    if len(lines) > MAX_TEST_LINES:
+        start = len(lines) - MAX_TEST_LINES
+        lines = [f"... [{start} lines skipped above] ..."] + lines[start:]
+    res = "\n".join(lines)
 
     b_res = res.encode("utf-8")
     if len(b_res) > MAX_TEST_BYTES:
