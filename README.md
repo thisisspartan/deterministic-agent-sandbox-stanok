@@ -145,9 +145,10 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
    `scripts/run.sh` and injects the verdict (RED CONFIRMED) into the
    session — the TDD red phase is harness-provided, not model discipline.
    The contract_lock (pre-existing `tests/` + `scripts/run.sh`) is enforced
-   at two points: a PreToolUse deny (before the write hits disk, SDK
-   callback hook) and the post-turn SHA256 manifest diff (fallback —
-   catches Bash-mediated writes the hook cannot see).
+   at two points: the `:ro` file bind (the kernel refuses the write with
+   EROFS — T4b/CC-136; the PreToolUse deny hook it replaced was removed by
+   T5/CC-137) and the post-turn SHA256 manifest diff (the independent second
+   echelon, which also catches deletion of a protected file).
 4. On verifier FAIL the Runner appends an in-session retry turn
    (`--local-retries`, default 2) with the failure block.
 5. Final: `verifier: PASS/FAIL`, `probe_result: CLEAN-FIRST |

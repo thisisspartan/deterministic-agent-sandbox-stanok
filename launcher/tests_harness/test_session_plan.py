@@ -4,8 +4,6 @@ Hermetic: parse a sample ticket header, build the plan exactly as
 cmd_run does, and pin the T1 invariants:
   - declared_paths == mutable_paths (T1: no divergence)
   - git_mode == "ro"
-  - protected_paths populated from the pre-session manifest snapshot
-    (dataclasses.replace, exactly as run_continuous_session does)
   - the contract_lock exemption is generalized to mutable_paths:
     a mutable protected path is not flagged; a non-mutable one is.
 
@@ -46,12 +44,12 @@ from conftest import repo, write
 
 def _build_plan(ticket_text):
     """Mirror cmd_run's T1 construction: parse the header, then build the
-    plan with mutable=declared, protected=()."""
+    plan with mutable=declared (the plan carries no mount/protected lists —
+    T4/CC-135 derives the rw mounts, T4b/CC-136 the :ro binds)."""
     declared, edit_paths, _ = stanok.parse_ticket_header(ticket_text)
     return stanok.SessionPlan(
         declared_paths=tuple(declared),
         mutable_paths=tuple(declared),
-        protected_paths=(),
         git_mode="ro",
         edit_paths=tuple(edit_paths),
     )
@@ -71,7 +69,10 @@ def test_plan_fields_from_ticket_header():
     assert plan.declared_paths == ("src/mod.py", "tests/mod_test.py", "docs/mod.md")
     assert plan.declared_paths == plan.mutable_paths
     assert plan.git_mode == "ro"
-    assert plan.protected_paths == ()
+    # T5/CC-137: exactly four fields — the mount/protected lists are derived
+    # (rw_zones gone with CC-135, protected_paths gone with the hook it fed).
+    assert {f.name for f in dataclasses.fields(stanok.SessionPlan)} == {
+        "declared_paths", "mutable_paths", "git_mode", "edit_paths"}
 
 
 def test_plan_is_frozen():
@@ -80,18 +81,13 @@ def test_plan_is_frozen():
         plan.declared_paths = ()
 
 
-def test_protected_paths_from_hermetic_manifest(repo, monkeypatch):
-    write(repo / "tests" / "x_test.py", "def test_x():\n    assert 1\n")
-    (repo / "docs").mkdir()  # CC-135: a declared path needs an existing carve-out
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    manifest = stanok._tests_manifest()
-    assert "tests/x_test.py" in manifest
-    assert "scripts/run.sh" in manifest
-    plan = dataclasses.replace(_build_plan(_TICKET),
-                               protected_paths=tuple(manifest.keys()))
-    assert plan.protected_paths == tuple(manifest.keys())
-    assert "tests/x_test.py" in plan.protected_paths
-    assert "scripts/run.sh" in plan.protected_paths
+def test_contract_lock_set_is_the_manifest_not_a_plan_field():
+    # T5/CC-137: "protected" is the manifest itself (one source, CC-136's
+    # _protected_files); it is not copied into the plan. The set the post-turn
+    # diff hashes is exactly the set host_ro_paths may bind :ro.
+    plan = _build_plan(_TICKET)
+    assert not hasattr(plan, "protected_paths")
+    assert not hasattr(stanok, "_pretooluse_lock_hook")
 
 
 def test_contract_lock_exempts_mutable_path(repo, monkeypatch):
@@ -106,8 +102,7 @@ def test_contract_lock_exempts_mutable_path(repo, monkeypatch):
     try:
         runsh.write_text(orig + "# probe\n", encoding="utf-8")
         job = {}
-        plan = dataclasses.replace(_build_plan(_TICKET),
-                                   protected_paths=tuple(before.keys()))
+        plan = _build_plan(_TICKET)
         stanok._check_contract_lock(before, job, 1, plan)
         assert any("scripts/run.sh" in v
                    for v in job.get("contract_lock_violations", [])), \

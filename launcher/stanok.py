@@ -82,23 +82,21 @@ _marker_path = None
 _evidence_dir = None
 _live_dir = None
 _INTERRUPTED_RC = 0
-# contract_lock first echelon (CC-104): the finalized SessionPlan, read by
-# _pretooluse_lock_hook at call time (set in run_continuous_session).
-_CONTRACT_LOCK_STATE: dict = {"plan": None}
 
 
 # T1 (CC-120): the single source of file policy (invariant I1). The policy
-# consumers (parse/quarantine/manifest/hook+contract_lock/verify_gate) read
-# from this object; no consumer keeps a free-floating policy list. git is
-# always ro. The container's rw MOUNTS are not a field: they are derived from
-# mutable_paths by declared_carveout (T4/CC-135), so the mount set cannot
-# drift from the ticket. (The T2 probe_specs placeholder was dropped when T2
-# was burned — CC-131.)
+# consumers (parse/quarantine/contract_lock/verify_gate) read from this object;
+# no consumer keeps a free-floating policy list. git is always ro. Neither the
+# container's rw MOUNTS nor the :ro protected set is a field: the mounts are
+# derived from mutable_paths by declared_carveout (T4/CC-135) and the :ro binds
+# from the same manifest the post-turn diff hashes (host_ro_paths/T4b), so no
+# list in the plan can drift from the ticket or go stale. (The T2 probe_specs
+# placeholder was dropped when T2 was burned — CC-131; protected_paths was
+# dropped with the PreToolUse hook it fed — T5/CC-137.)
 @dataclasses.dataclass(frozen=True)
 class SessionPlan:
     declared_paths:  tuple[str, ...]  # ticket header: impl:/test:/docs:/edit:
     mutable_paths:   tuple[str, ...]  # always == declared_paths (edit: paths included, CC-125)
-    protected_paths: tuple[str, ...]  # pre-existing manifest keys (tests/**, scripts/run.sh)
     git_mode:        str = "ro"       # .git is always RO (I7, verified 2026-09-24)
     # CC-125: `edit:`-declared paths are MODIFIED IN PLACE, not created from
     # scratch — prepare_workspace must not quarantine them. They stay in
@@ -541,8 +539,8 @@ def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
     carved out through its parent dir, declaring a NEW test would otherwise make
     every reference test in tests/ writable at the filesystem layer. Docker
     layers a file bind over a dir bind by specificity (verified 2026-09-24), so
-    binding the protected files :ro restores immutability natively, with the
-    PreToolUse deny as the second echelon instead of the only one.
+    binding the protected files :ro restores immutability natively — this is the
+    FIRST echelon; the post-turn manifest diff (T5/CC-137) is the second.
 
     Two exclusions: a file outside every carve-out needs no bind (the repo `:ro`
     mount already covers it), and a DECLARED path is never bound (`edit:` on an
@@ -1025,49 +1023,18 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
     return (turn_total or live_window), live_window, writes, turn_error
 
 
-# contract_lock first echelon (CC-104): PreToolUse deny BEFORE the write hits
-# disk. The post-turn SHA256 manifest diff (_check_contract_lock) stays as
-# the independent second echelon: it catches Bash-mediated writes
-# (sed/tee/python) that a PreToolUse hook on Edit/Write/MultiEdit cannot see.
+# contract_lock (T5, CC-137): the PreToolUse deny hook is GONE. Its job — a
+# pre-existing protected file cannot be rewritten — is now done by the MOUNT
+# (T4b/CC-136: the protected files are bound :ro over the rw carve-out, so the
+# write is an EROFS refusal from the kernel, not a Python decision), with the
+# post-turn SHA256 manifest diff (_check_contract_lock) as the independent
+# second echelon that catches anything the filesystem cannot (a DELETED test
+# file is a write to its directory) and fails the run closed.
 #
-# Conditional by design: only PRE-EXISTING manifest files are denied. New
-# test files (TDD red phase) and a missing scripts/run.sh (bootstrap) are
-# NOT in the manifest and stay writable — a blanket deny would break TDD.
-#
-# SDK callback (not a shell hook): a timed-out SDK callback BLOCKS the tool
-# call (fail-closed); a timed-out shell/http/mcp_tool hook does NOT.
-# Fail-open on internal error, like _verifier_hook: the second echelon
-# still enforces fail-closed after the turn.
-
-
-async def _pretooluse_lock_hook(hook_input: dict, tool_use_id: "str | None", context) -> dict:
-    plan = _CONTRACT_LOCK_STATE["plan"]
-    if not plan:
-        return {}
-    try:
-        path = (hook_input.get("tool_input") or {}).get("file_path")
-        if not path:
-            return {}
-        full = path if os.path.isabs(path) else os.path.join(REPO_ROOT, path)
-        rel = os.path.relpath(os.path.realpath(full), REPO_ROOT)
-        if rel in plan.protected_paths and rel not in plan.mutable_paths:
-            log(f"CONTRACT-LOCK DENY: {rel} (pre-existing protected file)")
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": (
-                        f"CONTRACT-LOCK: {rel} is a pre-existing protected file "
-                        "(reference test / project entrypoint). Modifying or "
-                        "deleting it is CATEGORICALLY FORBIDDEN — the post-turn "
-                        "manifest diff will fail the run. Create NEW files "
-                        "instead; fix the implementation in src/."
-                    ),
-                }
-            }
-    except Exception as e:
-        log(f"CONTRACT-LOCK HOOK: no-op (error: {e})")
-    return {}
+# The hook was deleted only after that e2e existed: a declared ABSENT path is
+# carved out through its parent dir, so before CC-136 the mount layer alone
+# left the pre-existing tests writable (see tickets/TASK-STANOK-CC-135.md
+# §Non-goals and CC-136).
 
 
 # R1 (Phase 2): in-process replacement for hooks/verifier.sh.
@@ -1200,12 +1167,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
         tools=CURATED_TOOLS,
         allowed_tools=CURATED_TOOLS,
         hooks={
-            # contract_lock first echelon (CC-104): deny writes to pre-existing
-            # protected files BEFORE they hit disk (Bash bypass stays with the
-            # post-turn manifest diff).
-            "PreToolUse": [
-                HookMatcher(matcher="Edit|Write|MultiEdit", hooks=[_pretooluse_lock_hook], timeout=10)
-            ],
             # R1: in-process PostToolUse verifier (replaces hooks/verifier.sh).
             # timeout > _HOOK_TEST_TIMEOUT_S so the hook's own 75 s test timeout
             # is the deterministic verdict, not the SDK's hook timeout.
@@ -1231,16 +1192,11 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
     job["tokens"] = total_tokens
     job["cache_hit_rate"] = "0.0%"
 
-    # contract_lock (W2.5): snapshot tests/ before the session; a pre-existing
-    # test file modified/deleted during the run is a violation in summary.json.
+    # contract_lock (W2.5): snapshot the protected files before the session; a
+    # pre-existing test file modified/deleted during the run is a violation in
+    # summary.json (the :ro bind makes the modification impossible; the diff
+    # still catches a deletion, i.e. a write to the parent dir).
     tests_manifest_before = _tests_manifest()
-    # T1 (CC-120): finalize the plan — the manifest keys become
-    # protected_paths (I1: the manifest is no longer a free-floating policy
-    # input). First echelon (CC-104): expose the finalized plan to the
-    # PreToolUse hook (read at call time; the hook only fires during the
-    # session).
-    plan = dataclasses.replace(plan, protected_paths=tuple(tests_manifest_before.keys()))
-    _CONTRACT_LOCK_STATE["plan"] = plan
 
     with open(stream_out_path, "a", encoding="utf-8") as stream_f:
         async with ClaudeSDKClient(options=options) as client:
@@ -1623,13 +1579,10 @@ def cmd_run(args) -> int:
     if edit_paths:
         log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
 
-    # T1 (CC-120): build the SessionPlan — the single source of file policy
-    # (I1). protected_paths is finalized in run_continuous_session from the
-    # pre-session manifest snapshot.
+    # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
     plan = SessionPlan(
         declared_paths=tuple(declared_paths),
         mutable_paths=tuple(declared_paths),
-        protected_paths=(),
         git_mode="ro",
         edit_paths=tuple(edit_paths),
     )

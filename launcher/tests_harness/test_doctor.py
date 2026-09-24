@@ -128,17 +128,14 @@ def test_contract_lock_runsh():
     try:
         runsh.write_text(orig + "# contract-lock probe\n", encoding="utf-8")
         job = {}
-        plan = stanok.SessionPlan(
-            declared_paths=(), mutable_paths=(),
-            protected_paths=tuple(before.keys()))
+        plan = stanok.SessionPlan(declared_paths=(), mutable_paths=())
         stanok._check_contract_lock(before, job, 1, plan)
         assert any("scripts/run.sh" in v
                    for v in job.get("contract_lock_violations", [])), \
             f"undeclared run.sh modification not flagged: {job}"
         job2 = {}
         plan2 = stanok.SessionPlan(
-            declared_paths=("scripts/run.sh",), mutable_paths=("scripts/run.sh",),
-            protected_paths=tuple(before.keys()))
+            declared_paths=("scripts/run.sh",), mutable_paths=("scripts/run.sh",))
         stanok._check_contract_lock(before, job2, 1, plan2)
         assert not job2.get("contract_lock_violations"), \
             f"declared run.sh modification wrongly flagged: {job2}"
