@@ -132,7 +132,7 @@ def test_render_16_mode_encodes_every_index_via_basic_sgr(monkeypatch):
     for _ in range(8):
         sim.tick()
     for n in range(16):
-        monkeypatch.setattr(fire, "rgb_to_16", lambda rgb, n=n: n)
+        monkeypatch.setattr(fire, "fire16", lambda heat, is_base, blank, n=n: n)
         frame = fire.render(sim, color_mode="16")
         esc = "3%d" % n if n < 8 else "9%d" % (n - 8)
         want = "\x1b[%sm" % esc
