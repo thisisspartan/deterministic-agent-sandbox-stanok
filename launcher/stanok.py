@@ -1200,7 +1200,10 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 _check_contract_lock(tests_manifest_before, job, turn, plan)
 
                 # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
-                # spike in the turn's input_tokens (uncached re-send).
+                # spike in the turn's input_tokens (uncached re-send). Only
+                # meaningful from turn 2: on turn 1 there is no previous turn to
+                # break the prefix from, so comparing the first prompt against a
+                # constant baseline fired a false WARN on every run (CC-126).
                 prev_inputs = [t["input_tokens"] for t in job["turn_telemetry"][:-1]]
                 if prev_inputs:
                     median_prev = sorted(prev_inputs)[len(prev_inputs) // 2]
@@ -1208,9 +1211,6 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                         job["turn_telemetry"][-1]["prefix_break"] = True
                         log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} "
                             f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
-                elif inp > 4000:
-                    job["turn_telemetry"][-1]["prefix_break"] = True
-                    log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} > 4000 baseline")
 
                 rot_threshold = context_rot_threshold()
                 if live_context > rot_threshold:
