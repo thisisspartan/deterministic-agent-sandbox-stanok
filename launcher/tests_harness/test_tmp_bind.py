@@ -18,9 +18,9 @@ The host-side pre-create the harness used to do was invisible: nothing binds
 so it exists before the CLI starts and the bind is emitted from call one.
 
 Pinned here (the e2e tests need docker; they skip cleanly without it):
-  1  sandbox_argv mounts /tmp/claude-<uid> as a tmpfs (uid/gid/mode 700)
+  1  sandbox_argv mounts /tmp/claude-<uid> as a tmpfs (uid/gid/mode 700/exec)
   2  sandbox_argv does NOT bind the HOST /tmp dir (it must not create it)
-  3  e2e: the dir exists before any command runs, and nested bwrap can write it
+  3  e2e: dir exists before any command, nested bwrap writes, temp script runs
   4  e2e negative control: without the tmpfs, that same bwrap write is EROFS
 """
 import os
@@ -51,7 +51,7 @@ def _argv(tmp_path):
 def test_argv_mounts_cli_tmpdir_as_tmpfs(tmp_path):
     uid = os.getuid()
     _, argv = _argv(tmp_path)
-    spec = f"/tmp/claude-{uid}:uid={uid},gid={os.getgid()},mode=700"
+    spec = f"/tmp/claude-{uid}:uid={uid},gid={os.getgid()},mode=700,exec"
     i = argv.index("--tmpfs")
     assert spec in argv, argv
     assert argv[i + 1] == f"/home/stanok:uid={uid},gid={os.getgid()},mode=700"
@@ -87,7 +87,10 @@ def test_container_tmpdir_exists_before_any_command(tmp_path):
     cmd = (
         f"test -d '{d}' && echo DIR-EXISTS; "
         f"bwrap --ro-bind / / --bind '{d}' '{d}' --dev /dev --proc /proc -- "
-        f"bash -c 'touch {d}/cwd-e2e && echo BWRAP-WRITE-OK'"
+        f"bash -c 'touch {d}/cwd-e2e && echo BWRAP-WRITE-OK'; "
+        # TMPDIR parity (cli.js aG8 exports TMPDIR=<this dir>): a temp script
+        # must be runnable, i.e. the tmpfs must not be docker's default noexec.
+        f"printf '#!/bin/sh\\necho EXEC-OK\\n' > '{d}/t.sh'; chmod 755 '{d}/t.sh'; '{d}/t.sh'"
     )
     # sandbox_argv rebuilds the whole tmpfs/mount set from the same helper.
     repo = tmp_path / "repo"
@@ -103,6 +106,7 @@ def test_container_tmpdir_exists_before_any_command(tmp_path):
         sandbox.docker_stop(name)
     assert "DIR-EXISTS" in proc.stdout, proc
     assert "BWRAP-WRITE-OK" in proc.stdout, proc
+    assert "EXEC-OK" in proc.stdout, proc
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")

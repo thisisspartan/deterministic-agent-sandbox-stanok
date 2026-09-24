@@ -77,8 +77,11 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
         "--tmpfs", f"/home/stanok:uid={uid},gid={gid},mode=700",
         # The CLI's per-uid tmp dir (see above): a tmpfs, not a host bind —
         # hermetic, dies with the container, and present before bwrap forms
-        # its args, which is the whole point (CC-141).
-        "--tmpfs", f"{claude_tmp}:uid={uid},gid={gid},mode=700",
+        # its args, which is the whole point (CC-141). `exec` matters: the
+        # nested runtime exports TMPDIR=<this dir> (cli.js aG8), so a
+        # tool/test writing a temp script to $TMPDIR and running it must not
+        # hit docker's default noexec (upstream /tmp/claude is a plain dir).
+        "--tmpfs", f"{claude_tmp}:uid={uid},gid={gid},mode=700,exec",
         "-w", repo_root,
     ]
 
