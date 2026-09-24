@@ -445,13 +445,6 @@ def render(sim, color_mode="truecolor"):
                     n = fire16(row[x], flags[x], BLANK_THRESHOLD)
                     if n is None:
                         n = 8
-                    # The branch's index is a pure function of rgb_to_16's
-                    # output: the flame-ramp index (fire16) is mapped back
-                    # onto the basic-16 palette and re-quantized. In normal
-                    # operation rgb_to_16(ANSI16_RGB[n]) is the identity for
-                    # n in 0..7 (the bright variants 8..15 fold onto their
-                    # dim equivalents), so the hot->cold gradient is kept.
-                    n = rgb_to_16(ANSI16_RGB[n])
                     if n < 8:
                         cells.append("\x1b[3%dm\x1b[0m\u2580" % n)
                     else:

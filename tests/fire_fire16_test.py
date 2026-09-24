@@ -1,10 +1,17 @@
 """16-color flame ramp (``fire16``) and ``--probe`` swatch card contract
-tests for src/fire.py (CC-119).
+tests (CC-119).
 
-The 16-color mode must show a real hot->cold gradient (bright core, red
-body, blue base) instead of a dark-red blob, and ``--probe`` must print a
-static 16-color swatch card so a user can see which basic colors their
-terminal renders.
+The 16-color mode must show a real hot->cold gradient on terminals that
+render ONLY basic SGR (``\\x1b[3Xm`` 0..7, ``\\x1b[9Xm`` 8..15): a bright
+core, a red body, a blue base -- not a flat dark-red blob. Therefore:
+
+- ``fire16(heat, is_base, blank=0.10) -> int | None``: pure, deterministic
+  heat->basic-16 flame ramp (no PRNG, no wall clock).
+- ``render(sim, color_mode="16")`` uses ``fire16`` (NOT ``rgb_to_16``),
+  emits basic SGR only, and renders a smoke cell as index 8 (bright black).
+- ``fire.py --probe`` prints a static 16-color swatch card (2 rows of 8
+  half-blocks, one per basic ANSI index 0..15) and exits 0; it takes
+  precedence over ``--frame``/``--frames``/``--color`` and works headless.
 
 Run via:  bash scripts/run.sh test tests/fire_fire16_test.py
 """
@@ -47,15 +54,14 @@ def _frame16(w, h, seed=SEED, ticks=8):
 
 
 def _indices(frame):
-    """Set of basic-ANSI indices (0..15) actually used in a 16-mode frame."""
+    """The set of basic-16 color indices used in a 16-mode frame."""
     idxs = set()
-    for m in re.finditer(r"\x1b\[([39])([0-7])m", frame):
-        prefix, x = m.group(1), int(m.group(2))
-        idxs.add(x if prefix == "3" else x + 8)
+    for m in re.finditer(r"\x1b\[([39])([0-7])m\x1b\[0m" + BLOCK, frame):
+        idxs.add((8 if m.group(1) == "9" else 0) + int(m.group(2)))
     return idxs
 
 
-# --- fire16: pure heat -> basic-16 index --------------------------------------
+# --- fire16: the pure heat->basic-16 flame ramp -------------------------------
 
 def test_fire16_zero_and_below_blank_are_none():
     assert fire.fire16(0.0, False) is None
@@ -78,25 +84,22 @@ def test_fire16_base_blue_ramp():
 # --- 16-mode frame: a real gradient, not a flat blob --------------------------
 
 def test_frame16_has_hot_core_and_red_body():
-    # A real hot->cold gradient, not a flat blob: a hot color in the core
-    # (yellow 3 is the hottest the unchanged simulation reaches; 7/11/15
-    # would appear if the core ran hotter) AND a red body (1/9).
+    """A 24x12 frame (seed 42, 8 ticks) must contain at least one hot-core
+    cell (index in {7, 11, 15}) AND at least one red-body cell (index in
+    {1, 9}) -- a gradient, not a monochrome blob."""
     frame = _frame16(24, 12)
     idxs = _indices(frame)
-    assert idxs & {3, 7, 11, 15}, \
-        "no hot-core index in the 16-mode frame (got %r)" % idxs
-    assert idxs & {1, 9}, \
-        "no red-body index in the 16-mode frame (got %r)" % idxs
+    assert idxs & {7, 11, 15}, f"no hot-core index in {sorted(idxs)}"
+    assert idxs & {1, 9}, f"no red-body index in {sorted(idxs)}"
 
 
 def test_frame16_uses_at_least_three_distinct_indices():
     frame = _frame16(24, 12)
-    idxs = _indices(frame)
-    assert len(idxs) >= 3, \
-        "16-mode frame is monochrome (only %r)" % idxs
+    assert len(_indices(frame)) >= 3, \
+        f"16-mode frame is monochrome: {sorted(_indices(frame))}"
 
 
-def test_frame16_basic_sgr_only():
+def test_frame16_emits_basic_sgr_only():
     frame = _frame16(24, 12)
     assert "\x1b[38;" not in frame, \
         "16 mode must not emit extended \\x1b[38; escapes"
@@ -104,15 +107,31 @@ def test_frame16_basic_sgr_only():
         "16 mode must not emit truecolor escapes"
 
 
-# --- CLI --probe: static 16-color swatch card ----------------------------------
+# --- CLI --probe: the static 16-color swatch card -----------------------------
 
-def test_cli_probe_prints_swatch_card():
+def test_cli_probe_prints_all_16_basic_colors():
     p = _run_py(["src/fire.py", "--probe"])
     assert p.returncode == 0, p.stderr
     for i in range(8):
-        assert "\x1b[3%dm" % i in p.stdout, "missing \\x1b[3%dm" % i
-        assert "\x1b[9%dm" % i in p.stdout, "missing \\x1b[9%dm" % i
+        assert "\x1b[3%dm" % i in p.stdout, \
+            f"probe card missing basic code \\x1b[3{i}m"
+        assert "\x1b[9%dm" % i in p.stdout, \
+            f"probe card missing bright code \\x1b[9{i}m"
     assert p.stdout.count(BLOCK) == 16, \
-        "expected 16 half-blocks, got %d" % p.stdout.count(BLOCK)
+        f"probe card must show exactly 16 half-blocks, got {p.stdout.count(BLOCK)}"
     assert "\x1b[38;" not in p.stdout, \
-        "--probe must not emit extended \\x1b[38; escapes"
+        "probe card must use basic SGR only"
+
+
+def test_cli_probe_takes_precedence_and_works_headless():
+    """--probe wins over --frame/--frames/--color: no simulation runs, the
+    output is the static card, and it works without a TTY."""
+    p = _run_py(["src/fire.py", "--probe", "--frame", "5", "--frames", "3",
+                 "--color", "truecolor"])
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.count(BLOCK) == 16
+    assert "\x1b[38;" not in p.stdout
+    lines = p.stdout.strip("\n").split("\n")
+    assert len(lines) == 2, "probe card is 2 rows of 8"
+    for line in lines:
+        assert len(re.sub(r"\x1b\[[0-9;]*m", "", line)) == 8
