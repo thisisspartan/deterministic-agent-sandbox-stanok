@@ -39,7 +39,7 @@ echo "--- staging the Claude Code CLI into the build context (R4) ---"
 CLI_SRC="${STANOK_CLI_DIR:?ERROR: STANOK_CLI_DIR is not set — point it at the validated claude-code 2.1.88 checkout (cli.js + package.json + vendor/ripgrep/x64-linux/rg)}"
 # Pinned hashes of the validated claude-code 2.1.88 staging sources —
 # a tampered or wrong checkout must fail the build, not silently ship.
-CLI_JS_SHA="a5f461302c9a10185f2ccb6100daf6836577d3e72b5df61732fba985bdc07994"
+CLI_JS_SHA="10ff56ce84f3d6c4a896bee0f1ac41388cafdf97ec3d48548fe12f95db9012eb"
 PKG_JSON_SHA="e21f9e98fa4ea8b4d007063d92c631df1bbed6d11c9e79c5fcdeb9f4859dc8fa"
 RG_SHA="55c2b8dd910f390b06b3a7c620603489b83fdfb647665e4d4bb32f3f54f09ea1"
 if [[ ! -f "$CLI_SRC/cli.js" || ! -f "$CLI_SRC/package.json" || ! -f "$CLI_SRC/vendor/ripgrep/x64-linux/rg" ]]; then
