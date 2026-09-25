@@ -1,0 +1,8 @@
+ext = "js"
+test_glob = "*.test.js"
+name_regex = "[A-Za-z0-9_-]+\\.test\\.js"
+test_runner = "node --test --test-force-exit"
+smoke_runner = "node"
+preflight = "node --version"
+domains = ["registry.npmjs.org"]
+runtime = ["node v22.22.3 (nodejs.org tarball, sha256-pinned in Dockerfile)"]

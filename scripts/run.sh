@@ -55,9 +55,10 @@ cd "$REPO_ROOT"
 # the repo (cache artifacts must not reach the W12 `list` check or the
 # contract_lock manifest — the env prefix goes through `env` because
 # `timeout` cannot parse a VAR=value word itself).
-STACKS='js|*.test.js|[A-Za-z0-9_-]+\.test\.js|node --test --test-force-exit|node|node --version
-py|*_test.py|[A-Za-z0-9_-]+_test\.py|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest -q -p no:cacheprovider -o pythonpath=src|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest --version
-jq|*.json|[A-Za-z0-9_-]+\.json|jq empty|jq empty|command -v jq'
+# STACK REGISTRY — GENERATED from scripts/stacks/*.toml by
+# scripts/gen_stacks.sh. Do not edit by hand; edit the manifest and run
+# `bash scripts/gen_stacks.sh`.
+source "$SCRIPT_DIR/stacks.generated.sh"
 
 # Generate the usage alternatives from the registry (single source).
 stack_alts() {

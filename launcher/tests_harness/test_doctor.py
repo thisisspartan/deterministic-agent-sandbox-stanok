@@ -162,11 +162,22 @@ def test_manifest_skips_pycache():
 
 
 def _registry_lines():
-    """Parse the STACKS heredoc in scripts/run.sh -> list of field lists."""
+    """The live STACKS registry as a list of field lists.
+
+    CC-148: the registry is GENERATED — scripts/run.sh sources
+    scripts/stacks.generated.sh (emitted from scripts/stacks/*.toml by
+    scripts/gen_stacks.sh). Parse the generated file; fall back to an
+    inline STACKS heredoc in run.sh only if the generated file is absent
+    (pre-CC-148 trees).
+    """
     import re
-    runsh = (REPO_ROOT / "scripts" / "run.sh").read_text(encoding="utf-8")
-    m = re.search(r"STACKS='(.*?)'", runsh, re.S)
-    assert m, "STACKS registry not found in scripts/run.sh"
+    gen = REPO_ROOT / "scripts" / "stacks.generated.sh"
+    if gen.is_file():
+        text = gen.read_text(encoding="utf-8")
+    else:
+        text = (REPO_ROOT / "scripts" / "run.sh").read_text(encoding="utf-8")
+    m = re.search(r"STACKS='(.*?)'", text, re.S)
+    assert m, "STACKS registry not found (scripts/stacks.generated.sh or run.sh)"
     lines = [ln for ln in m.group(1).splitlines() if ln.strip()]
     assert lines, "empty STACKS registry"
     return [ln.split("|") for ln in lines]
@@ -215,17 +226,18 @@ def test_claude_md_matches_registry():
 
 def test_stacks_md_matches_registry():
     # CC-147: specs/STACKS.md documents the registry — its "Current registry"
-    # block must be byte-identical to the STACKS heredoc in scripts/run.sh,
-    # and its format line must list all 6 field names.
+    # block must contain exactly the live registry lines (order-insensitive
+    # since CC-148: the generator emits manifest sort order), and its format
+    # line must list all 6 field names.
     import re
     stacks_md = (REPO_ROOT.parent / "specs" / "STACKS.md").read_text(encoding="utf-8")
     blocks = re.findall(r"```\n(.*?)\n```", stacks_md, re.S)
     assert blocks, "specs/STACKS.md missing code blocks"
     doc_lines = [ln for ln in blocks[-1].splitlines() if ln.strip()]
     reg_lines = ["|".join(f) for f in _registry_lines()]
-    assert doc_lines == reg_lines, \
-        f"specs/STACKS.md registry block drifted from scripts/run.sh:\n" \
-        f"  doc: {doc_lines}\n  run.sh: {reg_lines}"
+    assert sorted(doc_lines) == sorted(reg_lines), \
+        f"specs/STACKS.md registry block drifted from the live registry:\n" \
+        f"  doc: {sorted(doc_lines)}\n  registry: {sorted(reg_lines)}"
     fmt = re.search(r"<ext>\|<test-glob>\|<name-regex>\|<test-runner>\|<smoke-runner>(\|<preflight>)?", stacks_md)
     assert fmt and fmt.group(1), \
         "specs/STACKS.md format line must document all 6 fields incl. <preflight>"
