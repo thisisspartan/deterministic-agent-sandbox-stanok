@@ -7,15 +7,15 @@ generator contract:
 - `--check` exits 0 on the committed state (real repo);
 - `--check` exits 1 after tampering with a copy of a manifest (temp tree);
 - the generated STACKS block equals the expected 3 registry lines (as a
-  set of lines; order per the generator's manifest-filename sort rule);
-- domains.json parses as JSON and equals the sorted union of all domains;
-- runtime.list has one line per runtime entry, in manifest order.
+  set of lines; order per the generator's manifest-filename sort rule).
+
+CC-155: the former domains.json/runtime.list outputs are gone (no consumer);
+the registry is the only generated artifact and the only thing pinned here.
 
 All generation happens in a temp tree (tmp_path); the real scripts/ tree
 is only ever read.
 """
 
-import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,21 +34,6 @@ EXPECTED_LINES = {
 
 # Manifest filename sort order: jq.toml, js.toml, py.toml.
 EXPECTED_ORDER = ["jq", "js", "py"]
-
-EXPECTED_DOMAINS = [
-    "files.pythonhosted.org",
-    "pypi.org",
-    "registry.npmjs.org",
-]
-
-EXPECTED_RUNTIME = [
-    "jq",
-    "node v22.22.3 (nodejs.org tarball, sha256-pinned in Dockerfile)",
-    "python3",
-    "python3-venv",
-    "uv (pinned 0.5.24)",
-    "pytest",
-]
 
 
 def _copy_scripts(tmp_path: Path) -> Path:
@@ -112,20 +97,3 @@ def test_generated_stacks_block(tmp_path):
     assert [line.split("|", 1)[0] for line in lines] == EXPECTED_ORDER, (
         f"line order must follow manifest sort order: {lines}"
     )
-
-
-def test_generated_domains_json(tmp_path):
-    """domains.json parses as JSON and equals the sorted union of domains."""
-    tree = _copy_scripts(tmp_path)
-    _generate(tree)
-    raw = (tree / "stacks.generated" / "domains.json").read_text()
-    doms = json.loads(raw)
-    assert doms == EXPECTED_DOMAINS, f"domains drifted: {doms}"
-
-
-def test_generated_runtime_list(tmp_path):
-    """runtime.list has one line per runtime entry, in manifest order."""
-    tree = _copy_scripts(tmp_path)
-    _generate(tree)
-    lines = (tree / "stacks.generated" / "runtime.list").read_text().splitlines()
-    assert lines == EXPECTED_RUNTIME, f"runtime.list drifted: {lines}"

@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
-# gen_stacks.sh — generate the STACK REGISTRY artifacts from the per-stack
-# TOML manifests in scripts/stacks/ (one manifest per stack).
+# gen_stacks.sh — generate the STACK REGISTRY from the per-stack TOML
+# manifests in scripts/stacks/ (one manifest per stack).
 #
 #   bash scripts/gen_stacks.sh          — (re)generate:
 #     scripts/stacks.generated.sh          the STACKS='...' assignment
-#     scripts/stacks.generated/domains.json  sorted union of all domains
-#     scripts/stacks.generated/runtime.list  runtime lines, manifest order
 #   bash scripts/gen_stacks.sh --check  — regenerate into a temp dir and
-#     exit 0 iff the committed artifacts are byte-identical (1 = drift,
+#     exit 0 iff the committed artifact is byte-identical (1 = drift,
 #     printing which file drifted).
 #
 # Stacks are emitted in manifest filename sort order. The manifests use
-# only strings and arrays of strings; they are parsed with a small fixed
-# sed parser (no TOML library).
+# only strings; they are parsed with a small fixed sed parser (no TOML
+# library).
+#
+# CC-155: the former domains.json/runtime.list outputs were dropped — nothing
+# consumed them (only a test asserted their own generator's output), so they
+# implied a manifest-governs-everything source of truth that did not exist.
+# The registry is the ONE generated artifact with a consumer (run.sh:65).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STACKS_DIR="$SCRIPT_DIR/stacks"
 OUT_SH="$SCRIPT_DIR/stacks.generated.sh"
-OUT_DIR="$SCRIPT_DIR/stacks.generated"
 
-# --- tiny fixed TOML parser (strings + arrays of strings, one line each) ---
+# --- tiny fixed TOML parser (strings, one per line) ---
 # TOML basic strings: the only escape used by the manifests is `\\` (a
 # literal backslash); unescape it so the emitted registry line is
 # byte-identical to the value the manifest denotes.
@@ -28,13 +30,6 @@ toml_unescape() { sed 's/\\\\/\\/g'; }
 
 toml_str() {  # $1=file $2=key -> the string value
   sed -n "s/^${2} = \"\\(.*\\)\"$/\\1/p" "$1" | toml_unescape
-}
-
-toml_arr() {  # $1=file $2=key -> one element per line
-  local inner
-  inner="$(sed -n "s/^${2} = \\[\\(.*\\)\\]$/\\1/p" "$1")"
-  [ -n "$inner" ] || return 0
-  printf '%s\n' "$inner" | sed 's/", "/\n/g' | sed 's/^"//; s/"$//' | toml_unescape
 }
 
 # --- collect manifests in filename sort order ---
@@ -48,11 +43,10 @@ done
 }
 mapfile -t manifests < <(printf '%s\n' "${manifests[@]}" | sort)
 
-generate() {  # $1=out .sh path  $2=out dir
-  local out_sh="$1" out_dir="$2"
-  mkdir -p "$out_dir"
-  local lines=() doms=() runtimes=()
-  local m ext glob nre trun srun pre d r i j
+generate() {  # $1=out .sh path
+  local out_sh="$1"
+  local lines=()
+  local m ext glob nre trun srun pre i
   for m in "${manifests[@]}"; do
     ext="$(toml_str "$m" ext)"
     glob="$(toml_str "$m" test_glob)"
@@ -66,14 +60,8 @@ generate() {  # $1=out .sh path  $2=out dir
       exit 2
     }
     lines+=("${ext}|${glob}|${nre}|${trun}|${srun}|${pre}")
-    while IFS= read -r d; do
-      [ -n "$d" ] && doms+=("$d")
-    done < <(toml_arr "$m" domains)
-    while IFS= read -r r; do
-      [ -n "$r" ] && runtimes+=("$r")
-    done < <(toml_arr "$m" runtime)
   done
-  # 1) STACKS='...' — the ONLY content of the generated .sh file
+  # STACKS='...' — the ONLY content of the generated .sh file
   {
     printf "STACKS='"
     for i in "${!lines[@]}"; do
@@ -82,48 +70,21 @@ generate() {  # $1=out .sh path  $2=out dir
     done
     printf "'\n"
   } > "$out_sh"
-  # 2) domains.json — sorted union
-  local sorted=()
-  if [ "${#doms[@]}" -gt 0 ]; then
-    mapfile -t sorted < <(printf '%s\n' "${doms[@]}" | sort -u)
-  fi
-  {
-    if [ "${#sorted[@]}" -eq 0 ]; then
-      printf '[]\n'
-    else
-      printf '[\n'
-      for j in "${!sorted[@]}"; do
-        [ "$j" -gt 0 ] && printf ',\n'
-        printf '  "%s"' "${sorted[$j]}"
-      done
-      printf '\n]\n'
-    fi
-  } > "$out_dir/domains.json"
-  # 3) runtime.list — manifest order, one per line
-  if [ "${#runtimes[@]}" -gt 0 ]; then
-    printf '%s\n' "${runtimes[@]}" > "$out_dir/runtime.list"
-  else
-    : > "$out_dir/runtime.list"
-  fi
 }
 
 case "${1:-}" in
   "")
-    generate "$OUT_SH" "$OUT_DIR"
+    generate "$OUT_SH"
     ;;
   --check)
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/gen_stacks.XXXXXX")"
     trap 'rm -rf "$tmp"' EXIT
-    generate "$tmp/stacks.generated.sh" "$tmp/stacks.generated"
-    rc=0
-    for rel in "stacks.generated.sh" "stacks.generated/domains.json" \
-               "stacks.generated/runtime.list"; do
-      if ! cmp -s "$tmp/$rel" "$SCRIPT_DIR/$rel"; then
-        echo "gen_stacks.sh: drift: $rel" >&2
-        rc=1
-      fi
-    done
-    exit "$rc"
+    generate "$tmp/stacks.generated.sh"
+    if ! cmp -s "$tmp/stacks.generated.sh" "$OUT_SH"; then
+      echo "gen_stacks.sh: drift: stacks.generated.sh" >&2
+      exit 1
+    fi
+    exit 0
     ;;
   *)
     echo "usage: gen_stacks.sh [--check]" >&2

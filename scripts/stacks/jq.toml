@@ -4,7 +4,5 @@ name_regex = "[A-Za-z0-9_-]+\\.json"
 test_runner = "jq empty"
 smoke_runner = "jq empty"
 preflight = "command -v jq"
-domains = []
-runtime = ["jq"]
 # CC-151: `jq empty` has no config file that rewrites its verdict.
 verdict_config = []
