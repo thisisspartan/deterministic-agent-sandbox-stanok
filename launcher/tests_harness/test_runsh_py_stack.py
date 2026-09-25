@@ -54,3 +54,24 @@ def test_I5_py_test_writes_no_pycache(repo):
     assert run(repo, "test", "tests/ok_test.py").returncode == 0
     leftovers = list(repo.rglob("__pycache__"))
     assert not leftovers, f"__pycache__ left behind: {leftovers}"
+
+def test_I6_host_interpreter_is_pinned(repo):
+    # CC-156: the harness must not silently run the py runner under the
+    # host's unpinned python3. When the repo .venv exists, run() prepends
+    # its bin/ to PATH, so the runner resolves to the image-parity pytest
+    # (8.3.3), not a newer host pytest with different exit semantics.
+    import conftest
+    if not conftest.VENV_BIN.is_dir():
+        import pytest
+        pytest.skip("no repo .venv on this host (bare checkout)")
+    (repo / "tests" / "where_test.py").write_text(
+        "import pathlib, sys\n"
+        "def test_where():\n"
+        "    pathlib.Path(str(__file__) + '.interp').write_text(sys.executable)\n"
+    )
+    assert run(repo, "test", "tests/where_test.py").returncode == 0
+    resolved = (repo / "tests" / "where_test.py.interp").read_text().strip()
+    from pathlib import Path as _P
+    assert _P(resolved).parent == conftest.VENV_BIN, (
+        f"py runner ran under {resolved!r}, not the pinned {conftest.VENV_BIN}"
+    )
