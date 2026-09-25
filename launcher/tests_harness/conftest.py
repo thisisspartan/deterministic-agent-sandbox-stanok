@@ -9,14 +9,13 @@ live here so the suites stay one-test-per-case:
   - the `repo` fixture — a tmpdir repo with the live run.sh installed,
   - run() / write() — the subprocess driver and file helper.
 
-The py stack's runner is `uv run --no-project pytest ...`: uv resolves
-the environment via VIRTUAL_ENV first. run() points it at the venv that
-runs this suite (it carries pytest; the host system python may not).
+The py stack's runner is `python3 -m pytest ...` (CC-152: the `uv run`
+wrapper is dropped — the host/container system python already carries
+pytest), so run() needs no environment pointing.
 """
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -56,7 +55,6 @@ def repo(tmp_path):
 
 def run(repo, *args, timeout=90):
     env = dict(os.environ)
-    env["VIRTUAL_ENV"] = os.path.dirname(os.path.dirname(sys.executable))
     return subprocess.run(
         ["bash", "scripts/run.sh", *args],
         cwd=repo, env=env, capture_output=True, text=True, timeout=timeout,

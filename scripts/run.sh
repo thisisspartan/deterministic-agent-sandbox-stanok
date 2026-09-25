@@ -50,15 +50,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_ROOT"
 
-# py runner: `env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest ...` —
-# uv resolves the environment itself (host: the repo's .venv; image: the
-# system python, UV_SYSTEM_PYTHON=1 + UV_PYTHON_PREFERENCE=only-system).
-# --no-project keeps uv from hunting for a pyproject.toml; -p no:cacheprovider
-# keeps pytest from writing .pytest_cache into the read-only repo root;
-# PYTHONDONTWRITEBYTECODE=1 keeps CPython from writing __pycache__/*.pyc into
-# the repo (cache artifacts must not reach the W12 `list` check or the
-# contract_lock manifest — the env prefix goes through `env` because
-# `timeout` cannot parse a VAR=value word itself).
+# py runner: `env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest ...` —
+# CC-152: the `uv run --no-project` wrapper is dropped (pure overhead: the
+# image's system python already has pytest, installed via `uv pip install`
+# with UV_SYSTEM_PYTHON=1, so `python3 -m pytest` is the same interpreter).
+# -p no:cacheprovider keeps pytest from writing .pytest_cache into the
+# read-only repo root; PYTHONDONTWRITEBYTECODE=1 keeps CPython from writing
+# __pycache__/*.pyc into the repo (cache artifacts must not reach the W12
+# `list` check or the contract_lock manifest — the env prefix goes through
+# `env` because `timeout` cannot parse a VAR=value word itself).
 # STACK REGISTRY — GENERATED from scripts/stacks/*.toml by
 # scripts/gen_stacks.sh. Do not edit by hand; edit the manifest and run
 # `bash scripts/gen_stacks.sh`.
