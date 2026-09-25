@@ -6,3 +6,5 @@ smoke_runner = "node"
 preflight = "node --version"
 domains = ["registry.npmjs.org"]
 runtime = ["node v22.22.3 (nodejs.org tarball, sha256-pinned in Dockerfile)"]
+# CC-151: node --test has no config file that rewrites its verdict.
+verdict_config = []

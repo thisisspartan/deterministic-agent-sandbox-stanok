@@ -32,6 +32,11 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+try:
+    import tomllib  # stdlib TOML (Python 3.11+); CC-151 manifest-driven guard
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    tomllib = None
+
 import sandbox  # R2: the Docker boundary (former sandbox-run.sh)
 
 # --- Circuit constants -------------------------------------------------------------
@@ -271,19 +276,66 @@ def hidden_files_gate() -> bool:
     return False
 
 
+# CC-151: the pre-manifest (W6) py verdict-config set. Fail-closed fallback
+# when no stack manifest parses (e.g. hermetic test repos with no
+# scripts/stacks/), so the guard never silently disables.
+_LEGACY_VERDICT_CONFIG = ("conftest.py", "pytest.ini", "tox.ini",
+                         "setup.cfg", "pyproject.toml")
+
+
+def _verdict_config_patterns() -> tuple[str, ...]:
+    """CC-151 (stack-agnostic subversion guard): the union of the
+    `verdict_config` lists declared by the stack manifests
+    (scripts/stacks/*.toml). Each stack declares the config filenames that
+    can rewrite ITS runner's verdict (py: the pytest config set; js/jq: none).
+    The manifest is authoritative — a stack that declares no verdict_config
+    does not inherit another stack's list. Fail-closed: if no manifest parses
+    (missing dir, unparseable TOML, or tomllib unavailable) fall back to the
+    legacy py set so the guard never silently disables."""
+    if tomllib is None:
+        return _LEGACY_VERDICT_CONFIG
+    stacks_dir = os.path.join(REPO_ROOT, "scripts", "stacks")
+    patterns: set[str] = set()
+    found = False
+    ok = True
+    try:
+        entries = sorted(os.listdir(stacks_dir))
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.endswith(".toml"):
+            continue
+        found = True
+        path = os.path.join(stacks_dir, entry)
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            log(f"WARN: verdict_config: cannot parse {entry}: {e}")
+            ok = False
+            continue
+        for name in data.get("verdict_config", []):
+            if isinstance(name, str) and name:
+                patterns.add(name)
+    if not found or not ok:
+        return _LEGACY_VERDICT_CONFIG
+    return tuple(sorted(patterns))
+
+
 def test_config_gate() -> bool:
-    # W6 verdict-subversion gate (owner decision A, fail-closed): reject a
-    # launch if tests/ holds a pytest config file (conftest.py / pytest.ini /
-    # tox.ini / setup.cfg / pyproject.toml) at any depth. A conftest.py with
-    # `pytest_sessionfinish: session.exitstatus = 0` turns a failing test into
-    # rc=0; tests/ is writable and contract_lock only hashes files that
-    # existed at start, so such a file can appear mid-project. pytest picks up
-    # conftest.py from every directory on the test file's path, hence the
-    # recursive walk.
+    # W6 verdict-subversion gate (owner decision A, fail-closed); CC-151 makes
+    # it stack-agnostic: the forbidden set is the union of the `verdict_config`
+    # lists declared by the stack manifests (scripts/stacks/*.toml), not a
+    # hardcoded py tuple. A config file that can rewrite a runner's verdict
+    # (e.g. a conftest.py with `pytest_sessionfinish: session.exitstatus = 0`
+    # turning a failing test into rc=0) is rejected at launch (rc=27). tests/
+    # is writable and contract_lock only hashes files that existed at start,
+    # so such a file can appear mid-project; the runner picks up config from
+    # every directory on the test file's path, hence the recursive walk.
     tests_dir = os.path.join(REPO_ROOT, "tests")
     if not os.path.isdir(tests_dir):
         return False
-    forbidden = ("conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")
+    forbidden = _verdict_config_patterns()
     try:
         for dirpath, _dirnames, filenames in os.walk(tests_dir):
             for name in filenames:
