@@ -348,7 +348,7 @@ def test_config_gate() -> bool:
     return False
 
 
-def sandbox_config_gate() -> bool:
+def sandbox_config_gate() -> list[str]:
     # W7 sandbox-config gate (fail-closed, CC-107): cli.js resolves a relative
     # sandbox.filesystem deny entry against the --settings file's directory
     # (REPO_ROOT/.claude), NOT cwd. A deny entry that resolves to a NON-EXISTENT
@@ -362,27 +362,36 @@ def sandbox_config_gate() -> bool:
     # settings-relative entries (written "../<name>" from .claude) and absolute
     # paths. Any other form ("~", "//") is rejected rather than guessed at, so
     # the gate cannot silently diverge from cli.js semantics.
+    #
+    # Returns a list of human-readable problems (empty = OK). Each problem
+    # names the key, the raw entry, the resolved path, and the fix
+    # (CC-157: the rc=28 abort must be actionable, not abstract).
+    problems: list[str] = []
     settings = os.path.join(REPO_ROOT, ".claude", "settings.stanok.json")
     if not os.path.isfile(settings):
-        return False
+        return problems
     try:
         with open(settings, encoding="utf-8") as f:
             cfg = json.load(f)
     except (OSError, ValueError) as e:
-        log(f"WARN: could not parse {settings} in sandbox_config_gate — fail-closed: {e}")
-        return True
+        problems.append(f"could not parse {settings}: {e}")
+        return problems
     base = os.path.dirname(settings)  # == REPO_ROOT/.claude (cli.js flagSettings root)
     fs = cfg.get("sandbox", {}).get("filesystem", {})
     for key in ("denyWrite", "denyRead"):
         for entry in fs.get(key, []):
             if entry.startswith(("~", "//")):
-                log(f"SANDBOX-CONFIG: {key} entry {entry!r} is not settings-relative/absolute (unsupported)")
-                return True
+                problems.append(
+                    f"{key} entry {entry!r} is not settings-relative/absolute (unsupported)")
+                continue
             resolved = entry if os.path.isabs(entry) else os.path.normpath(os.path.join(base, entry))
             if not os.path.exists(resolved):
-                log(f"SANDBOX-CONFIG: {key} entry {entry!r} resolves to non-existent {resolved} (base {base})")
-                return True
-    return False
+                problems.append(
+                    f"{key} entry {entry!r} resolves to non-existent {resolved} "
+                    f"(base {base}) — fix: mkdir -p {resolved}")
+    for p in problems:
+        log(f"SANDBOX-CONFIG: {p}")
+    return problems
 
 
 def _required_context_window() -> int | None:
@@ -2086,8 +2095,12 @@ def main() -> int:
         # W7 sandbox-config gate (rc=28): a sandbox.filesystem deny entry that
         # resolves (against the settings dir, per cli.js) to a non-existent
         # path makes bwrap EROFS-kill every Bash call in the session (CC-107).
-        if sandbox_config_gate():
-            return early_abort(28, "ERROR: sandbox.filesystem deny entry resolves to a non-existent path (rc=28)")
+        # The abort message carries the offending entries + fix (CC-157).
+        sandbox_problems = sandbox_config_gate()
+        if sandbox_problems:
+            return early_abort(
+                28, "ERROR: sandbox.filesystem deny entry invalid (rc=28): "
+                + "; ".join(sandbox_problems))
 
         # R2: launch orchestration (the former launch.sh branches, in Python).
         in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
