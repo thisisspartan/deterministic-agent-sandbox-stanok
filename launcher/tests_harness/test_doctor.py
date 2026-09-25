@@ -161,33 +161,74 @@ def test_manifest_skips_pycache():
         probe.unlink(missing_ok=True)
 
 
+def _registry_lines():
+    """Parse the STACKS heredoc in scripts/run.sh -> list of field lists."""
+    import re
+    runsh = (REPO_ROOT / "scripts" / "run.sh").read_text(encoding="utf-8")
+    m = re.search(r"STACKS='(.*?)'", runsh, re.S)
+    assert m, "STACKS registry not found in scripts/run.sh"
+    lines = [ln for ln in m.group(1).splitlines() if ln.strip()]
+    assert lines, "empty STACKS registry"
+    return [ln.split("|") for ln in lines]
+
+
+def test_registry_shape():
+    # CC-147: the registry line format is exactly 6 fields
+    # (ext|test-glob|name-regex|test-runner|smoke-runner|preflight).
+    for fields in _registry_lines():
+        assert len(fields) == 6, f"registry line must have 6 fields, got {len(fields)}: {fields!r}"
+
+
+def test_context_md_budget():
+    # CC-146: the live CONTEXT.md (parent repo, read at every supervisor
+    # session start) must stay under the ~15 KB budget; closed waves go to
+    # specs/ARCHIVE/CONTEXT-<wave>.md.
+    ctx = REPO_ROOT.parent / "CONTEXT.md"
+    assert ctx.is_file(), "CONTEXT.md missing from the parent repo root"
+    size = ctx.stat().st_size
+    assert size <= 15360, \
+        f"CONTEXT.md is {size} bytes (> 15360 budget) — archive closed waves " \
+        f"to specs/ARCHIVE/CONTEXT-<wave>.md"
+
+
 def test_claude_md_matches_registry():
     # W5: CLAUDE.md "Test forms" must name every stack in the run.sh registry
     # (extension + a runner word). A new registry line without a CLAUDE.md edit
     # drops this test.
     import re
-    runsh = (REPO_ROOT / "scripts" / "run.sh").read_text(encoding="utf-8")
-    m = re.search(r"STACKS='(.*?)'", runsh, re.S)
-    assert m, "STACKS registry not found in scripts/run.sh"
-    stacks = [ln for ln in m.group(1).splitlines() if ln.strip()]
-    assert stacks, "empty STACKS registry"
     claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
     tf = re.search(r"## Test forms.*?(?=\n## |\Z)", claude, re.S)
     assert tf, "CLAUDE.md missing '## Test forms' section"
     tf_text = tf.group(0)
     stop = {"uv", "run", "python3", "bash", "sh", "timeout", "m", "no", "project", "q", "p", "o"}
-    for ln in stacks:
-        fields = ln.split("|")
-        assert len(fields) >= 4, f"malformed registry line: {ln!r}"
+    for fields in _registry_lines():
         ext, test_runner = fields[0], fields[3]
         # (a) the extension must be a named stack label in Test forms
         assert re.search(r"\*\*" + re.escape(ext) + r"\*\*", tf_text), \
-            f"CLAUDE.md Test forms missing stack label **{ext}** (registry line: {ln!r})"
+            f"CLAUDE.md Test forms missing stack label **{ext}** (registry line: {fields!r})"
         # (b) a runner word from the registry's test-runner must appear in Test forms
         runner_tokens = {t for t in re.findall(r"[A-Za-z][A-Za-z0-9]*", test_runner) if t not in stop}
         tf_tokens = {t for t in re.findall(r"[A-Za-z][A-Za-z0-9]*", tf_text)}
         assert runner_tokens & tf_tokens, \
             f"CLAUDE.md Test forms names no runner word for **{ext}** (runner: {test_runner!r})"
+
+
+def test_stacks_md_matches_registry():
+    # CC-147: specs/STACKS.md documents the registry — its "Current registry"
+    # block must be byte-identical to the STACKS heredoc in scripts/run.sh,
+    # and its format line must list all 6 field names.
+    import re
+    stacks_md = (REPO_ROOT.parent / "specs" / "STACKS.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```\n(.*?)\n```", stacks_md, re.S)
+    assert blocks, "specs/STACKS.md missing code blocks"
+    doc_lines = [ln for ln in blocks[-1].splitlines() if ln.strip()]
+    reg_lines = ["|".join(f) for f in _registry_lines()]
+    assert doc_lines == reg_lines, \
+        f"specs/STACKS.md registry block drifted from scripts/run.sh:\n" \
+        f"  doc: {doc_lines}\n  run.sh: {reg_lines}"
+    fmt = re.search(r"<ext>\|<test-glob>\|<name-regex>\|<test-runner>\|<smoke-runner>(\|<preflight>)?", stacks_md)
+    assert fmt and fmt.group(1), \
+        "specs/STACKS.md format line must document all 6 fields incl. <preflight>"
 
 
 # --- 12-16: mock runner launches --------------------------------------------
