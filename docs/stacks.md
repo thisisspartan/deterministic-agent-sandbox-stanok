@@ -71,6 +71,35 @@ matches each argument against every line); the generator emits lines in
 manifest filename sort order. Each line is byte-identical to the value in its
 manifest.
 
+## Suite mode: `test --all` (D4)
+
+`bash scripts/run.sh test --all` runs **EVERY** test file that `list` would
+print in one invocation — the same discovery (registry globs, sorted-unique)
+and the same W12 unclaimed-test-like-file rule: an unclaimed file fails the
+suite with rc=1 (named on stderr), exactly as it fails `list`.
+
+- `--all` is recognized **ONLY** as the sole argument to `test`:
+  `test --all` → suite run; `test --all <x>` or `test <path> --all` → rc=2
+  (refused, usage on stderr).
+- Each file runs with its own stack's test-runner, sequentially, with the
+  same per-file timeout (60 s) and the same `=== <file> ===` header as the
+  per-file `test` subcommand. A failing file does **NOT** stop the suite —
+  all files run.
+- Preflight: each distinct preflight command runs once before the suite
+  (ENV-FAIL rc=6, same semantics as the per-file path).
+- Zero test files → rc=0, no output (an empty suite passes).
+
+| rc  | meaning                                                            |
+|-----|--------------------------------------------------------------------|
+| 0   | all files passed (or the suite is empty)                           |
+| 1   | a test failed, or an unclaimed test-like file exists              |
+| 2   | refused: `--all` is not the sole argument to `test`               |
+| 6   | ENV-FAIL: a stack's runner is unavailable (preflight failed)      |
+| 124 | a file hit the 60 s timeout — the suite stops at the first timeout |
+
+The per-file `test <path>` path is **UNCHANGED** (same rc semantics, same
+output); `smoke` and `list` are UNCHANGED.
+
 ## Appendix: exact file contents (for immediate creation)
 
 > NOTE: In the current container the `scripts/` directory is mounted
