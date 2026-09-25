@@ -745,12 +745,69 @@ def _run_one_test(rel: str) -> tuple[str, str] | None:
     return None
 
 
+def _run_suite(failures: list[tuple[str, str]], tests: list[str]) -> None:
+    """D4 (CC-149): run the whole suite in ONE `test --all` call instead of
+    N per-file spawns. The suite runs every list-discovered file sequentially
+    with per-file timeouts and `=== <file> ===` headers; rc maps:
+      0   -> all pass (no failures appended)
+      1   -> a test failed (or unclaimed file) -> one (suite) failure w/ output
+      2   -> run.sh refused `--all` (no suite mode) -> per-file fallback
+      6   -> ENV-FAIL (runner unavailable) -> tagged for fail-closed rc=16
+      124 -> a file hit the 60 s timeout (suite stopped) -> tagged TIMEOUT
+
+    Per-file attribution: the combined output carries `=== <file> ===`
+    headers, so the fix-prompt diff shows which file failed; the model can
+    re-run `test <file>` to localize. The pre-CC-149 per-file spawns are kept
+    as the rc=2 fallback so an old entrypoint without suite mode still
+    verifies (and `_run_one_test` stays the per-file primitive).
+    """
+    try:
+        sp = subprocess.run(["bash", "scripts/run.sh", "test", "--all"],
+                            cwd=REPO_ROOT, capture_output=True, text=True,
+                            timeout=len(tests) * 60 + 60)
+    except subprocess.TimeoutExpired:
+        failures.append(("(suite)",
+                         "TIMEOUT: suite execution exceeded the runner limit"))
+        return
+    except Exception as e:
+        failures.append(("(suite)", f"EXEC_ERROR: {e}"))
+        return
+    rc = sp.returncode
+    raw = (sp.stderr or "") + "\n" + (sp.stdout or "")
+    if rc == 0:
+        return
+    if rc == 6:
+        failures.append(("(suite)", "ENV-FAIL: " + _extract_smart_diff(raw)))
+        return
+    if rc == 124:
+        failures.append(("(suite)",
+                         "TIMEOUT: suite hit the per-file 60 s timeout "
+                         "(rc=124) — " + _extract_smart_diff(raw)))
+        return
+    if rc == 2:
+        # run.sh does not support `test --all` (pre-CC-149): fall back to
+        # per-file spawns so an old entrypoint still verifies.
+        with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
+            futures = {ex.submit(_run_one_test, t): t for t in tests}
+            for fut in as_completed(futures):
+                res = fut.result()
+                if res is not None:
+                    failures.append(res)
+        return
+    # rc == 1 (a test failed / unclaimed file) or any other non-zero rc:
+    # surface the suite output so the fix prompt can localize the failure.
+    failures.append(("(suite)", _extract_smart_diff(raw)))
+
+
 def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]:
     """Verdict = positive contract on the ticket's declared paths (W2.3)
     + every test the project's runner declares (D3).
 
     Discovery goes through the project entrypoint too (run.sh list), so the
-    machine no longer hardcodes the *.test.js convention.
+    machine no longer hardcodes the *.test.js convention. Test execution is
+    ONE whole-suite call per turn (`run.sh test --all`, D4/CC-149) instead of
+    N per-file spawns; see `_run_suite` for the rc mapping and the rc=2
+    per-file fallback.
     Returns (ok, failures, env_fail): env_fail is True when any failure is
     an ENV-FAIL (run.sh rc=6, runner unavailable) — an environment defect
     the model cannot fix from src/, so the caller must stop fail-closed
@@ -786,12 +843,7 @@ def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]
         # the claimed tests (their failures add signal to the fix prompt).
         failures.append(("(list)", _extract_smart_diff(lp.stderr)))
 
-    with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
-        futures = {ex.submit(_run_one_test, t): t for t in tests}
-        for fut in as_completed(futures):
-            res = fut.result()
-            if res is not None:
-                failures.append(res)
+    _run_suite(failures, tests)
     failures.sort(key=lambda x: x[0])
     env_fail = any(msg.startswith("ENV-FAIL:") for _, msg in failures)
     return (len(failures) == 0, failures, env_fail)
