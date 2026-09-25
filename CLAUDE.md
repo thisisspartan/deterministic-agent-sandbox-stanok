@@ -17,11 +17,6 @@ The ticket is self-contained — everything needed is described in the first mes
    The filesystem outside `src/`, `tests/`, `docs/`, `scripts/` is mounted read-only
    at the OS level (container): any write attempt there fails with a
    `Read-only file system` error.
-   **Exception (bootstrap):** if the ticket header declares a top-level file with
-   `bootstrap: <path>` (e.g. `bootstrap: pyproject.toml`), that ONE file is writable
-   even though it is outside the four zones — it is a new project's bootstrap file.
-   Only the exact `bootstrap:`-declared path is writable this way; every other
-   top-level file and the `.git` directory stay read-only.
 2. Available tools: **Read, Write, Edit, Grep, Glob, Bash**. Bash is UNRESTRICTED inside
    this container — install packages, run any build tool, use whatever language and
    framework this project's existing code already uses. There is no per-command allowlist;

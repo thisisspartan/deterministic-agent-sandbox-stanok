@@ -101,7 +101,7 @@ def test_traversal_and_symlink_escape_are_undeclarable(repo, monkeypatch, tmp_pa
 
 def test_host_rw_paths_dedupes_and_only_emits_existing_sources(repo, monkeypatch):
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, edit_paths, _, _ = stanok.parse_ticket_header(
+    declared, edit_paths, _ = stanok.parse_ticket_header(
         "test: tests/a_test.py\n"
         "test: tests/b_test.py\n"
         "impl: src/c.py\n"

@@ -49,11 +49,9 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     protected file stays immutable while new siblings in that dir stay
     creatable. Emitted after the rw binds (deeper destination wins).
 
-    The base repo mount is ALWAYS :ro (CC-154): the CC-150 repo-root-rw
-    shortcut for bootstrap is gone. A `bootstrap:` file is pre-created empty
-    on the host by stanok.precreate_bootstrap_paths, so declared_carveout
-    resolves it to a single-FILE rw bind — only that one audited file becomes
-    writable.
+    The base repo mount is ALWAYS :ro (CC-154). Everything writable is an
+    explicit `rw_paths` carve-out, so a caller that forgets them gets a
+    read-only container, never an open one.
     """
     parent_dir = os.path.dirname(repo_root)
     uid, gid = os.getuid(), os.getgid()

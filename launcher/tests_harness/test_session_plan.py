@@ -46,7 +46,7 @@ def _build_plan(ticket_text):
     """Mirror cmd_run's T1 construction: parse the header, then build the
     plan with mutable=declared (the plan carries no mount/protected lists —
     T4/CC-135 derives the rw mounts, T4b/CC-136 the :ro binds)."""
-    declared, edit_paths, _, _ = stanok.parse_ticket_header(ticket_text)
+    declared, edit_paths, _ = stanok.parse_ticket_header(ticket_text)
     return stanok.SessionPlan(
         declared_paths=tuple(declared),
         mutable_paths=tuple(declared),
@@ -69,12 +69,11 @@ def test_plan_fields_from_ticket_header():
     assert plan.declared_paths == ("src/mod.py", "tests/mod_test.py", "docs/mod.md")
     assert plan.declared_paths == plan.mutable_paths
     assert plan.git_mode == "ro"
-    # T5/CC-137: exactly five fields — the mount/protected lists are derived
-    # (rw_zones gone with CC-135, protected_paths gone with the hook it fed).
-    # CC-154 added bootstrap_paths (a bootstrap placeholder is not quarantined).
+    # T5/CC-137: exactly four fields — the mount/protected lists are derived
+    # (rw_zones gone with CC-135, protected_paths gone with the hook it fed,
+    # bootstrap_paths gone with the bootstrap kind itself — CC-154).
     assert {f.name for f in dataclasses.fields(stanok.SessionPlan)} == {
-        "declared_paths", "mutable_paths", "git_mode", "edit_paths",
-        "bootstrap_paths"}
+        "declared_paths", "mutable_paths", "git_mode", "edit_paths"}
 
 
 def test_plan_is_frozen():
@@ -129,7 +128,7 @@ _EDIT_TICKET = (
 def test_edit_path_parsed_and_still_mutable():
     # CC-125: `edit:` is declared like any path (union) but also reported
     # separately so prepare_workspace can skip it.
-    declared, edit_paths, reset_none, _ = stanok.parse_ticket_header(_EDIT_TICKET)
+    declared, edit_paths, reset_none = stanok.parse_ticket_header(_EDIT_TICKET)
     assert declared == ["tests/new_test.py", "tests/existing_test.py"]
     assert edit_paths == ["tests/existing_test.py"]
     assert reset_none is False
@@ -190,7 +189,7 @@ def test_zone_consumers_read_the_constant(tmp_path, monkeypatch):
 
 
 def test_header_kinds_are_impl_test_docs_edit():
-    declared, edit_paths, reset_none, _ = stanok.parse_ticket_header(
+    declared, edit_paths, reset_none = stanok.parse_ticket_header(
         "impl: src/a.py\n"
         "test: tests/a_test.py\n"
         "docs: docs/a.md\n"
@@ -205,11 +204,28 @@ def test_header_kinds_are_impl_test_docs_edit():
 def test_scripts_is_a_zone_not_a_kind():
     # `scripts:` is not a declaration line: it ends the header, so the impl:
     # line after it is never reached. The old docstring advertised it.
-    declared, edit_paths, _, _ = stanok.parse_ticket_header(
+    declared, edit_paths, _ = stanok.parse_ticket_header(
         "scripts: x.sh\nimpl: src/a.py\n"
     )
     assert declared == []
     assert edit_paths == []
+
+
+def test_bootstrap_is_not_a_kind():
+    # CC-154 dropped `bootstrap:` with the root: a bootstrap ticket could only
+    # be accepted in a repo where `scripts/run.sh` is absent, but verify_gate
+    # gets the verdict FROM run.sh — so it was safe but unreachable. The line
+    # is now not a declaration (it ends the header), so the ticket is rejected
+    # as "no declaration" (rc=13) instead of silently carving out a top-level
+    # file.
+    declared, edit_paths, _ = stanok.parse_ticket_header(
+        "bootstrap: pyproject.toml\n"
+    )
+    assert declared == []
+    assert edit_paths == []
+    assert not hasattr(stanok, "_validate_bootstrap_path")
+    assert not hasattr(stanok, "precreate_bootstrap_paths")
+    assert not hasattr(stanok, "_bootstrap_paths")
 
 
 # --- CC-133: create-vs-edit derived from the filesystem -------------------------
@@ -220,7 +236,7 @@ def test_stale_create_path_is_a_defect(repo, monkeypatch):
     # hook denied recreating it, the turn stalled. Now it is rc=13 up front.
     write(repo / "tests" / "fire_color16_test.py", "def test_x():\n    assert 1\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, edit_paths, _, _ = stanok.parse_ticket_header(
+    declared, edit_paths, _ = stanok.parse_ticket_header(
         "test: tests/fire_fire16_test.py\n"
         "test: tests/fire_color16_test.py\n"
     )
@@ -233,7 +249,7 @@ def test_stale_create_path_is_a_defect(repo, monkeypatch):
 def test_create_paths_that_are_new_pass(repo, monkeypatch):
     write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, edit_paths, _, _ = stanok.parse_ticket_header(
+    declared, edit_paths, _ = stanok.parse_ticket_header(
         "test: tests/new_test.py\n"
         "edit: tests/old_test.py\n"
         "impl: src/new.py\n"
@@ -243,6 +259,7 @@ def test_create_paths_that_are_new_pass(repo, monkeypatch):
 
 def test_edit_path_that_is_absent_is_not_a_defect(repo, monkeypatch):
     # Deliberately unchecked direction: `edit:` on a missing path is not
-    # destructive (a bootstrap ticket may declare it before the file exists).
+    # destructive (a first ticket in a new project may declare it before the
+    # file exists).
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
     stanok.assert_create_paths_are_new(["src/new.py"], ["scripts/run.sh"])

@@ -8,5 +8,3 @@ domains = ["registry.npmjs.org"]
 runtime = ["node v22.22.3 (nodejs.org tarball, sha256-pinned in Dockerfile)"]
 # CC-151: node --test has no config file that rewrites its verdict.
 verdict_config = []
-# CC-150: top-level paths a `bootstrap:` declaration may create (new project).
-bootstrap_paths = ["package.json", "package-lock.json", "tsconfig.json"]
