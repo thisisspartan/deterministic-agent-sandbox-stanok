@@ -133,3 +133,57 @@ def test_no_curses_or_stdout_dependency():
         source = fh.read()
     assert "curses" not in source
     assert "sys.stdout" not in source
+
+
+# --- TASK-FIRE-03: wind turbulence & floating embers -----------------------
+
+
+def test_update_wind_stays_in_bounds():
+    # The target wind must always drift inside [-2, 2] and actually change.
+    random.seed(99)
+    sim = FireSimulation(width=10, height=8)
+    values = set()
+    for _ in range(300):
+        sim.update_wind()
+        assert -2.0 <= sim.target_wind <= 2.0
+        values.add(round(sim.target_wind, 6))
+    # The wind is not stuck at a single value — it drifts.
+    assert len(values) > 1
+
+
+def test_spawn_sparks_places_hot_cells_in_lower_rows():
+    random.seed(21)
+    sim = FireSimulation(width=20, height=10)
+    sim.spawn_sparks(count=5)
+    lower_rows = (sim.height - 2, sim.height - 3)
+    hot_cells = 0
+    for y in range(sim.height):
+        for x in range(sim.width):
+            value = sim.buffer[y][x]
+            if value >= 250:
+                hot_cells += 1
+                # Every hot cell is a spark in the 2nd/3rd row from the bottom.
+                assert y in lower_rows
+                assert 250 <= value <= 255
+    assert hot_cells >= 1
+    # No other row is heated by spawn_sparks.
+    for y in range(sim.height):
+        if y not in lower_rows:
+            assert sum(sim.buffer[y]) == 0
+
+
+def test_sparks_rise_faster_than_flame():
+    # A spark spawned at height Y must be found at height Y - 2 after one tick
+    # (embers rise 2 rows per tick, faster than the flame's 1 row).
+    random.seed(123)
+    sim = FireSimulation(width=20, height=10)
+    sim.spawn_sparks(count=1)
+    spark_row = None
+    for y in (sim.height - 2, sim.height - 3):
+        if any(v >= 250 for v in sim.buffer[y]):
+            spark_row = y
+            break
+    assert spark_row is not None
+    sim.step()
+    target_row = spark_row - 2
+    assert any(v >= 250 for v in sim.buffer[target_row])
