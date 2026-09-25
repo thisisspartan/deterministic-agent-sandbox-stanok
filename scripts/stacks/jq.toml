@@ -8,3 +8,5 @@ domains = []
 runtime = ["jq"]
 # CC-151: `jq empty` has no config file that rewrites its verdict.
 verdict_config = []
+# CC-150: the jq stack has no top-level bootstrap file.
+bootstrap_paths = []

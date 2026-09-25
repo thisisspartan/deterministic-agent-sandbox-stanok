@@ -46,7 +46,7 @@ def _build_plan(ticket_text):
     """Mirror cmd_run's T1 construction: parse the header, then build the
     plan with mutable=declared (the plan carries no mount/protected lists —
     T4/CC-135 derives the rw mounts, T4b/CC-136 the :ro binds)."""
-    declared, edit_paths, _ = stanok.parse_ticket_header(ticket_text)
+    declared, edit_paths, _, _ = stanok.parse_ticket_header(ticket_text)
     return stanok.SessionPlan(
         declared_paths=tuple(declared),
         mutable_paths=tuple(declared),
@@ -127,7 +127,7 @@ _EDIT_TICKET = (
 def test_edit_path_parsed_and_still_mutable():
     # CC-125: `edit:` is declared like any path (union) but also reported
     # separately so prepare_workspace can skip it.
-    declared, edit_paths, reset_none = stanok.parse_ticket_header(_EDIT_TICKET)
+    declared, edit_paths, reset_none, _ = stanok.parse_ticket_header(_EDIT_TICKET)
     assert declared == ["tests/new_test.py", "tests/existing_test.py"]
     assert edit_paths == ["tests/existing_test.py"]
     assert reset_none is False
@@ -188,7 +188,7 @@ def test_zone_consumers_read_the_constant(tmp_path, monkeypatch):
 
 
 def test_header_kinds_are_impl_test_docs_edit():
-    declared, edit_paths, reset_none = stanok.parse_ticket_header(
+    declared, edit_paths, reset_none, _ = stanok.parse_ticket_header(
         "impl: src/a.py\n"
         "test: tests/a_test.py\n"
         "docs: docs/a.md\n"
@@ -203,7 +203,7 @@ def test_header_kinds_are_impl_test_docs_edit():
 def test_scripts_is_a_zone_not_a_kind():
     # `scripts:` is not a declaration line: it ends the header, so the impl:
     # line after it is never reached. The old docstring advertised it.
-    declared, edit_paths, _ = stanok.parse_ticket_header(
+    declared, edit_paths, _, _ = stanok.parse_ticket_header(
         "scripts: x.sh\nimpl: src/a.py\n"
     )
     assert declared == []
@@ -218,7 +218,7 @@ def test_stale_create_path_is_a_defect(repo, monkeypatch):
     # hook denied recreating it, the turn stalled. Now it is rc=13 up front.
     write(repo / "tests" / "fire_color16_test.py", "def test_x():\n    assert 1\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, edit_paths, _ = stanok.parse_ticket_header(
+    declared, edit_paths, _, _ = stanok.parse_ticket_header(
         "test: tests/fire_fire16_test.py\n"
         "test: tests/fire_color16_test.py\n"
     )
@@ -231,7 +231,7 @@ def test_stale_create_path_is_a_defect(repo, monkeypatch):
 def test_create_paths_that_are_new_pass(repo, monkeypatch):
     write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, edit_paths, _ = stanok.parse_ticket_header(
+    declared, edit_paths, _, _ = stanok.parse_ticket_header(
         "test: tests/new_test.py\n"
         "edit: tests/old_test.py\n"
         "impl: src/new.py\n"

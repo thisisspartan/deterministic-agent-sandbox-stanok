@@ -76,7 +76,7 @@ def test_no_bind_when_nothing_is_under_a_carve_out(tmp_path, monkeypatch):
 
 def test_protected_files_under_a_dir_carve_out_are_bound(tmp_path, monkeypatch):
     root = _host_repo(tmp_path, monkeypatch, tests=("old_test.py", "also_test.py"))
-    declared, _, _ = stanok.parse_ticket_header("test: tests/new_test.py\n")
+    declared, _, _, _ = stanok.parse_ticket_header("test: tests/new_test.py\n")
     rw = stanok.host_rw_paths(declared)
     assert rw == ("tests",)                      # absent path -> its parent dir
     ro = stanok.host_ro_paths(declared, rw)
@@ -93,7 +93,7 @@ def test_declared_edit_path_is_not_bound(tmp_path, monkeypatch):
     # `edit: tests/old_test.py` is an explicit in-place contract: it must stay
     # rw even though it is a protected file and tests/ is carved out.
     _host_repo(tmp_path, monkeypatch, tests=("old_test.py", "other_test.py"))
-    declared, edits, _ = stanok.parse_ticket_header(
+    declared, edits, _, _ = stanok.parse_ticket_header(
         "edit: tests/old_test.py\n"
         "test: tests/new_test.py\n"
     )
@@ -147,7 +147,7 @@ def test_pre_existing_test_is_erofs_new_sibling_creatable(tmp_path, monkeypatch)
     root = _host_repo(tmp_path, monkeypatch, tests=("old_test.py",))
     log = tmp_path / "logs"
     log.mkdir()
-    declared, _, _ = stanok.parse_ticket_header("test: tests/new_test.py\n")
+    declared, _, _, _ = stanok.parse_ticket_header("test: tests/new_test.py\n")
     rw = stanok.host_rw_paths(declared)
     ro = stanok.host_ro_paths(declared, rw)
     assert rw == ("tests",) and ro == ("tests/old_test.py",)

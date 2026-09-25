@@ -75,7 +75,7 @@ _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 # kind: a path under scripts/ is declared with impl:/test:/docs:/edit: like
 # any other path. `scripts: x.sh` is therefore not a declaration — it ends
 # the header (this is the fix for the old docstring that advertised it).
-_FILE_LINE_RE = re.compile(r"^(impl|test|docs|edit):\s*([A-Za-z0-9_./-]+)\s*$")
+_FILE_LINE_RE = re.compile(r"^(impl|test|docs|edit|bootstrap):\s*([A-Za-z0-9_./-]+)\s*$")
 _RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
 
 _stdout_log_f = None
@@ -320,6 +320,44 @@ def _verdict_config_patterns() -> tuple[str, ...]:
     if not found or not ok:
         return _LEGACY_VERDICT_CONFIG
     return tuple(sorted(patterns))
+
+
+def _bootstrap_paths() -> tuple[str, ...]:
+    """CC-150 (bootstrap gate): the union of the `bootstrap_paths` lists
+    declared by the stack manifests (scripts/stacks/*.toml) — the audited set
+    of top-level paths a `bootstrap:` declaration may create. Unlike
+    _verdict_config_patterns (which fails CLOSED to the legacy py set), this
+    fails CLOSED to the EMPTY set: bootstrap is a NEW capability, so if no
+    manifest parses (missing dir, unparseable TOML, or tomllib unavailable)
+    NO bootstrap path is allowed — the gate never silently widens."""
+    if tomllib is None:
+        return ()
+    stacks_dir = os.path.join(REPO_ROOT, "scripts", "stacks")
+    paths: set[str] = set()
+    found = False
+    ok = True
+    try:
+        entries = sorted(os.listdir(stacks_dir))
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.endswith(".toml"):
+            continue
+        found = True
+        path = os.path.join(stacks_dir, entry)
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            log(f"WARN: bootstrap_paths: cannot parse {entry}: {e}")
+            ok = False
+            continue
+        for name in data.get("bootstrap_paths", []):
+            if isinstance(name, str) and name:
+                paths.add(name)
+    if not found or not ok:
+        return ()
+    return tuple(sorted(paths))
 
 
 def test_config_gate() -> bool:
@@ -588,6 +626,38 @@ def _validate_declared_path(rel: str) -> bool:
     return declared_carveout(rel) is not None
 
 
+def _validate_bootstrap_path(rel: str, all_rels: list[str]) -> bool:
+    """CC-150 (bootstrap gate): a `bootstrap:` path is declarable iff ALL of:
+
+      - it cannot escape the repo (relative, no `..`, no symlink out) — the
+        same containment rule as declared_carveout, but WITHOUT the
+        "existing ancestor below the root" requirement (a bootstrap path is a
+        NEW top-level file, whose only ancestor is the repo root itself);
+      - it is in the audited per-stack `bootstrap_paths` set (_bootstrap_paths);
+      - it does not already exist (bootstrap creates a NEW file; an existing
+        top-level file is declared `edit:`, not `bootstrap:`);
+      - `scripts/run.sh` is absent OR declared in this ticket (`all_rels`) —
+        bootstrap is for bootstrapping a NEW project, i.e. one whose entrypoint
+        does not yet exist or is being created by this same ticket.
+
+    Fail-closed: any check failing -> False (rc=13 upstream)."""
+    if rel.startswith("/") or rel.startswith("./"):
+        return False
+    if ".." in rel.split("/"):
+        return False
+    root = os.path.realpath(REPO_ROOT)
+    if not os.path.realpath(os.path.join(root, rel)).startswith(root + os.sep):
+        return False
+    if rel not in _bootstrap_paths():
+        return False
+    if os.path.exists(os.path.join(REPO_ROOT, rel)):
+        return False
+    run_sh = "scripts/run.sh"
+    if os.path.exists(os.path.join(REPO_ROOT, run_sh)) and run_sh not in all_rels:
+        return False
+    return True
+
+
 def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
     """The pre-existing contract files to re-bind `:ro` ON TOP of a rw carve-out
     (T4b, CC-136).
@@ -602,13 +672,18 @@ def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
 
     Two exclusions: a file outside every carve-out needs no bind (the repo `:ro`
     mount already covers it), and a DECLARED path is never bound (`edit:` on an
-    existing test is exactly the case that must stay writable)."""
+    existing test is exactly the case that must stay writable).
+
+    CC-150: a carve-out of `""` is the REPO ROOT (bootstrap active) — it contains
+    every file, so the `rel == carve or rel.startswith(carve + "/")` test must
+    treat `carve == ""` as a match (a relative rel never startswith `"/"`)."""
     declared_set = set(declared)
     ro: list[str] = []
     for rel in _protected_files():
         if rel in declared_set:
             continue
-        if not any(rel == carve or rel.startswith(carve + "/") for carve in rw_paths):
+        if not any(carve == "" or rel == carve or rel.startswith(carve + "/")
+                   for carve in rw_paths):
             continue
         ro.append(rel)
     return tuple(ro)
@@ -626,12 +701,13 @@ def host_rw_paths(declared: list[str]) -> tuple[str, ...]:
     return tuple(carveouts)
 
 
-def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
+def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool, list[str]]:
     """Ticket-scoped invariant (W2.1): the header is the leading block of
-    literal `impl: <path>` / `test: <path>` / `docs: <path>` / `edit: <path>`
-    lines plus an optional `reset: none` escape hatch for extension tickets.
-    `#` title lines and blank lines are skipped inside the header block; the
-    first other line ends it (a path mentioned in the body is never matched).
+    literal `impl: <path>` / `test: <path>` / `docs: <path>` / `edit: <path>` /
+    `bootstrap: <path>` lines plus an optional `reset: none` escape hatch for
+    extension tickets. `#` title lines and blank lines are skipped inside the
+    header block; the first other line ends it (a path mentioned in the body is
+    never matched).
 
     `edit:` marks a path that the ticket MODIFIES IN PLACE (typically an
     existing test whose contract changes) — it is declared like any other path
@@ -640,10 +716,16 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
     repo, and an existing path or an existing ancestor BELOW the repo root);
     an undeclarable path raises ValueError (fail-closed, rc=13 upstream).
 
-    Returns (declared_paths, edit_paths, reset_none); declared_paths is the
-    union (edit paths included), so mutable_paths/verify_gate are unchanged."""
-    declared: list[str] = []
-    edit_paths: list[str] = []
+    CC-150: `bootstrap:` marks a NEW top-level file (e.g. `pyproject.toml`)
+    that a fresh project needs but that has no existing ancestor to carve out
+    (declared_carveout returns None for it). It is validated by
+    _validate_bootstrap_path (audited per-stack set, run.sh absent/declared,
+    no repo escape, must not exist) and is NOT quarantined (it is new).
+
+    Returns (declared_paths, edit_paths, reset_none, bootstrap_paths);
+    declared_paths is the union (edit + bootstrap paths included), so
+    mutable_paths/verify_gate are unchanged."""
+    entries: list[tuple[str, str]] = []
     reset_none = False
     for line in ticket_text.splitlines():
         stripped = line.strip()
@@ -651,27 +733,47 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
             continue
         m = _FILE_LINE_RE.match(stripped)
         if m:
-            kind, rel = m.group(1), m.group(2)
+            entries.append((m.group(1), m.group(2)))
+            continue
+        if _RESET_NONE_RE.match(stripped):
+            reset_none = True
+            continue
+        break
+    # All declared rels (any kind) — the bootstrap run.sh gate needs the FULL
+    # list, not just the lines parsed so far.
+    all_rels = [rel for _, rel in entries]
+    declared: list[str] = []
+    edit_paths: list[str] = []
+    bootstrap_paths: list[str] = []
+    for kind, rel in entries:
+        if kind == "bootstrap":
+            if not _validate_bootstrap_path(rel, all_rels):
+                raise ValueError(
+                    f"invalid bootstrap path {rel!r}: must be a NEW top-level file "
+                    f"in the audited per-stack `bootstrap_paths` set (scripts/stacks/"
+                    f"*.toml), must not already exist, must not escape the repo "
+                    f"(relative, no '..'), and `scripts/run.sh` must be absent or "
+                    f"declared in this ticket (bootstrap is for a NEW project)"
+                )
+            bootstrap_paths.append(rel)
+        else:
             if not _validate_declared_path(rel):
                 raise ValueError(
                     f"invalid declared path {rel!r}: must be relative, contain no "
                     f"'..', resolve inside the repo (no symlink out), and either "
                     f"exist or lie under an existing directory (e.g. under "
                     f"{list(sandbox.WRITABLE_ZONES)}, created in the repo if it is "
-                    f"absent) — a NEW top-level file/dir has no safe rw carve-out"
+                    f"absent) — a NEW top-level file/dir has no safe rw carve-out "
+                    f"(use `bootstrap:` for an audited top-level file)"
                 )
-            declared.append(rel)
             if kind == "edit":
                 edit_paths.append(rel)
-            continue
-        if _RESET_NONE_RE.match(stripped):
-            reset_none = True
-            continue
-        break
-    return declared, edit_paths, reset_none
+        declared.append(rel)
+    return declared, edit_paths, reset_none, bootstrap_paths
 
 
-def assert_create_paths_are_new(declared: list[str], edit_paths: list[str]) -> None:
+def assert_create_paths_are_new(declared: list[str], edit_paths: list[str],
+                               bootstrap_paths: list[str] = ()) -> None:
     """CC-133: create-vs-edit is a header CLAIM that nothing used to verify.
 
     A path declared as a create (`impl:`/`test:`/`docs:`) that ALREADY EXISTS
@@ -687,9 +789,11 @@ def assert_create_paths_are_new(declared: list[str], edit_paths: list[str]) -> N
     Only this direction is checked. `edit:` on a path that does NOT exist is
     left alone: it is not silently destructive (the agent just creates it), and
     a bootstrap ticket may legitimately declare `edit: scripts/run.sh` before
-    run.sh exists."""
+    run.sh exists. CC-150: `bootstrap:` paths are NEW by definition (validated
+    to not exist by _validate_bootstrap_path), so they are skipped here."""
+    skip = set(edit_paths) | set(bootstrap_paths)
     for rel in declared:
-        if rel in edit_paths:
+        if rel in skip:
             continue
         if os.path.exists(os.path.join(REPO_ROOT, rel)):
             raise ValueError(
@@ -1660,10 +1764,12 @@ def cmd_run(args) -> int:
     try:
         with open(args.ticket_path, encoding="utf-8") as f:
             ticket_prompt = f.read().strip()
-        declared_paths, edit_paths, reset_none = parse_ticket_header(ticket_prompt)
+        declared_paths, edit_paths, reset_none, bootstrap_paths = parse_ticket_header(ticket_prompt)
         # CC-133: the create/edit split is derived from the filesystem, not
-        # trusted from the header (ValueError -> rc=13 below).
-        assert_create_paths_are_new(declared_paths, edit_paths)
+        # trusted from the header (ValueError -> rc=13 below). Bootstrap paths
+        # are NEW files (validated to not exist by _validate_bootstrap_path), so
+        # they are exempt here like edit paths.
+        assert_create_paths_are_new(declared_paths, edit_paths, bootstrap_paths)
     except (OSError, ValueError) as e:
         job["rc"] = 13
         job["error"] = f"ticket parse error: {e}"
@@ -1675,9 +1781,9 @@ def cmd_run(args) -> int:
 
     if not declared_paths and not reset_none:
         job["rc"] = 13
-        job["error"] = ("ticket declares no `impl:`/`test:`/`docs:`/`edit:` line and no "
-                        "`reset: none` — the ticket-scoped invariant cannot be "
-                        "enforced (fail-closed)")
+        job["error"] = ("ticket declares no `impl:`/`test:`/`docs:`/`edit:`/`bootstrap:` "
+                        "line and no `reset: none` — the ticket-scoped invariant "
+                        "cannot be enforced (fail-closed)")
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
@@ -1687,6 +1793,8 @@ def cmd_run(args) -> int:
         log(f"DECLARED PATHS: {declared_paths}")
     if edit_paths:
         log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
+    if bootstrap_paths:
+        log(f"BOOTSTRAP PATHS (new top-level, repo-root rw): {bootstrap_paths}")
 
     # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
     plan = SessionPlan(
@@ -1867,7 +1975,7 @@ def _inner_run_argv(args) -> list:
     return inner
 
 
-def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
+def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple, repo_rw: bool = False) -> int:
     """Host-side sync run: supervise the Docker container (replaces
     sandbox-run.sh). The marker carries THIS process's pid — cmd_stop's
     killpg lands here, and the try/finally stops the container and removes
@@ -1875,7 +1983,10 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
 
     rw_paths are the per-ticket rw carve-outs (T4/CC-135, derived in main()
     from the same ticket text the container will parse); ro_paths are the
-    protected files re-bound :ro over a carve-out dir (T4b/CC-136)."""
+    protected files re-bound :ro over a carve-out dir (T4b/CC-136). CC-150:
+    repo_rw mounts the repo ROOT rw (bootstrap active) — the per-file ro_paths
+    then re-bind .git + every pre-existing protected file :ro to keep the
+    boundary."""
     evidence_dir, _ = label_paths(args.label)
     os.makedirs(evidence_dir, exist_ok=True)
 
@@ -1892,7 +2003,7 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
     name, argv = sandbox.sandbox_argv(
         REPO_ROOT, LOG_DIR, image,
         ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args),
-        rw_paths=rw_paths, ro_paths=ro_paths)
+        rw_paths=rw_paths, ro_paths=ro_paths, repo_rw=repo_rw)
     log(f"SANDBOX: docker container {name}")
     try:
         proc = subprocess.Popen(argv, start_new_session=True)
@@ -2122,12 +2233,24 @@ def main() -> int:
         # CC-133) is rc=13 here, before any container starts.
         try:
             with open(args.ticket_path, encoding="utf-8") as f:
-                declared, edit_paths, _ = parse_ticket_header(f.read())
-            assert_create_paths_are_new(declared, edit_paths)
+                declared, edit_paths, _, bootstrap_paths = parse_ticket_header(f.read())
+            assert_create_paths_are_new(declared, edit_paths, bootstrap_paths)
         except (OSError, ValueError) as e:
             return early_abort(13, f"ERROR: ticket parse error: {e}")
         rw_paths = host_rw_paths(declared)
-        return run_sandboxed(args, rw_paths, host_ro_paths(declared, rw_paths))
+        ro_paths = host_ro_paths(declared, rw_paths)
+        repo_rw = False
+        if bootstrap_paths:
+            # CC-150: a bootstrap path is a NEW top-level file with no existing
+            # ancestor to carve out (declared_carveout -> None), so the repo
+            # ROOT itself is mounted rw (repo_rw). To keep the boundary, re-bind
+            # .git and every pre-existing protected file (tests/**, run.sh) :ro
+            # on top — "tests are immutable" is preserved at the filesystem layer.
+            repo_rw = True
+            ro_paths = host_ro_paths(declared, ("",) + rw_paths)
+            if os.path.isdir(os.path.join(REPO_ROOT, ".git")):
+                ro_paths = ro_paths + (".git",)
+        return run_sandboxed(args, rw_paths, ro_paths, repo_rw=repo_rw)
 
     return 0
 
