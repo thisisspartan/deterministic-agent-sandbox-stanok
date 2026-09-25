@@ -69,10 +69,12 @@ def test_plan_fields_from_ticket_header():
     assert plan.declared_paths == ("src/mod.py", "tests/mod_test.py", "docs/mod.md")
     assert plan.declared_paths == plan.mutable_paths
     assert plan.git_mode == "ro"
-    # T5/CC-137: exactly four fields — the mount/protected lists are derived
+    # T5/CC-137: exactly five fields — the mount/protected lists are derived
     # (rw_zones gone with CC-135, protected_paths gone with the hook it fed).
+    # CC-154 added bootstrap_paths (a bootstrap placeholder is not quarantined).
     assert {f.name for f in dataclasses.fields(stanok.SessionPlan)} == {
-        "declared_paths", "mutable_paths", "git_mode", "edit_paths"}
+        "declared_paths", "mutable_paths", "git_mode", "edit_paths",
+        "bootstrap_paths"}
 
 
 def test_plan_is_frozen():

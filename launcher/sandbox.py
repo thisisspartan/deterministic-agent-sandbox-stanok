@@ -32,8 +32,7 @@ WRITABLE_ZONES = ("src", "tests", "docs", "scripts")
 
 
 def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
-                 rw_paths: tuple = (), ro_paths: tuple = (),
-                 repo_rw: bool = False) -> tuple:
+                 rw_paths: tuple = (), ro_paths: tuple = ()) -> tuple:
     """Return (container_name, docker_argv).
 
     inner_argv is the container-side command (e.g.
@@ -50,10 +49,11 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     protected file stays immutable while new siblings in that dir stay
     creatable. Emitted after the rw binds (deeper destination wins).
 
-    CC-150: repo_rw mounts the repo ROOT itself rw (bootstrap active — a new
-    top-level file has no existing ancestor to carve out). The caller MUST
-    then pass .git + every pre-existing protected file in ro_paths to re-bind
-    them :ro, or the whole boundary dissolves.
+    The base repo mount is ALWAYS :ro (CC-154): the CC-150 repo-root-rw
+    shortcut for bootstrap is gone. A `bootstrap:` file is pre-created empty
+    on the host by stanok.precreate_bootstrap_paths, so declared_carveout
+    resolves it to a single-FILE rw bind — only that one audited file becomes
+    writable.
     """
     parent_dir = os.path.dirname(repo_root)
     uid, gid = os.getuid(), os.getgid()
@@ -100,13 +100,10 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     # at the filesystem layer. Parent of the repo mounted ro FIRST: tickets live
     # in $PARENT_DIR/tickets and the role-leak gate (rc=24) checks
     # $PARENT_DIR/CLAUDE.md.
-    # CC-150: repo_rw flips the base repo mount to rw (bootstrap active); the
-    # caller re-binds .git + protected files :ro via ro_paths to keep the
-    # boundary (a new top-level file has no existing ancestor to carve out).
-    repo_mode = "rw" if repo_rw else "ro"
+    # The base repo is ALWAYS :ro (CC-154).
     specs = [
         f"{parent_dir}:{parent_dir}:ro",
-        f"{repo_root}:{repo_root}:{repo_mode}",
+        f"{repo_root}:{repo_root}:ro",
     ]
     specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:rw" for rel in rw_paths]
     specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:ro" for rel in ro_paths]

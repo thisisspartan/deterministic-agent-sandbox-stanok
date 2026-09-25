@@ -103,6 +103,11 @@ class SessionPlan:
     # scratch — prepare_workspace must not quarantine them. They stay in
     # declared_paths/mutable_paths (positive contract + contract_lock exemption).
     edit_paths:      tuple[str, ...] = ()
+    # CC-154: `bootstrap:` paths are pre-created empty on the HOST and filled
+    # in place inside the container (single-file rw bind) — like edit_paths
+    # they must not be quarantined, or the placeholder the rw bind points at
+    # would be moved out from under the session.
+    bootstrap_paths: tuple[str, ...] = ()
 
 
 # ==================================================================================
@@ -634,11 +639,14 @@ def _validate_bootstrap_path(rel: str, all_rels: list[str]) -> bool:
         "existing ancestor below the root" requirement (a bootstrap path is a
         NEW top-level file, whose only ancestor is the repo root itself);
       - it is in the audited per-stack `bootstrap_paths` set (_bootstrap_paths);
-      - it does not already exist (bootstrap creates a NEW file; an existing
-        top-level file is declared `edit:`, not `bootstrap:`);
-      - `scripts/run.sh` is absent OR declared in this ticket (`all_rels`) —
-        bootstrap is for bootstrapping a NEW project, i.e. one whose entrypoint
-        does not yet exist or is being created by this same ticket.
+      - it does not already exist as a NON-EMPTY file. CC-154 Variant A
+        pre-creates an EMPTY placeholder (mode 0644) on the host so the path
+        has a valid single-file rw bind source; that placeholder is not a
+        pre-existing artifact (an existing top-level file is declared `edit:`);
+      - `scripts/run.sh` is ABSENT and NOT declared in this ticket. A bootstrap
+        ticket that also wrote the entrypoint would make run.sh writable — the
+        exact verdict-subversion surface the contract lock exists to close
+        (CC-154; CC-150 allowed this and it was a hole).
 
     Fail-closed: any check failing -> False (rc=13 upstream)."""
     if rel.startswith("/") or rel.startswith("./"):
@@ -650,12 +658,35 @@ def _validate_bootstrap_path(rel: str, all_rels: list[str]) -> bool:
         return False
     if rel not in _bootstrap_paths():
         return False
-    if os.path.exists(os.path.join(REPO_ROOT, rel)):
+    path = os.path.join(REPO_ROOT, rel)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
         return False
     run_sh = "scripts/run.sh"
-    if os.path.exists(os.path.join(REPO_ROOT, run_sh)) and run_sh not in all_rels:
+    if os.path.exists(os.path.join(REPO_ROOT, run_sh)) or run_sh in all_rels:
         return False
     return True
+
+
+def precreate_bootstrap_paths(bootstrap_paths: list[str]) -> int:
+    """CC-154 Variant A: create an EMPTY placeholder (mode 0644) for each
+    bootstrap path on the HOST, BEFORE `docker run`. Docker can only file-bind
+    an existing source, so the placeholder makes declared_carveout resolve the
+    path to a single-FILE rw bind — the base repo stays strictly :ro and only
+    the audited file becomes writable (no repo-root rw).
+
+    Idempotent: an existing path is left untouched. Returns 0 on success,
+    14 (workspace-prep rc) on OSError."""
+    for rel in bootstrap_paths:
+        path = os.path.join(REPO_ROOT, rel)
+        if os.path.exists(path):
+            continue
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o644)
+            os.close(fd)
+        except OSError as e:
+            log(f"ERROR: bootstrap pre-create failed for {rel!r}: {e}")
+            return 14
+    return 0
 
 
 def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
@@ -672,17 +703,13 @@ def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
 
     Two exclusions: a file outside every carve-out needs no bind (the repo `:ro`
     mount already covers it), and a DECLARED path is never bound (`edit:` on an
-    existing test is exactly the case that must stay writable).
-
-    CC-150: a carve-out of `""` is the REPO ROOT (bootstrap active) — it contains
-    every file, so the `rel == carve or rel.startswith(carve + "/")` test must
-    treat `carve == ""` as a match (a relative rel never startswith `"/"`)."""
+    existing test is exactly the case that must stay writable)."""
     declared_set = set(declared)
     ro: list[str] = []
     for rel in _protected_files():
         if rel in declared_set:
             continue
-        if not any(carve == "" or rel == carve or rel.startswith(carve + "/")
+        if not any(rel == carve or rel.startswith(carve + "/")
                    for carve in rw_paths):
             continue
         ro.append(rel)
@@ -751,9 +778,10 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool, l
                 raise ValueError(
                     f"invalid bootstrap path {rel!r}: must be a NEW top-level file "
                     f"in the audited per-stack `bootstrap_paths` set (scripts/stacks/"
-                    f"*.toml), must not already exist, must not escape the repo "
-                    f"(relative, no '..'), and `scripts/run.sh` must be absent or "
-                    f"declared in this ticket (bootstrap is for a NEW project)"
+                    f"*.toml), must not already exist (an empty launcher-created "
+                    f"placeholder is allowed), must not escape the repo (relative, "
+                    f"no '..'), and `scripts/run.sh` must be absent and NOT declared "
+                    f"in this ticket (bootstrap must not write the entrypoint)"
                 )
             bootstrap_paths.append(rel)
         else:
@@ -823,9 +851,12 @@ def prepare_workspace(plan: "SessionPlan") -> int:
         # CC-125: `edit:`-declared paths are the exception — the ticket modifies
         # them IN PLACE (e.g. an existing test whose contract changes), so moving
         # them aside would force a "recreate verbatim from git show" dance.
+        # CC-154: `bootstrap:` paths are the same shape — the host pre-created
+        # an EMPTY placeholder that the single-file rw bind points at; moving it
+        # aside here would delete the bind source out from under the session.
         quarantined = []
         for rel in plan.declared_paths:
-            if rel in plan.edit_paths:
+            if rel in plan.edit_paths or rel in plan.bootstrap_paths:
                 continue
             src_path = os.path.join(REPO_ROOT, rel)
             if not os.path.exists(src_path):
@@ -1794,7 +1825,7 @@ def cmd_run(args) -> int:
     if edit_paths:
         log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
     if bootstrap_paths:
-        log(f"BOOTSTRAP PATHS (new top-level, repo-root rw): {bootstrap_paths}")
+        log(f"BOOTSTRAP PATHS (new top-level, single-file rw): {bootstrap_paths}")
 
     # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
     plan = SessionPlan(
@@ -1802,6 +1833,7 @@ def cmd_run(args) -> int:
         mutable_paths=tuple(declared_paths),
         git_mode="ro",
         edit_paths=tuple(edit_paths),
+        bootstrap_paths=tuple(bootstrap_paths),
     )
 
     if not preflight_server():
@@ -1975,7 +2007,7 @@ def _inner_run_argv(args) -> list:
     return inner
 
 
-def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple, repo_rw: bool = False) -> int:
+def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
     """Host-side sync run: supervise the Docker container (replaces
     sandbox-run.sh). The marker carries THIS process's pid — cmd_stop's
     killpg lands here, and the try/finally stops the container and removes
@@ -1983,10 +2015,10 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple, repo_rw: bool = False)
 
     rw_paths are the per-ticket rw carve-outs (T4/CC-135, derived in main()
     from the same ticket text the container will parse); ro_paths are the
-    protected files re-bound :ro over a carve-out dir (T4b/CC-136). CC-150:
-    repo_rw mounts the repo ROOT rw (bootstrap active) — the per-file ro_paths
-    then re-bind .git + every pre-existing protected file :ro to keep the
-    boundary."""
+    protected files re-bound :ro over a carve-out dir (T4b/CC-136). The base
+    repo mount is always :ro — a `bootstrap:` file is pre-created empty on the
+    host (precreate_bootstrap_paths) so it carves out as a single-file rw bind
+    (CC-154)."""
     evidence_dir, _ = label_paths(args.label)
     os.makedirs(evidence_dir, exist_ok=True)
 
@@ -2003,7 +2035,7 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple, repo_rw: bool = False)
     name, argv = sandbox.sandbox_argv(
         REPO_ROOT, LOG_DIR, image,
         ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args),
-        rw_paths=rw_paths, ro_paths=ro_paths, repo_rw=repo_rw)
+        rw_paths=rw_paths, ro_paths=ro_paths)
     log(f"SANDBOX: docker container {name}")
     try:
         proc = subprocess.Popen(argv, start_new_session=True)
@@ -2237,20 +2269,17 @@ def main() -> int:
             assert_create_paths_are_new(declared, edit_paths, bootstrap_paths)
         except (OSError, ValueError) as e:
             return early_abort(13, f"ERROR: ticket parse error: {e}")
+        if bootstrap_paths:
+            # CC-154 Variant A: a bootstrap path is a NEW top-level file with no
+            # existing ancestor to carve out (declared_carveout -> None), so
+            # pre-create an EMPTY placeholder (mode 0644) on the host. Docker
+            # can then file-bind it rw and the base repo stays strictly :ro —
+            # no repo-root rw (CC-150), only the one audited file is writable.
+            if precreate_bootstrap_paths(bootstrap_paths) != 0:
+                return early_abort(14, "ERROR: bootstrap path pre-create failed")
         rw_paths = host_rw_paths(declared)
         ro_paths = host_ro_paths(declared, rw_paths)
-        repo_rw = False
-        if bootstrap_paths:
-            # CC-150: a bootstrap path is a NEW top-level file with no existing
-            # ancestor to carve out (declared_carveout -> None), so the repo
-            # ROOT itself is mounted rw (repo_rw). To keep the boundary, re-bind
-            # .git and every pre-existing protected file (tests/**, run.sh) :ro
-            # on top — "tests are immutable" is preserved at the filesystem layer.
-            repo_rw = True
-            ro_paths = host_ro_paths(declared, ("",) + rw_paths)
-            if os.path.isdir(os.path.join(REPO_ROOT, ".git")):
-                ro_paths = ro_paths + (".git",)
-        return run_sandboxed(args, rw_paths, ro_paths, repo_rw=repo_rw)
+        return run_sandboxed(args, rw_paths, ro_paths)
 
     return 0
 
