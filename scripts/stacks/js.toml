@@ -1,0 +1,8 @@
+ext = "js"
+test_glob = "*.test.js"
+name_regex = "[A-Za-z0-9_-]+\\.test\\.js"
+test_runner = "node --test --test-force-exit"
+smoke_runner = "node"
+preflight = "node --version"
+# CC-151: node --test has no config file that rewrites its verdict.
+verdict_config = []

@@ -14,7 +14,6 @@ Run: .venv/bin/python -m pytest launcher/tests_harness/test_runsh_contract.py -q
 
 import os
 import subprocess
-import sys
 import time
 
 from conftest import JS_FAIL, JS_PASS, PY_FAIL, PY_PASS, repo, run, write
@@ -261,19 +260,19 @@ def test_rc_table_runner_2_remapped_to_1(repo):
     # A runner that itself exits 2 (pytest: interrupted) must surface as
     # rc=1 (a test failed), not run.sh's refusal code 2.
     write(repo / "tests" / "a_test.py", PY_PASS)
-    # Simulate: temporarily replace the py runner via a fake uv on PATH.
+    # Simulate: temporarily replace the py runner via a fake python3 on
+    # PATH (CC-152: the runner is direct `python3 -m pytest`, no uv).
     bin = repo / "bin"
     bin.mkdir()
-    fake_uv = bin / "uv"
-    fake_uv.write_text(
+    fake_py = bin / "python3"
+    fake_py.write_text(
         "#!/usr/bin/env bash\n"
         'if [[ "$*" == *"--version"* ]]; then exit 0; fi\n'
         "exit 2\n",
     )
-    fake_uv.chmod(0o755)
+    fake_py.chmod(0o755)
     env = dict(os.environ)
     env["PATH"] = f"{bin}:{env['PATH']}"
-    env["VIRTUAL_ENV"] = os.path.dirname(os.path.dirname(sys.executable))
     p = subprocess.run(
         ["bash", "scripts/run.sh", "test", "tests/a_test.py"],
         cwd=repo, env=env, capture_output=True, text=True, timeout=90,

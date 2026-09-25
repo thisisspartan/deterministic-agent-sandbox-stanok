@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # R2: thin shim — all logic (gates, background, Docker supervision) lives in
-# launcher/stanok.py. The CLI surface is unchanged:
-#   ./launch.sh [run] <ticket> <label> [--background] [--direct] [--local-retries N] [-- extra...]
+# launcher/stanok.py. The CLI surface:
+#   ./launch.sh [run] <ticket> <label> [--background] [--follow] [--direct] [--local-retries N] [-- extra...]
 #   ./launch.sh status <label>
+#   ./launch.sh wait <label> [--timeout N]   # CC-140: block until terminal, print status
 #   ./launch.sh stop <label>
 set -euo pipefail
 
@@ -17,10 +18,12 @@ if [ ! -x "$PY" ]; then
     exit 99
 fi
 
-# Pre-create the per-uid Claude tmp dir: bwrap resolves mount points via
-# realpathSync and silently skips non-existent folders, so the FIRST Bash
-# invocation of a session misses the /tmp/claude-<uid> bind if the dir is
-# created lazily after bwrap args are formed.
+# Per-uid Claude tmp dir. In the CONTAINER this path is a tmpfs created by
+# launcher/sandbox.py (CC-141) — a host pre-create is not visible there, and
+# bwrap silently skips non-existent write paths (the old "Слой 2" EROFS on the
+# FIRST Bash call). Kept host-side for the host/no-sandbox path, where the CLI
+# resolves the same path itself: CLAUDE_TMPDIR is the TMPDIR the nested
+# sandbox runtime exports (cli.js aG8), default /tmp/claude.
 mkdir -p "/tmp/claude-$(id -u)" && chmod 700 "/tmp/claude-$(id -u)"
 export CLAUDE_TMPDIR="/tmp/claude-$(id -u)"
 

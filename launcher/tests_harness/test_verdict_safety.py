@@ -14,6 +14,9 @@ Pins the fail-closed verdict paths in launcher/stanok.py:
   6  _rotate_stale_summary: stale summary.json (no .running marker) is
      rotated to summary.json.prev; a live run's summary (marker present)
      is untouched; absent summary is a no-op
+  7  verify_gate suite mode (D4/CC-149): ONE `test --all` call per turn —
+     rc=0 pass / rc=1 a (suite) failure / rc=6 ENV-FAIL / rc=124 TIMEOUT /
+     rc=2 (no suite mode) falls back to per-file spawns
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_verdict_safety.py -q
 """
@@ -50,8 +53,7 @@ def test_declared_path_traversal_rejected():
 
 def _empty_plan():
     return stanok.SessionPlan(
-        declared_paths=(), mutable_paths=(), protected_paths=(),
-        rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=(),
+        declared_paths=(), mutable_paths=(),
     )
 
 
@@ -174,3 +176,85 @@ def test_rotate_stale_summary_noop_when_absent(tmp_path, monkeypatch):
     stanok._rotate_stale_summary("lbl")
     ev = repo / "evidence" / "lbl"
     assert not (ev / "summary.json.prev").exists()
+
+
+# --- 7: verify_gate suite mode (D4/CC-149) -------------------------------------
+
+def _suite_repo(base: Path, name: str, all_rc: int, all_out: str,
+                perfile_rc: int = 0) -> Path:
+    """A tmp repo whose stub run.sh:
+      - `list` prints tests/t_test.py and exits 0
+      - `test --all` cats all.out and exits all_rc
+      - `test <file>` (per-file fallback) exits perfile_rc
+    """
+    repo = base / name
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "t_test.py").write_text("def test_x(): pass\n",
+                                              encoding="utf-8")
+    (repo / "all.out").write_text(all_out, encoding="utf-8")
+    (repo / "scripts" / "run.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1" == "list" ]]; then echo "tests/t_test.py"; exit 0; fi\n'
+        'if [[ "$1" == "test" && "$2" == "--all" ]]; then\n'
+        "  cat all.out\n"
+        f"  exit {all_rc}\n"
+        "fi\n"
+        f'if [[ "$1" == "test" ]]; then exit {perfile_rc}; fi\n'
+        "exit 0\n",
+    )
+    return repo
+
+
+def test_verify_gate_suite_pass(tmp_path, monkeypatch):
+    repo = _suite_repo(tmp_path, "suitepass", all_rc=0, all_out="ok")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    ok, failures, env_fail = stanok.verify_gate(_empty_plan())
+    assert ok is True
+    assert failures == []
+    assert env_fail is False
+
+
+def test_verify_gate_suite_fail_rc1(tmp_path, monkeypatch):
+    repo = _suite_repo(
+        tmp_path, "suitefail", all_rc=1,
+        all_out="=== tests/t_test.py ===\nFAILED tests/t_test.py::test_x")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    ok, failures, env_fail = stanok.verify_gate(_empty_plan())
+    assert ok is False
+    assert env_fail is False
+    assert any(name == "(suite)" and "FAILED" in msg
+               for name, msg in failures)
+
+
+def test_verify_gate_suite_timeout_rc124(tmp_path, monkeypatch):
+    repo = _suite_repo(tmp_path, "suitetimeout", all_rc=124, all_out="hung")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    ok, failures, env_fail = stanok.verify_gate(_empty_plan())
+    assert ok is False
+    assert env_fail is False
+    assert any(name == "(suite)" and msg.startswith("TIMEOUT:")
+               for name, msg in failures)
+
+
+def test_verify_gate_suite_envfail_rc6(tmp_path, monkeypatch):
+    repo = _suite_repo(tmp_path, "suiteenv", all_rc=6, all_out="runner missing")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    ok, failures, env_fail = stanok.verify_gate(_empty_plan())
+    assert ok is False
+    assert env_fail is True
+    assert any(name == "(suite)" and msg.startswith("ENV-FAIL:")
+               for name, msg in failures)
+
+
+def test_verify_gate_suite_rc2_fallback_perfile(tmp_path, monkeypatch):
+    # run.sh has no `--all` (rc=2) -> verify_gate falls back to per-file spawns
+    # and attributes the failure to the file, not (suite).
+    repo = _suite_repo(tmp_path, "suitefallback", all_rc=2, all_out="",
+                       perfile_rc=1)
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    ok, failures, env_fail = stanok.verify_gate(_empty_plan())
+    assert ok is False
+    assert env_fail is False
+    assert any(name == "tests/t_test.py" for name, _ in failures)
+    assert not any(name == "(suite)" for name, _ in failures)

@@ -5,6 +5,7 @@
 # fixed contract: the subcommands are fixed, the script validates the paths.
 #
 #   bash scripts/run.sh test <tests/**/<test-glob>>   — run the tests
+#   bash scripts/run.sh test --all                     — run EVERY declared test (D4)
 #   bash scripts/run.sh smoke <src/*.<ext>>           — smoke run (stdin=/dev/null, timeout 10s)
 #   bash scripts/run.sh list                           — list the test files (sorted, unique)
 #
@@ -14,14 +15,17 @@
 #   0    pass (all tests green)
 #   1    a test FAILED (runner failure; a runner that itself exits 2 or 6
 #        is remapped to 1 — pytest 2 = interrupted, 6 is outside its range);
-#        also: `list` found a test-like file no registry line claims
+#        also: `list` (or `test --all`) found a test-like file no registry
+#        line claims; in `test --all` ANY failing file makes the suite rc=1
 #   2    run.sh REFUSED the call: unknown subcommand, bad shape/charset,
-#        unknown extension, missing file, wrong arg count
+#        unknown extension, missing file, wrong arg count (incl. `--all`
+#        used with any other argument to `test`)
 #   6    ENV-FAIL: the stack's runner is unavailable in this environment
 #        (preflight probe failed) — an environment defect, NOT a red test
 #   7    SECURITY: symlink in a path component, or the resolved path
 #        escapes tests/ (test) or src/ (smoke)
-#   124  timeout (test: 60s, smoke: 10s)
+#   124  timeout (test: 60s, smoke: 10s; `test --all` stops at the FIRST
+#        file that hits the 60s budget)
 #   3,4,5  runner codes passed through unremapped: pytest 3 = internal
 #        error, 4 = usage error, 5 = no tests ran (a bare assert-script is
 #        NOT a test — see CLAUDE.md "Test forms"); jq's parse error also
@@ -46,18 +50,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_ROOT"
 
-# py runner: `env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest ...` —
-# uv resolves the environment itself (host: the repo's .venv; image: the
-# system python, UV_SYSTEM_PYTHON=1 + UV_PYTHON_PREFERENCE=only-system).
-# --no-project keeps uv from hunting for a pyproject.toml; -p no:cacheprovider
-# keeps pytest from writing .pytest_cache into the read-only repo root;
-# PYTHONDONTWRITEBYTECODE=1 keeps CPython from writing __pycache__/*.pyc into
-# the repo (cache artifacts must not reach the W12 `list` check or the
-# contract_lock manifest — the env prefix goes through `env` because
-# `timeout` cannot parse a VAR=value word itself).
-STACKS='js|*.test.js|[A-Za-z0-9_-]+\.test\.js|node --test --test-force-exit|node|node --version
-py|*_test.py|[A-Za-z0-9_-]+_test\.py|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest -q -p no:cacheprovider -o pythonpath=src|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest --version
-jq|*.json|[A-Za-z0-9_-]+\.json|jq empty|jq empty|command -v jq'
+# py runner: `env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest ...` —
+# CC-152: the `uv run --no-project` wrapper is dropped (pure overhead: the
+# image's system python already has pytest, installed via `uv pip install`
+# with UV_SYSTEM_PYTHON=1, so `python3 -m pytest` is the same interpreter).
+# -p no:cacheprovider keeps pytest from writing .pytest_cache into the
+# read-only repo root; PYTHONDONTWRITEBYTECODE=1 keeps CPython from writing
+# __pycache__/*.pyc into the repo (cache artifacts must not reach the W12
+# `list` check or the contract_lock manifest — the env prefix goes through
+# `env` because `timeout` cannot parse a VAR=value word itself).
+# STACK REGISTRY — GENERATED from scripts/stacks/*.toml by
+# scripts/gen_stacks.sh. Do not edit by hand; edit the manifest and run
+# `bash scripts/gen_stacks.sh`.
+source "$SCRIPT_DIR/stacks.generated.sh"
 
 # Generate the usage alternatives from the registry (single source).
 stack_alts() {
@@ -72,8 +77,116 @@ stack_alts() {
 }
 
 usage() {
-  echo "usage: run.sh {test <$(stack_alts test)> | smoke <$(stack_alts smoke)> | list}" >&2
+  echo "usage: run.sh {test <$(stack_alts test)> | test --all | smoke <$(stack_alts smoke)> | list}" >&2
   exit 2
+}
+
+# D4: shared discovery for `list` and `test --all` — the sorted-unique set of
+# files the registry globs claim under tests/.
+list_files() {
+  {
+    while IFS='|' read -r _ glob _ _ _ _; do
+      find tests -name "$glob"
+    done <<< "$STACKS"
+  } | sort -u
+}
+
+# W12 property 1: `list` (and `test --all`) must not be SILENT about
+# test-like files no registry line claims (the reviewer's case: a failing
+# calc_test.go next to ok_test.py — old `list` did not show it,
+# verify_gate = PASS). Rule (owner-delegated, W12): a file under tests/ is
+# test-like when its basename contains "test" (case-insensitive);
+# fixture/data/cache directories (basename "fixtures", "data" or
+# "__pycache__") are exempt — a .pyc cache artifact is not a test
+# (w12-verify: the verifier's pytest run regenerated tests/__pycache__/*.pyc
+# and `list` went red). Any unclaimed test-like file fails the listing
+# (rc=1) so the external verifier goes red, not silent.
+unclaimed_files() {
+  find tests -type f | while IFS= read -r f; do
+    base="${f##*/}"
+    dir="${f%/*}"
+    [[ "${dir##*/}" == "fixtures" || "${dir##*/}" == "data" || "${dir##*/}" == "__pycache__" ]] && continue
+    low="$(printf '%s' "$base" | tr 'A-Z' 'a-z')"
+    case "$low" in *test*) ;; *) continue ;; esac
+    claimed=0
+    while IFS='|' read -r _ glob _ _ _ _; do
+      [[ "$base" == $glob ]] && { claimed=1; break; }
+    done <<< "$STACKS"
+    [ "$claimed" = 1 ] || printf '%s\n' "$f"
+  done | sort -u
+}
+
+# D4: `test --all` — run EVERY file `list` would print, sequentially, with
+# the same per-file timeout (60 s) and `=== <file> ===` header as the
+# per-file `test` subcommand. A failing file does NOT stop the suite (rc=1
+# if ANY file failed); the suite stops at the first 60 s timeout (rc=124 —
+# a hung file would otherwise eat the whole budget). An unclaimed test-like
+# file fails the suite with rc=1 exactly as it fails `list`. Zero test
+# files -> rc=0, no output (an empty suite passes).
+cmd_test_all() {
+  [ -d tests ] || { echo "run.sh: no tests/ directory" >&2; exit 1; }
+  # W12: an unclaimed test-like file fails the suite exactly as it fails
+  # `list` (rc=1, the file named on stderr) — before any runner is probed.
+  unclaimed="$(unclaimed_files)"
+  if [ -n "$unclaimed" ]; then
+    echo "run.sh: unregistered test-like file(s) in tests/ (no registry line claims them):" >&2
+    printf '%s\n' "$unclaimed" >&2
+    exit 1
+  fi
+  # Discovery: exactly the files `list` would print (registry globs,
+  # sorted-unique).
+  files="$(list_files)"
+  [ -n "$files" ] || exit 0  # an empty suite passes, no output
+  # Resolve each file's stack: the registry line whose glob claims its
+  # basename (the same discovery `list` uses).
+  declare -A RUNNER=()
+  declare -A PREFLIGHT=()
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    while IFS='|' read -r _ glob _ tcmd _ pre; do
+      if [[ "${f##*/}" == $glob ]]; then
+        RUNNER["$f"]="$tcmd"
+        PREFLIGHT["$f"]="$pre"
+        break
+      fi
+    done <<< "$STACKS"
+  done <<< "$files"
+  # ENV-FAIL (rc=6): each distinct preflight runs once BEFORE the suite
+  # (same semantics as the per-file path — a missing runner is an
+  # environment failure, not a red test).
+  declare -A PREFLIGHT_DONE=()
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    pre="${PREFLIGHT[$f]:-}"
+    if [ -z "${PREFLIGHT_DONE[$pre]:-}" ]; then
+      PREFLIGHT_DONE["$pre"]=1
+      # The registry field is a command LINE (it may hold shell builtins
+      # like `command -v jq`), so it runs through sh -c, not a direct exec.
+      timeout 10 sh -c "$pre" < /dev/null > /dev/null 2>&1 || {
+        echo "run.sh: ENV-FAIL: test runner unavailable: $pre" >&2
+        exit 6
+      }
+    fi
+  done <<< "$files"
+  rc=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    echo "=== $f ==="
+    # The ONE canonical test invocation for the whole machine (D3): the
+    # deterministic runner flags live in the registry only.
+    # shellcheck disable=SC2086  # registry command line, word-split on purpose
+    timeout 60 ${RUNNER["$f"]} "$f" < /dev/null || {
+      r=$?
+      # 124: the suite stops at the first timeout. Any other failure ->
+      # rc=1 (a runner that itself exits 2/6 FAILED a test, it did not
+      # refuse or ENV-FAIL), and the suite continues with the next file.
+      if [ "$r" -eq 124 ]; then
+        exit 124
+      fi
+      rc=1
+    }
+  done <<< "$files"
+  exit "$rc"
 }
 
 # SEC-01: shared path validation for a path that must live inside <root>/:
@@ -102,6 +215,17 @@ shift
 case "$cmd" in
   test)
     [ $# -ge 1 ] || usage
+    # D4: --all is recognized ONLY as the sole argument to test. `test
+    # --all <x>` or `test <path> --all` is refused (rc=2, usage on stderr).
+    if [ "$1" = "--all" ]; then
+      [ $# -eq 1 ] || usage
+      cmd_test_all
+    fi
+    for a in "$@"; do
+      if [ "$a" = "--all" ]; then
+        usage
+      fi
+    done
     TESTS_ROOT="$(realpath "$REPO_ROOT/tests")"
     # SEC-01: resolve each arg to its registry stack (charset), then
     # validate existence / symlinks / containment in tests/.
@@ -185,35 +309,8 @@ case "$cmd" in
     ;;
   list)
     [ -d tests ] || { echo "run.sh: no tests/ directory" >&2; exit 1; }
-    {
-      while IFS='|' read -r _ glob _ _ _ _; do
-        find tests -name "$glob"
-      done <<< "$STACKS"
-    } | sort -u
-    # W12 property 1: `list` must not be SILENT about test-like files no
-    # registry line claims (the reviewer's case: a failing calc_test.go next
-    # to ok_test.py — old `list` did not show it, verify_gate = PASS).
-    # Rule (owner-delegated, W12): a file under tests/ is test-like when its
-    # basename contains "test" (case-insensitive); fixture/data/cache
-    # directories (basename "fixtures", "data" or "__pycache__") are exempt —
-    # a .pyc cache artifact is not a test (w12-verify: the verifier's pytest
-    # run regenerated tests/__pycache__/*.pyc and `list` went red). Any
-    # unclaimed test-like file fails the listing (rc=1) so the external
-    # verifier goes red, not silent.
-    unclaimed="$(
-      find tests -type f | while IFS= read -r f; do
-        base="${f##*/}"
-        dir="${f%/*}"
-        [[ "${dir##*/}" == "fixtures" || "${dir##*/}" == "data" || "${dir##*/}" == "__pycache__" ]] && continue
-        low="$(printf '%s' "$base" | tr 'A-Z' 'a-z')"
-        case "$low" in *test*) ;; *) continue ;; esac
-        claimed=0
-        while IFS='|' read -r _ glob _ _ _ _; do
-          [[ "$base" == $glob ]] && { claimed=1; break; }
-        done <<< "$STACKS"
-        [ "$claimed" = 1 ] || printf '%s\n' "$f"
-      done | sort -u
-    )"
+    list_files
+    unclaimed="$(unclaimed_files)"
     if [ -n "$unclaimed" ]; then
       echo "run.sh: unregistered test-like file(s) in tests/ (no registry line claims them):" >&2
       printf '%s\n' "$unclaimed" >&2

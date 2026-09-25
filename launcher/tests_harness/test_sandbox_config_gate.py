@@ -9,13 +9,19 @@ repo mount) it dies with EROFS and EVERY Bash call in the session fails from
 the first command. The gate rejects a launch (rc=28) when any denyWrite /
 denyRead entry resolves to a path that does not exist.
 
-  1  denyWrite "hooks" (bare -> .claude/hooks, absent) -> gate True  (CC-107)
-  2  denyWrite "../hooks" (-> repo/hooks, exists)      -> gate False (fixed)
-  3  denyRead  "launcher" (bare -> .claude/launcher)   -> gate True
-  4  all "../" entries pointing at existing dirs       -> gate False
-  5  no sandbox.filesystem block                       -> gate False
+The gate returns a list of human-readable problems (empty = OK); each
+missing-path problem names the key, the raw entry, the resolved path, and
+the `mkdir -p` fix (CC-157: the rc=28 abort must be actionable).
+
+  1  denyWrite "hooks" (bare -> .claude/hooks, absent) -> non-empty  (CC-107)
+  2  denyWrite "../hooks" (-> repo/hooks, exists)      -> [] (fixed)
+  3  denyRead  "launcher" (bare -> .claude/launcher)   -> non-empty
+  4  all "../" entries pointing at existing dirs       -> []
+  5  no sandbox.filesystem block                       -> []
   6  full path: bare "hooks" denyWrite -> process rc=28,
      evidence/<label>/summary.json EARLY-ABORT (verdict FAIL, not PASS)
+  7  missing-path problem text carries entry + resolved path + mkdir -p
+     (CC-157)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_sandbox_config_gate.py -q
 """
@@ -52,7 +58,7 @@ def _mk(repo, *dirs):
 def test_bare_denywrite_flagged(tmp_path, monkeypatch):
     repo = _repo_with_settings(tmp_path, {"denyWrite": ["hooks"]})
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate() is True
+    assert stanok.sandbox_config_gate()
 
 
 # --- 2: "../" denyWrite entry -> existing repo/hooks (the fix) -------------
@@ -61,7 +67,7 @@ def test_dotdot_denywrite_ok(tmp_path, monkeypatch):
     repo = _repo_with_settings(tmp_path, {"denyWrite": ["../hooks"]})
     _mk(repo, "hooks")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate() is False
+    assert stanok.sandbox_config_gate() == []
 
 
 # --- 3: bare denyRead entry -> non-existent .claude/launcher ---------------
@@ -69,7 +75,7 @@ def test_dotdot_denywrite_ok(tmp_path, monkeypatch):
 def test_bare_denyread_flagged(tmp_path, monkeypatch):
     repo = _repo_with_settings(tmp_path, {"denyRead": ["launcher"]})
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate() is True
+    assert stanok.sandbox_config_gate()
 
 
 # --- 4: all "../" entries point at existing dirs ---------------------------
@@ -82,7 +88,7 @@ def test_all_dotdot_entries_ok(tmp_path, monkeypatch):
     repo = _repo_with_settings(tmp_path, fs)
     _mk(repo, "evidence", "hooks", "launcher")  # .claude already exists
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate() is False
+    assert stanok.sandbox_config_gate() == []
 
 
 # --- 5: no sandbox.filesystem block ----------------------------------------
@@ -90,7 +96,38 @@ def test_all_dotdot_entries_ok(tmp_path, monkeypatch):
 def test_no_filesystem_block_ok(tmp_path, monkeypatch):
     repo = _repo_with_settings(tmp_path, {})
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate() is False
+    assert stanok.sandbox_config_gate() == []
+
+
+# --- 5b: unsupported forms are rejected, not guessed (no cli.js mirror) ----
+
+def test_tilde_entry_rejected(tmp_path, monkeypatch):
+    repo = _repo_with_settings(tmp_path, {"denyWrite": ["~/.ssh"]})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    assert stanok.sandbox_config_gate()
+
+
+def test_absolute_existing_ok(tmp_path, monkeypatch):
+    repo = _repo_with_settings(tmp_path, {"denyWrite": [str(tmp_path / "repo" / ".claude")]})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    assert stanok.sandbox_config_gate() == []
+
+
+# --- 7: missing-path problem text is actionable (CC-157) -------------------
+
+def test_missing_path_problem_is_actionable(tmp_path, monkeypatch):
+    # The problem string must name the key, the raw entry, the resolved
+    # path, and the mkdir -p fix — so the rc=28 abort tells the operator
+    # exactly what to do instead of an abstract "non-existent path".
+    repo = _repo_with_settings(tmp_path, {"denyWrite": ["../evidence"]})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    problems = stanok.sandbox_config_gate()
+    assert len(problems) == 1
+    p = problems[0]
+    assert "denyWrite" in p
+    assert "'../evidence'" in p
+    assert str(repo / "evidence") in p
+    assert f"mkdir -p {repo / 'evidence'}" in p
 
 
 # --- 6: full path rc=28 -----------------------------------------------------

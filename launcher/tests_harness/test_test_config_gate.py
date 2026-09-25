@@ -16,6 +16,17 @@ file's path).
      process rc=27, evidence/<label>/summary.json EARLY-ABORT (verdict FAIL,
      not PASS)
 
+CC-151 (stack-agnostic, manifest-driven): the forbidden set is the union of
+the `verdict_config` lists in scripts/stacks/*.toml, not a hardcoded py
+tuple. Cases 1-4 run in repos with NO manifests -> the fail-closed fallback
+(legacy py set) applies, so they are unchanged. New cases:
+  6  py manifest declares the py set -> tests/conftest.py flagged (True)
+  7  js manifest (verdict_config=[]) -> a js test file is clean (False), and
+     a conftest.py-named file is NOT inherited from py's list (False)
+  8  jq manifest (verdict_config=[]) -> a .json test file is clean (False)
+  9  a manifest declaring a custom pattern -> that file is flagged (True),
+     proving the guard reads the manifest, not a hardcoded tuple
+
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_test_config_gate.py -q
 """
 import json
@@ -36,6 +47,29 @@ FORBIDDEN = ("conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.tom
 
 def _repo_with(tmp_path, rel, body):
     repo = tmp_path / "repo"
+    p = repo / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    return repo
+
+
+# CC-151: minimal manifests (only `ext` + `verdict_config`; the guard reads
+# only verdict_config). One manifest per repo so the union is unambiguous.
+PY_MANIFEST = (
+    'ext = "py"\n'
+    'verdict_config = ["conftest.py", "pytest.ini", "tox.ini", '
+    '"setup.cfg", "pyproject.toml"]\n'
+)
+JS_MANIFEST = 'ext = "js"\nverdict_config = []\n'
+JQ_MANIFEST = 'ext = "jq"\nverdict_config = []\n'
+CUSTOM_MANIFEST = 'ext = "zz"\nverdict_config = ["custom_verdict.ini"]\n'
+
+
+def _repo_with_manifest(tmp_path, manifest_name, manifest_body, rel, body):
+    repo = tmp_path / "repo"
+    m = repo / "scripts" / "stacks" / manifest_name
+    m.parent.mkdir(parents=True, exist_ok=True)
+    m.write_text(manifest_body, encoding="utf-8")
     p = repo / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(body, encoding="utf-8")
@@ -115,3 +149,60 @@ def test_full_path_rc27(tmp_path):
     assert data["probe_result"] == "EARLY-ABORT"
     assert data["rc"] == 27
     assert data["verifier"] == "FAIL"
+
+
+# --- 6: py manifest-driven (CC-151) -------------------------------------------
+
+def test_py_manifest_conftest_flagged(tmp_path, monkeypatch):
+    repo = _repo_with_manifest(
+        tmp_path, "py.toml", PY_MANIFEST,
+        "tests/conftest.py",
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    session.exitstatus = 0\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    assert stanok.test_config_gate() is True
+
+
+# --- 7: js stack not over-blocked (CC-151) -------------------------------------
+
+def test_js_stack_test_file_clean(tmp_path, monkeypatch):
+    # js declares no verdict_config -> a js test file is clean.
+    repo = _repo_with_manifest(
+        tmp_path, "js.toml", JS_MANIFEST,
+        "tests/calc.test.js", "const test = require('node:test');\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    assert stanok.test_config_gate() is False
+
+
+def test_js_stack_does_not_inherit_py_list(tmp_path, monkeypatch):
+    # The manifest is authoritative: a js-only repo does NOT inherit py's
+    # conftest.py ban (no cross-stack over-blocking).
+    repo = _repo_with_manifest(
+        tmp_path, "js.toml", JS_MANIFEST,
+        "tests/conftest.py",
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    session.exitstatus = 0\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    assert stanok.test_config_gate() is False
+
+
+# --- 8: jq stack not over-blocked (CC-151) -------------------------------------
+
+def test_jq_stack_test_file_clean(tmp_path, monkeypatch):
+    repo = _repo_with_manifest(
+        tmp_path, "jq.toml", JQ_MANIFEST,
+        "tests/data.json", "{}\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    assert stanok.test_config_gate() is False
+
+
+# --- 9: manifest is authoritative (custom pattern) (CC-151) -------------------
+
+def test_custom_manifest_pattern_flagged(tmp_path, monkeypatch):
+    # A manifest declaring a non-py verdict_config pattern is enforced —
+    # proves the guard reads the manifest, not a hardcoded py tuple.
+    repo = _repo_with_manifest(
+        tmp_path, "zz.toml", CUSTOM_MANIFEST,
+        "tests/custom_verdict.ini", "[v]\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    assert stanok.test_config_gate() is True

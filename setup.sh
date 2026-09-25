@@ -39,7 +39,7 @@ echo "--- staging the Claude Code CLI into the build context (R4) ---"
 CLI_SRC="${STANOK_CLI_DIR:?ERROR: STANOK_CLI_DIR is not set — point it at the validated claude-code 2.1.88 checkout (cli.js + package.json + vendor/ripgrep/x64-linux/rg)}"
 # Pinned hashes of the validated claude-code 2.1.88 staging sources —
 # a tampered or wrong checkout must fail the build, not silently ship.
-CLI_JS_SHA="10ff56ce84f3d6c4a896bee0f1ac41388cafdf97ec3d48548fe12f95db9012eb"
+CLI_JS_SHA="e170506c2551a25bf7735a2b8e7df4433256ff0ce7fa5cffc0ceb2a84261367b"
 PKG_JSON_SHA="e21f9e98fa4ea8b4d007063d92c631df1bbed6d11c9e79c5fcdeb9f4859dc8fa"
 RG_SHA="55c2b8dd910f390b06b3a7c620603489b83fdfb647665e4d4bb32f3f54f09ea1"
 if [[ ! -f "$CLI_SRC/cli.js" || ! -f "$CLI_SRC/package.json" || ! -f "$CLI_SRC/vendor/ripgrep/x64-linux/rg" ]]; then
@@ -56,6 +56,16 @@ if [[ "$actual_cli" != "$CLI_JS_SHA" || "$actual_pkg" != "$PKG_JSON_SHA" || "$ac
     echo "  package.json: got $actual_pkg want $PKG_JSON_SHA" >&2
     echo "  rg:           got $actual_rg want $RG_SHA" >&2
     exit 1
+fi
+# CC-143: anchor gate — the SHA match proves the file is byte-identical to
+# the pinned bundle, but a rebuilt-from-different-source bundle could
+# coincidentally match the SHA without carrying the 11 patch anchors.
+# verify.sh confirms the anchors are present (fail-fast).
+if [[ -f "$CLI_SRC/patches/verify.sh" ]]; then
+    echo "--- CLI patch anchor check (CC-143) ---"
+    bash "$CLI_SRC/patches/verify.sh" "$CLI_SRC/cli.js"
+else
+    echo "WARN: $CLI_SRC/patches/verify.sh not found — skipping anchor check" >&2
 fi
 mkdir -p "$DIR/.build-context/claude-code-2.1.88/vendor/ripgrep/x64-linux"
 cp -f "$CLI_SRC/cli.js" "$CLI_SRC/package.json" "$DIR/.build-context/claude-code-2.1.88/"

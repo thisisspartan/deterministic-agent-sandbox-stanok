@@ -14,7 +14,8 @@ the RUNNER, not the sandbox; the Docker container does not mount the host
 Gate order (single source: launcher/stanok.py main()):
   label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->
   dirty-tree (rc=22) -> lock (rc=21) -> [cmd_run: W2.1 ticket header
-  (rc=13, no impl:/test:/docs:/reset:none) -> pre-flight /props (rc=20)]
+  (rc=13: no impl:/test:/docs:/reset:none, or a create-declared path that
+  already exists) -> pre-flight /props (rc=20)]
 
 Skip semantics (valid refusal, not a regression): rc=21 (a machine run is
 in progress — lock held) / rc=22 (dirty tree fires before pre-flight).
@@ -127,19 +128,14 @@ def test_contract_lock_runsh():
     try:
         runsh.write_text(orig + "# contract-lock probe\n", encoding="utf-8")
         job = {}
-        plan = stanok.SessionPlan(
-            declared_paths=(), mutable_paths=(),
-            protected_paths=tuple(before.keys()),
-            rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=())
+        plan = stanok.SessionPlan(declared_paths=(), mutable_paths=())
         stanok._check_contract_lock(before, job, 1, plan)
         assert any("scripts/run.sh" in v
                    for v in job.get("contract_lock_violations", [])), \
             f"undeclared run.sh modification not flagged: {job}"
         job2 = {}
         plan2 = stanok.SessionPlan(
-            declared_paths=("scripts/run.sh",), mutable_paths=("scripts/run.sh",),
-            protected_paths=tuple(before.keys()),
-            rw_zones=stanok.sandbox.DEFAULT_RW_ZONES, probe_specs=())
+            declared_paths=("scripts/run.sh",), mutable_paths=("scripts/run.sh",))
         stanok._check_contract_lock(before, job2, 1, plan2)
         assert not job2.get("contract_lock_violations"), \
             f"declared run.sh modification wrongly flagged: {job2}"
@@ -165,33 +161,86 @@ def test_manifest_skips_pycache():
         probe.unlink(missing_ok=True)
 
 
+def _registry_lines():
+    """The live STACKS registry as a list of field lists.
+
+    CC-148: the registry is GENERATED — scripts/run.sh sources
+    scripts/stacks.generated.sh (emitted from scripts/stacks/*.toml by
+    scripts/gen_stacks.sh). Parse the generated file; fall back to an
+    inline STACKS heredoc in run.sh only if the generated file is absent
+    (pre-CC-148 trees).
+    """
+    import re
+    gen = REPO_ROOT / "scripts" / "stacks.generated.sh"
+    if gen.is_file():
+        text = gen.read_text(encoding="utf-8")
+    else:
+        text = (REPO_ROOT / "scripts" / "run.sh").read_text(encoding="utf-8")
+    m = re.search(r"STACKS='(.*?)'", text, re.S)
+    assert m, "STACKS registry not found (scripts/stacks.generated.sh or run.sh)"
+    lines = [ln for ln in m.group(1).splitlines() if ln.strip()]
+    assert lines, "empty STACKS registry"
+    return [ln.split("|") for ln in lines]
+
+
+def test_registry_shape():
+    # CC-147: the registry line format is exactly 6 fields
+    # (ext|test-glob|name-regex|test-runner|smoke-runner|preflight).
+    for fields in _registry_lines():
+        assert len(fields) == 6, f"registry line must have 6 fields, got {len(fields)}: {fields!r}"
+
+
+def test_context_md_budget():
+    # CC-146: the live CONTEXT.md (parent repo, read at every supervisor
+    # session start) must stay under the ~15 KB budget; closed waves go to
+    # specs/ARCHIVE/CONTEXT-<wave>.md.
+    ctx = REPO_ROOT.parent / "CONTEXT.md"
+    assert ctx.is_file(), "CONTEXT.md missing from the parent repo root"
+    size = ctx.stat().st_size
+    assert size <= 15360, \
+        f"CONTEXT.md is {size} bytes (> 15360 budget) — archive closed waves " \
+        f"to specs/ARCHIVE/CONTEXT-<wave>.md"
+
+
 def test_claude_md_matches_registry():
     # W5: CLAUDE.md "Test forms" must name every stack in the run.sh registry
     # (extension + a runner word). A new registry line without a CLAUDE.md edit
     # drops this test.
     import re
-    runsh = (REPO_ROOT / "scripts" / "run.sh").read_text(encoding="utf-8")
-    m = re.search(r"STACKS='(.*?)'", runsh, re.S)
-    assert m, "STACKS registry not found in scripts/run.sh"
-    stacks = [ln for ln in m.group(1).splitlines() if ln.strip()]
-    assert stacks, "empty STACKS registry"
     claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
     tf = re.search(r"## Test forms.*?(?=\n## |\Z)", claude, re.S)
     assert tf, "CLAUDE.md missing '## Test forms' section"
     tf_text = tf.group(0)
     stop = {"uv", "run", "python3", "bash", "sh", "timeout", "m", "no", "project", "q", "p", "o"}
-    for ln in stacks:
-        fields = ln.split("|")
-        assert len(fields) >= 4, f"malformed registry line: {ln!r}"
+    for fields in _registry_lines():
         ext, test_runner = fields[0], fields[3]
         # (a) the extension must be a named stack label in Test forms
         assert re.search(r"\*\*" + re.escape(ext) + r"\*\*", tf_text), \
-            f"CLAUDE.md Test forms missing stack label **{ext}** (registry line: {ln!r})"
+            f"CLAUDE.md Test forms missing stack label **{ext}** (registry line: {fields!r})"
         # (b) a runner word from the registry's test-runner must appear in Test forms
         runner_tokens = {t for t in re.findall(r"[A-Za-z][A-Za-z0-9]*", test_runner) if t not in stop}
         tf_tokens = {t for t in re.findall(r"[A-Za-z][A-Za-z0-9]*", tf_text)}
         assert runner_tokens & tf_tokens, \
             f"CLAUDE.md Test forms names no runner word for **{ext}** (runner: {test_runner!r})"
+
+
+def test_stacks_md_matches_registry():
+    # CC-147: specs/STACKS.md documents the registry — its "Current registry"
+    # block must contain exactly the live registry lines (order-insensitive
+    # since CC-148: the generator emits manifest sort order), and its format
+    # line must list all 6 field names.
+    import re
+    stacks_md = (REPO_ROOT.parent / "specs" / "STACKS.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```\n(.*?)\n```", stacks_md, re.S)
+    assert blocks, "specs/STACKS.md missing code blocks"
+    doc_lines = [ln for ln in blocks[-1].splitlines() if ln.strip()]
+    reg_lines = ["|".join(f) for f in _registry_lines()]
+    assert sorted(doc_lines) == sorted(reg_lines), \
+        f"specs/STACKS.md registry block drifted from the live registry:\n" \
+        f"  doc: {sorted(doc_lines)}\n  registry: {sorted(reg_lines)}"
+    fmt = re.search(r"<ext>\|<test-glob>\|<name-regex>\|<test-runner>\|<smoke-runner>(\|<preflight>)?", stacks_md)
+    assert fmt and fmt.group(1), \
+        "specs/STACKS.md format line must document all 6 fields incl. <preflight>"
 
 
 # --- 12-16: mock runner launches --------------------------------------------
@@ -235,6 +284,38 @@ def test_runner_dirty_tree(tmp_path):
         marker.unlink(missing_ok=True)
         _cleanup(label)
     assert rc == 22, f"expected rc=22, got rc={rc}"
+
+
+def test_runner_stale_create_rc13(tmp_path):
+    # CC-133, end to end through main(): the CC-119 fire16 retry1 shape — an
+    # EXISTING test declared as a create — is refused rc=13 in cmd_run, after
+    # the gates but BEFORE the pre-flight (a dead server would give rc=20) and
+    # before any container or agent starts. The quarantine -> contract-lock
+    # DENY -> 1800 s watchdog loop therefore cannot happen anymore.
+    # A private git-init'ed repo keeps this independent of the live tree's
+    # cleanliness (the temp repo is committed, so rc=22 does not fire).
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "fire_color16_test.py").write_text(
+        "def test_x():\n    assert 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-c", "user.email=doctor@stanok", "-c", "user.name=doctor",
+                    "-C", str(repo), "commit", "-q", "-m", "init"], check=True)
+    t = _ticket(tmp_path, "# doctor\n\ntest: tests/fire_color16_test.py\n")
+    label = f"doctor-stale-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    try:
+        rc = _launch(["run", t, label],
+                     {"STANOK_REPO": str(repo),
+                      "STANOK_SERVER_URL": DEAD_SERVER, "STANOK_NO_SANDBOX": "1"})
+        # rc=13 is also the "ticket not found" code — pin the REASON.
+        summary = repo / "evidence" / label / "summary.json"
+        errs = json.loads(summary.read_text(encoding="utf-8"))["errors"]
+    finally:
+        _cleanup(label)
+    assert rc == 13, f"expected rc=13, got rc={rc}"
+    assert any("already exists" in e for e in errs), errs
+    assert any("edit: tests/fire_color16_test.py" in e for e in errs), errs
 
 
 class _SmallCtxHandler(BaseHTTPRequestHandler):

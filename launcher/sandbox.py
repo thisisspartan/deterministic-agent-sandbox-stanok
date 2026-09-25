@@ -14,30 +14,61 @@ container), same --network=host (loopback to the local llama-server).
 import os
 import subprocess
 
-# T1 (CC-120): the writable zone carve-outs, shared by SessionPlan.rw_zones
-# and sandbox_argv. T4 will derive per-run zones from plan.mutable_paths.
-DEFAULT_RW_ZONES = ("src", "tests", "docs", "scripts", "evidence")
+# The default project zones — the ONE literal zone list (CC-132). Two
+# consumers, both in stanok.py: hidden_files_gate (which dirs to scan) and
+# declared_carveout (a bare zone name is undeclarable). It is NOT the rw mount
+# set: since T4 (CC-135) the container's rw carve-outs are derived per ticket
+# from the declared paths (stanok.declared_carveout) and passed to sandbox_argv
+# as `rw_paths`. The zones are merely the dirs hidden_files_gate watches and
+# the names a declared path may not BE.
+#
+# CC-134 removed the former "evidence" carve-out: evidence/ is read-only in
+# the container (still reachable through the repo :ro mount, so an in-container
+# write is an EROFS refusal, not "not found"). The container writes the verdict
+# (summary.json, launcher.stdout.log, the .running marker) into the rw
+# LOG_DIR/<label>; the HOST publishes it into evidence/<label> after the
+# container exits (stanok._publish_evidence).
+WRITABLE_ZONES = ("src", "tests", "docs", "scripts")
 
 
 def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
-                 rw_zones: tuple = DEFAULT_RW_ZONES) -> tuple:
+                 rw_paths: tuple = (), ro_paths: tuple = ()) -> tuple:
     """Return (container_name, docker_argv).
 
     inner_argv is the container-side command (e.g.
     ["/usr/bin/python3", "launcher/stanok.py", "run", ...]).
+
+    rw_paths are repo-relative paths (files or dirs) to carve out rw — the
+    derivation is stanok.declared_carveout (T4, CC-135), the host computes them
+    before `docker run`. The default is () = nothing writable: a caller that
+    forgets the carve-outs gets a read-only container, not an open one.
+
+    ro_paths are the pre-existing contract files (tests/**, scripts/run.sh —
+    stanok.host_ro_paths, T4b/CC-136) re-bound :ro ON TOP of a rw carve-out
+    DIR: Docker layers a file bind over a dir bind by specificity, so a
+    protected file stays immutable while new siblings in that dir stay
+    creatable. Emitted after the rw binds (deeper destination wins).
+
+    The base repo mount is ALWAYS :ro (CC-154). Everything writable is an
+    explicit `rw_paths` carve-out, so a caller that forgets them gets a
+    read-only container, never an open one.
     """
     parent_dir = os.path.dirname(repo_root)
     uid, gid = os.getuid(), os.getgid()
     name = f"stanok-{os.path.basename(repo_root)}-{os.getpid()}"
 
-    # Pre-create the per-uid Claude tmp dir before `docker run`: bwrap
-    # resolves mount points via realpathSync and silently skips non-existent
-    # folders, so the FIRST Bash invocation of a session misses the
-    # /tmp/claude-<uid> bind if the dir is created lazily after bwrap args
-    # are formed.
+    # The CLI's nested bwrap binds its per-uid tmp dir rw — but ONLY when the
+    # path exists as the bwrap args are formed: cli.js's allowOnly loop skips
+    # non-existent write paths ("Skipping non-existent write path") and
+    # sandboxTmpDir = (CLAUDE_CODE_TMPDIR || "/tmp") + Na1() ("claude-<uid>")
+    # is created lazily. On the FIRST Bash call of a session the bind is
+    # therefore absent and the cwd-file write hits EROFS (CC-141, the
+    # "Слой 2" defect). Pre-creating the dir on the HOST does not help — it is
+    # not visible in the container (nothing binds /tmp). Mount a tmpfs AT that
+    # exact container path instead: it exists before the CLI starts, so the
+    # bind is emitted from the very first invocation. Na1() uses getuid(),
+    # and `--user {uid}` makes the container uid ours — the paths agree.
     claude_tmp = f"/tmp/claude-{uid}"
-    os.makedirs(claude_tmp, exist_ok=True)
-    os.chmod(claude_tmp, 0o700)
 
     argv = [
         "docker", "run", "--rm", "--name", name, "--init",
@@ -48,19 +79,32 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
         # Ephemeral HOME on a tmpfs: no host coupling, the CLI's ~/.claude
         # and ~/.claude.json live and die with the container.
         "--tmpfs", f"/home/stanok:uid={uid},gid={gid},mode=700",
+        # The CLI's per-uid tmp dir (see above): a tmpfs, not a host bind —
+        # hermetic, dies with the container, and present before bwrap forms
+        # its args, which is the whole point (CC-141). `exec` matters: the
+        # nested runtime exports TMPDIR=<this dir> (cli.js aG8), so a
+        # tool/test writing a temp script to $TMPDIR and running it must not
+        # hit docker's default noexec (upstream /tmp/claude is a plain dir).
+        "--tmpfs", f"{claude_tmp}:uid={uid},gid={gid},mode=700,exec",
         "-w", repo_root,
     ]
 
-    # Writable carve-outs: base repo read-only, subpaths re-mounted rw on top
-    # (Docker layers -v mounts by specificity). .git inherits :ro from the
-    # base mount — git reads work, git writes fail at the filesystem layer.
-    # Parent of the repo mounted ro FIRST: tickets live in $PARENT_DIR/tickets
-    # and the role-leak gate (rc=24) checks $PARENT_DIR/CLAUDE.md.
+    # Writable carve-outs: base repo read-only, the ticket's declared paths
+    # re-mounted rw on top (Docker layers -v mounts by specificity) — the T3
+    # experiment (2026-09-24): an existing file bound rw over the ro repo is
+    # writable while its siblings stay EROFS, and a file bound ro over a rw DIR
+    # is EROFS while its new siblings stay creatable (verified 2026-09-24).
+    # .git inherits :ro from the base mount — git reads work, git writes fail
+    # at the filesystem layer. Parent of the repo mounted ro FIRST: tickets live
+    # in $PARENT_DIR/tickets and the role-leak gate (rc=24) checks
+    # $PARENT_DIR/CLAUDE.md.
+    # The base repo is ALWAYS :ro (CC-154).
     specs = [
         f"{parent_dir}:{parent_dir}:ro",
         f"{repo_root}:{repo_root}:ro",
     ]
-    specs += [f"{repo_root}/{zone}:{repo_root}/{zone}:rw" for zone in rw_zones]
+    specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:rw" for rel in rw_paths]
+    specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:ro" for rel in ro_paths]
     specs.append(f"{log_dir}:{log_dir}:rw")
     for spec in specs:
         argv += ["-v", spec]
@@ -73,6 +117,11 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
     env["HOME"] = "/home/stanok"
     env["CLAUDE_TMPDIR"] = claude_tmp
+    # T4 baseline (CC-135): declared paths may be files inside otherwise-ro
+    # dirs, so CPython must not drop __pycache__/*.pyc next to an imported
+    # module. run.sh's py runner already sets this for pytest; this covers the
+    # agent's own python invocations (deterministic env, not a workaround).
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     for var in ("http_proxy", "https_proxy", "no_proxy", "NO_PROXY"):
         if os.environ.get(var):
             env[var] = os.environ[var]

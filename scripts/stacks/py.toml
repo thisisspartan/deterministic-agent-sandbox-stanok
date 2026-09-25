@@ -1,0 +1,9 @@
+ext = "py"
+test_glob = "*_test.py"
+name_regex = "[A-Za-z0-9_-]+_test\\.py"
+test_runner = "env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider -o pythonpath=src"
+smoke_runner = "env PYTHONDONTWRITEBYTECODE=1 python3"
+preflight = "env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest --version"
+# CC-151: config filenames under tests/ that can rewrite the pytest verdict
+# (conftest.py hooks; ini files via addopts/testpaths/-k).
+verdict_config = ["conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"]
