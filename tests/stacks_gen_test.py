@@ -28,7 +28,7 @@ GEN = SCRIPTS / "gen_stacks.sh"
 # this dict is irrelevant — the generator emits manifest sort order).
 EXPECTED_LINES = {
     "js|*.test.js|[A-Za-z0-9_-]+\\.test\\.js|node --test --test-force-exit|node|node --version",
-    "py|*_test.py|[A-Za-z0-9_-]+_test\\.py|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest -q -p no:cacheprovider -o pythonpath=src|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3|env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest --version",
+    "py|*_test.py|[A-Za-z0-9_-]+_test\\.py|env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider -o pythonpath=src|env PYTHONDONTWRITEBYTECODE=1 python3|env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest --version",
     "jq|*.json|[A-Za-z0-9_-]+\\.json|jq empty|jq empty|command -v jq",
 }
 
