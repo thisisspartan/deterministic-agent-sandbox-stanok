@@ -57,6 +57,16 @@ if [[ "$actual_cli" != "$CLI_JS_SHA" || "$actual_pkg" != "$PKG_JSON_SHA" || "$ac
     echo "  rg:           got $actual_rg want $RG_SHA" >&2
     exit 1
 fi
+# CC-143: anchor gate — the SHA match proves the file is byte-identical to
+# the pinned bundle, but a rebuilt-from-different-source bundle could
+# coincidentally match the SHA without carrying the 11 patch anchors.
+# verify.sh confirms the anchors are present (fail-fast).
+if [[ -f "$CLI_SRC/patches/verify.sh" ]]; then
+    echo "--- CLI patch anchor check (CC-143) ---"
+    bash "$CLI_SRC/patches/verify.sh" "$CLI_SRC/cli.js"
+else
+    echo "WARN: $CLI_SRC/patches/verify.sh not found — skipping anchor check" >&2
+fi
 mkdir -p "$DIR/.build-context/claude-code-2.1.88/vendor/ripgrep/x64-linux"
 cp -f "$CLI_SRC/cli.js" "$CLI_SRC/package.json" "$DIR/.build-context/claude-code-2.1.88/"
 cp -f "$CLI_SRC/vendor/ripgrep/x64-linux/rg" "$DIR/.build-context/claude-code-2.1.88/vendor/ripgrep/x64-linux/"
