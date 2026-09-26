@@ -164,23 +164,23 @@ def test_manifest_skips_pycache():
 def _registry_lines():
     """The live STACKS registry as a list of field lists.
 
-    CC-148: the registry is GENERATED — scripts/run.sh sources
-    scripts/stacks.generated.sh (emitted from scripts/stacks/*.toml by
-    scripts/gen_stacks.sh). Parse the generated file; fall back to an
-    inline STACKS heredoc in run.sh only if the generated file is absent
-    (pre-CC-148 trees).
+    CC-168: the manifests (scripts/stacks/*.toml, sorted by filename) are
+    the single source of truth — parse them with tomllib, the same parser
+    run.sh and launcher/stanok.py use (no generated file to go stale).
     """
-    import re
-    gen = REPO_ROOT / "scripts" / "stacks.generated.sh"
-    if gen.is_file():
-        text = gen.read_text(encoding="utf-8")
-    else:
-        text = (REPO_ROOT / "scripts" / "run.sh").read_text(encoding="utf-8")
-    m = re.search(r"STACKS='(.*?)'", text, re.S)
-    assert m, "STACKS registry not found (scripts/stacks.generated.sh or run.sh)"
-    lines = [ln for ln in m.group(1).splitlines() if ln.strip()]
-    assert lines, "empty STACKS registry"
-    return [ln.split("|") for ln in lines]
+    import tomllib
+    stacks = REPO_ROOT / "scripts" / "stacks"
+    keys = ("ext", "test_glob", "name_regex",
+            "test_runner", "smoke_runner", "preflight")
+    lines = []
+    for name in sorted(os.listdir(stacks)):
+        if not name.endswith(".toml"):
+            continue
+        with open(stacks / name, "rb") as f:
+            m = tomllib.load(f)
+        lines.append([m[k] for k in keys])
+    assert lines, "no stack manifests in scripts/stacks/"
+    return lines
 
 
 def test_registry_shape():

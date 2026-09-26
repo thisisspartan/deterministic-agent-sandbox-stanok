@@ -59,6 +59,13 @@ REGISTRY. The test framework is fixed by that registry — **py** runs `pytest`,
 `node --test`, **jq** validates `.json` files (see "Test forms"); you do not pick
 `go test`/`cargo test`/etc.
 
+The STACK REGISTRY is derived at RUNTIME by `run.sh` from the per-stack TOML manifests
+in `scripts/stacks/` (one manifest per stack: `ext`, `test_glob`, `name_regex`,
+`test_runner`, `smoke_runner`, `preflight`) — the single source of truth, no generated
+artifact to keep in sync. The manifests are fixed infrastructure: you do not create or
+edit them (tickets declare `src/`/`tests/`/`docs/` paths, plus `scripts/run.sh` only
+in the bootstrap case above).
+
 ## Test forms (fixed by the registry, not your choice)
 
 The test framework is chosen by the `scripts/run.sh` STACK REGISTRY, not by you:

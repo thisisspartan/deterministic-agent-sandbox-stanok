@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # R2: thin shim — all logic (gates, background, Docker supervision) lives in
 # launcher/stanok.py. The CLI surface:
-#   ./launch.sh [run] <ticket> <label> [--background] [--follow] [--direct] [--local-retries N] [-- extra...]
+#   ./launch.sh [run] <ticket> <label> [--follow] [--direct] [--local-retries N] [-- extra...]
 #   ./launch.sh status <label>
 #   ./launch.sh wait <label> [--timeout N]   # CC-140: block until terminal, print status
 #   ./launch.sh stop <label>
