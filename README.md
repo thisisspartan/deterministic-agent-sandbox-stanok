@@ -31,22 +31,22 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 ## Running
 
 ```bash
-./launch.sh run <ticket.md> <label> [--background] [--follow] [--direct] [--local-retries N] [-- extra...]
+./launch.sh run <ticket.md> <label> [--follow] [--direct] [--local-retries N] [-- extra...]
 # `run` is optional: `./launch.sh <ticket.md> <label> ...` is equivalent.
 # The ticket is resolved against three bases (project root -> machine root -> as given),
 # so the canonical call from the project root is: `./stanok/launch.sh tickets/x.md <label>`.
 # The shim cd's into the machine root (the directory containing launch.sh):
-# the call works from any cwd; --background with a nonexistent ticket fails
+# the call works from any cwd; --follow with a nonexistent ticket fails
 # immediately (rc=13) instead of spawning a dead detach.
 ./launch.sh status <label>      # JSON: running/dead/done/missing
 ./launch.sh wait <label> [--timeout N]  # block until terminal, print the status JSON (CC-140)
 ./launch.sh stop <label>        # interrupt the run (TERM by pid from .running)
 ```
 
-- `--background` — detach to the background (observe: `tail -f /tmp/stanok-logs/<label>.launch.log`)
-- `--follow` — implies `--background`; block until the run is terminal, then print its
-  status. One `run --background --follow` call is both the launch and the verdict
-  notification the supervisor waits on (CC-140)
+- `--follow` — the SOLE background flag: detach to the background, then block
+  until the run is terminal and print its status. One `run --follow` call is
+  both the launch and the verdict notification the supervisor waits on
+  (CC-140/BL-1). Observe a detached launch: `tail -f /tmp/stanok-logs/<label>.launch.log`
 - `--direct` — headless directly, ticket path relative to the repo
 - `--local-retries N` — in-session retry turns on verifier FAIL (default 2)
 
@@ -111,12 +111,14 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
 1. `launch.sh` (thin shim → Runner) — the Runner passes the fail-closed
    gates in this order: label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
    ticket (rc=13) -> dirty-tree (rc=22, uncommitted changes — start
-   forbidden) -> then: `--background` spawns a detached self-run, or sync
+   forbidden) -> then: `--follow` spawns a detached self-run (and blocks until
+   terminal), or sync
    runs either in-process (host no-sandbox / container side — the lock
    (rc=21) is taken there) or as a supervised `docker run`
    (`launcher/sandbox.py`; the container-side Runner re-runs the gates and
    takes the lock). The image preflight (the image LABEL `stanok.digest`
-   must equal sha256(Dockerfile + scripts/run.sh) and every stack's
+   must equal sha256(Dockerfile + scripts/run.sh + scripts/stacks/*.toml —
+   the STACKS registry, sorted by filename) and every stack's
    preflight command must succeed inside the image, `docker run --rm`)
    no longer blocks the launch path (CC-106) — it runs in doctor
    (`test_docker_image_digest_matches`): a stale image is a doctor failure,

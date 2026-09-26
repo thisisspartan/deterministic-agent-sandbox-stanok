@@ -1,4 +1,4 @@
-"""CC-140: `wait` / `run --background --follow` — one background call carries the verdict.
+"""CC-140/BL-1: `wait` / `run --follow` — one background call carries the verdict.
 
 Before CC-140 the supervisor's §3 made the wait a SEPARATE background Bash task
 (`while launch.sh status <label> | grep -q running`). In the SMOKE-02 run that
@@ -14,7 +14,7 @@ Pinned here (hermetic — no Docker, no model):
   3  `wait` on a live run hits the timeout cap -> state=timeout, rc=124
   4  `wait` on an unknown label prints state=missing
   5  `status` and `wait` share ONE source (`_status_dict`) — identical JSON
-  6  the CLI wires `wait` and accepts `run ... --follow` (no --background)
+  6  the CLI wires `wait` and accepts `run ... --follow` (the sole background flag)
   7  `--follow` does NOT leak into the detached child's argv (a plain sync run)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_wait_follow.py -q
@@ -125,7 +125,7 @@ def test_cli_wires_wait_and_run_follow(tmp_path, monkeypatch):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert json.loads(proc.stdout.strip().splitlines()[-1])["state"] == "missing"
 
-    # `run ... --follow` (WITHOUT --background) is accepted and takes the
+    # `run ... --follow` (the sole background flag) is accepted and takes the
     # background/launch branch: a missing ticket aborts at the ticket gate
     # (rc=13) before any launch — it does not fall through to a sync run.
     proc = subprocess.run([sys.executable, py, "run", "no-such-ticket.md", "f1",
@@ -139,7 +139,7 @@ def test_cli_wires_wait_and_run_follow(tmp_path, monkeypatch):
 def test_follow_not_propagated_to_child_argv():
     args = types.SimpleNamespace(ticket="tickets/T.md", label="lbl",
                                  direct=False, local_retries=stanok.DEFAULT_RETRIES,
-                                 extra=[], background=True, follow=True)
+                                 extra=[], follow=True)
     inner = stanok._inner_run_argv(args)
-    assert "--follow" not in inner and "--background" not in inner
+    assert "--follow" not in inner
     assert inner[-1] == "lbl"

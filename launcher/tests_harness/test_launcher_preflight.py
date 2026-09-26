@@ -5,6 +5,10 @@ Pins the launch mechanisms in launcher/stanok.py:
   2  preflight_image: image not found (inspect rc!=0) -> False
   3  preflight_image: digest OK but runner probe fails (run rc=1) -> False, log probe name
   4  preflight_image: all good -> True
+  4b _stack_preflights: REAL function (no monkeypatch) == tomllib read of the
+     live manifests (scripts/stacks/*.toml), non-empty — the BL-3 regression
+     pin (the old regex over run.sh silently returned [] and disabled the
+     doctor runner probes)
   5  verify_gate: stub run.sh (test -> rc=6) -> env_fail True, "ENV-FAIL:" message
   6  _status_fields(16, "FAIL", 1) == ("ENV-FAIL", "FAIL", "ENV-FAIL")
   7  _verifier_hook: rc=6 -> {} + "ENV-FAIL" log; rc=1 -> "RED CONFIRMED" context; rc=0/2 -> {}
@@ -104,6 +108,24 @@ def test_preflight_all_good(fake_docker, monkeypatch, capsys):
     monkeypatch.setenv("FAKE_DOCKER_RUN_RC", "0")
     assert stanok.preflight_image("stanok-machine:latest") is True
     assert "all stack runners available" in capsys.readouterr().out
+
+
+# --- 4b: _stack_preflights reads the live manifests (no monkeypatch) -----------
+
+def test_stack_preflights_reads_live_manifests():
+    # BL-3: the old implementation regexed a `STACKS='...'` block out of
+    # scripts/run.sh that no longer exists (CC-148) -> always [] -> the
+    # doctor's per-stack runner probes were silently disabled. Pin the REAL
+    # function against an independent tomllib read of the live manifests.
+    import tomllib
+    stacks = REPO_ROOT / "scripts" / "stacks"
+    expected = []
+    for name in sorted(os.listdir(stacks)):
+        if name.endswith(".toml"):
+            with open(stacks / name, "rb") as f:
+                expected.append(tomllib.load(f)["preflight"])
+    assert stanok._stack_preflights() == expected
+    assert expected, "no preflights derived from the live manifests"
 
 
 # --- 5: verify_gate env_fail ---------------------------------------------------

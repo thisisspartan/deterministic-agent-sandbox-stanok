@@ -59,10 +59,31 @@ cd "$REPO_ROOT"
 # __pycache__/*.pyc into the repo (cache artifacts must not reach the W12
 # `list` check or the contract_lock manifest — the env prefix goes through
 # `env` because `timeout` cannot parse a VAR=value word itself).
-# STACK REGISTRY — GENERATED from scripts/stacks/*.toml by
-# scripts/gen_stacks.sh. Do not edit by hand; edit the manifest and run
-# `bash scripts/gen_stacks.sh`.
-source "$SCRIPT_DIR/stacks.generated.sh"
+# STACK REGISTRY — derived at runtime from the per-stack TOML manifests in
+# scripts/stacks/ (one manifest per stack) via python3 + tomllib — the SAME
+# parser the launcher uses (launcher/stanok.py). There is no generated
+# artifact to keep in sync: edit the manifest and it takes effect.
+# Fail-closed: a missing required key, unparseable TOML, or no manifests at
+# all aborts run.sh (non-zero exit).
+STACKS="$(python3 - "$SCRIPT_DIR/stacks" <<'PY'
+import os, sys, tomllib
+d = sys.argv[1]
+KEYS = ("ext", "test_glob", "name_regex", "test_runner", "smoke_runner", "preflight")
+lines = []
+for name in sorted(os.listdir(d)):
+    if not name.endswith(".toml"):
+        continue
+    with open(os.path.join(d, name), "rb") as f:
+        m = tomllib.load(f)
+    missing = [k for k in KEYS if not isinstance(m.get(k), str) or not m.get(k)]
+    if missing:
+        sys.exit(f"run.sh: manifest {name} is missing required key(s): {', '.join(missing)}")
+    lines.append("|".join(m[k] for k in KEYS))
+if not lines:
+    sys.exit(f"run.sh: no stack manifests in {d}")
+print("\n".join(lines))
+PY
+)"
 
 # Generate the usage alternatives from the registry (single source).
 stack_alts() {

@@ -283,6 +283,36 @@ _LEGACY_VERDICT_CONFIG = ("conftest.py", "pytest.ini", "tox.ini",
                          "setup.cfg", "pyproject.toml")
 
 
+def _stack_manifests() -> tuple[dict[str, dict], bool]:
+    """Parse the STACK REGISTRY manifests (scripts/stacks/*.toml, sorted by
+    filename) via tomllib — the SINGLE parser for the manifests (run.sh
+    derives its STACKS lines with the same tomllib, no codegen). Returns
+    ({filename: data}, ok); ok is False when no manifest parsed (missing dir,
+    unparseable TOML, or tomllib unavailable) — callers fail closed on that."""
+    if tomllib is None:
+        return {}, False
+    stacks_dir = os.path.join(REPO_ROOT, "scripts", "stacks")
+    out: dict[str, dict] = {}
+    ok = True
+    try:
+        entries = sorted(os.listdir(stacks_dir))
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.endswith(".toml"):
+            continue
+        path = os.path.join(stacks_dir, entry)
+        try:
+            with open(path, "rb") as f:
+                out[entry] = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            log(f"WARN: stack manifest {entry} unreadable: {e}")
+            ok = False
+    if not out:
+        ok = False
+    return out, ok
+
+
 def _verdict_config_patterns() -> tuple[str, ...]:
     """CC-151 (stack-agnostic subversion guard): the union of the
     `verdict_config` lists declared by the stack manifests
@@ -292,33 +322,14 @@ def _verdict_config_patterns() -> tuple[str, ...]:
     does not inherit another stack's list. Fail-closed: if no manifest parses
     (missing dir, unparseable TOML, or tomllib unavailable) fall back to the
     legacy py set so the guard never silently disables."""
-    if tomllib is None:
+    manifests, ok = _stack_manifests()
+    if not ok:
         return _LEGACY_VERDICT_CONFIG
-    stacks_dir = os.path.join(REPO_ROOT, "scripts", "stacks")
     patterns: set[str] = set()
-    found = False
-    ok = True
-    try:
-        entries = sorted(os.listdir(stacks_dir))
-    except OSError:
-        entries = []
-    for entry in entries:
-        if not entry.endswith(".toml"):
-            continue
-        found = True
-        path = os.path.join(stacks_dir, entry)
-        try:
-            with open(path, "rb") as f:
-                data = tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError) as e:
-            log(f"WARN: verdict_config: cannot parse {entry}: {e}")
-            ok = False
-            continue
+    for data in manifests.values():
         for name in data.get("verdict_config", []):
             if isinstance(name, str) and name:
                 patterns.add(name)
-    if not found or not ok:
-        return _LEGACY_VERDICT_CONFIG
     return tuple(sorted(patterns))
 
 
@@ -451,42 +462,45 @@ def preflight_server() -> bool:
 
 
 def _stack_preflights() -> list[str]:
-    """The 6th (preflight) field of each STACKS registry line in
-    scripts/run.sh — the cheap per-stack runner-availability probe
-    (e.g. `uv run --no-project pytest --version`)."""
-    try:
-        with open(os.path.join(REPO_ROOT, "scripts", "run.sh"), encoding="utf-8") as f:
-            src = f.read()
-    except OSError:
-        return []
-    m = re.search(r"^STACKS='(.*?)'$", src, re.M | re.S)
-    if not m:
-        return []
+    """The `preflight` command of each stack manifest (scripts/stacks/*.toml,
+    sorted by filename) — the cheap per-stack runner-availability probe
+    (e.g. `env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest --version`).
+    Read via the same tomllib loader as _verdict_config_patterns — NOT a
+    regex over run.sh (the pre-CC-148 registry block no longer lives there;
+    the old regex silently returned [] and disabled the doctor probe)."""
+    manifests, _ok = _stack_manifests()
     preflights = []
-    for line in m.group(1).splitlines():
-        parts = line.split("|")
-        if len(parts) >= 6 and parts[5].strip():
-            preflights.append(parts[5].strip())
+    for data in manifests.values():
+        pre = data.get("preflight")
+        if isinstance(pre, str) and pre.strip():
+            preflights.append(pre.strip())
     return preflights
 
 
 def _image_digest() -> str:
     """sha256 over the image-defining sources: Dockerfile + scripts/run.sh
-    (the STACKS registry). setup.sh bakes this into the image LABEL
-    stanok.digest at build time; preflight_image() re-computes it in
-    doctor (CC-106: moved off the launch path)."""
+    + scripts/stacks/*.toml (the STACKS registry, sorted by filename —
+    the same explicit order setup.sh uses at build time). setup.sh bakes
+    this into the image LABEL stanok.digest at build time;
+    preflight_image() re-computes it in doctor (CC-106: moved off the
+    launch path)."""
     h = hashlib.sha256()
     for rel in ("Dockerfile", "scripts/run.sh"):
         with open(os.path.join(REPO_ROOT, rel), "rb") as f:
             h.update(f.read())
+    stacks_dir = os.path.join(REPO_ROOT, "scripts", "stacks")
+    for name in sorted(os.listdir(stacks_dir)):
+        if name.endswith(".toml"):
+            with open(os.path.join(stacks_dir, name), "rb") as f:
+                h.update(f.read())
     return h.hexdigest()
 
 
 def preflight_image(image: str) -> bool:
     """Host-side image provenance + runner preflight.
-    1. The image LABEL stanok.digest must equal sha256(Dockerfile + run.sh)
-       — an image older than the Dockerfile/registry is caught here,
-       not mid-run.
+    1. The image LABEL stanok.digest must equal sha256(Dockerfile + run.sh
+       + scripts/stacks/*.toml) — an image older than the Dockerfile or
+       the STACKS registry is caught here, not mid-run.
     2. Each stack's preflight command must succeed INSIDE the image
        (docker run --rm) — the runner is available where the tests run.
     CC-106: no longer on the launch path (the former blocking rc=25 is
@@ -1816,8 +1830,8 @@ WAIT_TIMEOUT_S = 2700  # 45 min — the cap §3 of CLAUDE.supervisor.md names
 def cmd_wait(label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:
     """Block until the run reaches a terminal state, print its final status.
 
-    This is the ONE primitive behind `run --background --follow` and the
-    standalone `wait` subcommand (CC-140). It exists because the supervisor's
+    This is the ONE primitive behind `run --follow` and the standalone
+    `wait` subcommand (CC-140). It exists because the supervisor's
     former §3 made "poll until done" a separate Bash task that could simply not
     be issued: in the SMOKE-02 run the supervisor launched `--background`, wrote
     "waiting", and ended its turn WITHOUT the wait task, so no completion
@@ -1959,7 +1973,7 @@ def launch_background(args) -> int:
             if os.path.exists(summary):
                 log(f"Background child (PID {child.pid}) exited "
                     f"rc={child.returncode} with a summary (fast abort)")
-                return cmd_wait(args.label) if args.follow else 0
+                return cmd_wait(args.label)
             log(f"ERROR: background child (PID {child.pid}) exited "
                 f"rc={child.returncode} before writing the .running marker")
             return 17
@@ -1969,9 +1983,7 @@ def launch_background(args) -> int:
             return 17
         time.sleep(0.2)
     log(f"Machine launched in the background (PID {child.pid}). Log: {log_path}")
-    if args.follow:
-        return cmd_wait(args.label)
-    return 0
+    return cmd_wait(args.label)
 
 
 # ==================================================================================
@@ -2008,10 +2020,11 @@ def main() -> int:
     r.add_argument("extra", nargs="*", default=[])
     r.add_argument("--direct", action="store_true")
     r.add_argument("--local-retries", type=int, default=DEFAULT_RETRIES)
-    r.add_argument("--background", action="store_true")
-    # CC-140: --follow makes the background launch block until the run is
-    # terminal (implies --background). The supervisor's §3 uses it so the
-    # completion notification of ONE background task is the verdict.
+    # CC-140/BL-1: --follow is the SOLE background flag: a detached
+    # self-spawn, then block in cmd_wait until the run is terminal and print
+    # its final status — so ONE background Bash call carries both the launch
+    # and the verdict notification (the supervisor's §3). A bare `run` is a
+    # foreground sync run.
     r.add_argument("--follow", action="store_true")
 
     s = sub.add_parser("status")
@@ -2106,12 +2119,12 @@ def main() -> int:
         in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
         no_sandbox = os.environ.get("STANOK_NO_SANDBOX") == "1"
 
-        if args.background or args.follow:
+        if args.follow:
             # The child re-runs these gates and takes the lock itself; the
             # parent must not hold the lock (flock would deadlock the child).
-            # --follow implies background: it only makes sense as the tail of a
-            # detached launch (a foreground follow would exceed the Bash tool's
-            # 10-min cap on a 45-min run).
+            # --follow is the sole background form: a detached launch that
+            # blocks until terminal (a foreground follow would exceed the
+            # Bash tool's 10-min cap on a 45-min run).
             return launch_background(args)
 
         if in_container or no_sandbox:

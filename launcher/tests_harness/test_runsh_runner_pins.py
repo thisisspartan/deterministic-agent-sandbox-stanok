@@ -21,26 +21,41 @@ Run: .venv/bin/python -m pytest launcher/tests_harness/test_runsh_runner_pins.py
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from conftest import PY_PASS
 
 # The shims log their argv + fd 0 to $LOG, then exec the real command.
+# CC-168: run.sh derives the STACKS registry via `python3 - <dir>` (a
+# tomllib heredoc) — the shims must pass THAT call through to the REAL
+# python3, or the registry comes out empty and run.sh refuses (rc=2)
+# before any runner runs. The real path is resolved HERE (the test
+# process's PATH has no shim dir) and baked into the shim: `command -v -p`
+# INSIDE the shebangless shim's exec-fallback context can resolve back to
+# the shim itself (infinite recursion -> hang, observed 2026-09-26).
+import shutil  # noqa: E402
+
+REAL_PY = shutil.which("python3") or sys.executable
+REGISTRY_PASS = f'if [ "$1" = "-" ]; then exec {REAL_PY} "$@"; fi\n'
 TIMEOUT_SHIM = (
     'echo "timeout $1" >> "$LOG"\n'
     'shift\n'
     'exec "$@"\n'
 )
 PY_OK = (
+    REGISTRY_PASS +
     'echo "python3 $* stdin=$(readlink /proc/self/fd/0)" >> "$LOG"\n'
     'exit 0\n'
 )
 PY_FAIL_A = (
+    REGISTRY_PASS +
     'echo "python3 $* stdin=$(readlink /proc/self/fd/0)" >> "$LOG"\n'
     'case "$*" in *a_test.py*) exit 1 ;; esac\n'
     'exit 0\n'
 )
 PY_FAIL_VERSION = (
+    REGISTRY_PASS +
     'case "$*" in *--version*) exit 1 ;; esac\n'
     'echo "python3 $* stdin=$(readlink /proc/self/fd/0)" >> "$LOG"\n'
     'exit 0\n'

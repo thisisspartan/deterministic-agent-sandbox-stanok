@@ -267,6 +267,11 @@ def test_rc_table_runner_2_remapped_to_1(repo):
     fake_py = bin / "python3"
     fake_py.write_text(
         "#!/usr/bin/env bash\n"
+        # CC-168: run.sh derives the STACKS registry via `python3 - <dir>`
+        # (tomllib heredoc) — pass that call through to the real python3,
+        # or the registry comes out empty and run.sh refuses (rc=2) before
+        # the runner's rc=2 under test is ever produced.
+        'if [[ "$1" == "-" ]]; then exec $(command -v -p python3) "$@"; fi\n'
         'if [[ "$*" == *"--version"* ]]; then exit 0; fi\n'
         "exit 2\n",
     )

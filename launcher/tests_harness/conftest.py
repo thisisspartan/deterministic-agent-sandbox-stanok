@@ -51,12 +51,12 @@ PY_FAIL = "def test_bad():\n    assert 1 == 2\n"
 def repo(tmp_path):
     (tmp_path / "scripts").mkdir()
     shutil.copy(RUNSH, tmp_path / "scripts" / "run.sh")
-    # CC-148: run.sh sources the generated registry block — install it
-    # alongside (the tmp repo has no manifests, so copy the committed
-    # generated file, not regenerate).
-    gen = REPO_ROOT / "scripts" / "stacks.generated.sh"
-    if gen.is_file():
-        shutil.copy(gen, tmp_path / "scripts" / "stacks.generated.sh")
+    # CC-168: run.sh derives the STACKS registry at runtime from the
+    # per-stack TOML manifests (scripts/stacks/*.toml) — install them
+    # alongside (no generated artifact to copy anymore).
+    stacks = REPO_ROOT / "scripts" / "stacks"
+    if stacks.is_dir():
+        shutil.copytree(stacks, tmp_path / "scripts" / "stacks")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
     return tmp_path
