@@ -179,7 +179,13 @@ def _publish_evidence(label: str, container_rc: int) -> None:
     exit code = the real run rc) is ground truth. A summary.json that claims
     PASS after a non-zero container exit, or whose rc field disagrees with
     the container exit, is a forged verdict from the PASS->publish TOCTOU
-    window — force FAIL and record the violation."""
+    window — force FAIL and record the violation.
+
+    NO-OP exemption: a NO-OP run (probe_result == "NO-OP-PASS") intentionally
+    returns rc=1 with verifier=PASS (the machine did no work; the artifacts
+    pre-existed and the verifier really passed). That rc=1+PASS combination is
+    legitimate, not a forgery, so the "claims PASS" check is skipped for it;
+    the rc-field consistency check still applies."""
     src = os.path.join(LOG_DIR, label)
     files = ("summary.json", "launcher.stdout.log")
     if not any(os.path.isfile(os.path.join(src, f)) for f in files):
@@ -201,7 +207,12 @@ def _publish_evidence(label: str, container_rc: int) -> None:
     if not isinstance(summary, dict):
         return
     violations = []
-    if container_rc != 0 and summary.get("verifier") == "PASS":
+    # A NO-OP run intentionally returns rc=1 with verifier=PASS (the machine
+    # did no work; the artifacts pre-existed and the verifier really passed).
+    # The "claims PASS" check must not fire on that intentional combination —
+    # only the rc-field consistency check below still applies.
+    is_noop = summary.get("probe_result") == "NO-OP-PASS"
+    if not is_noop and container_rc != 0 and summary.get("verifier") == "PASS":
         violations.append(
             f"container exited rc={container_rc} but summary claims PASS")
     if summary.get("rc") != container_rc:
