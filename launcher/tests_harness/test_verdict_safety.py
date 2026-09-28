@@ -58,7 +58,7 @@ def test_declared_path_traversal_rejected():
 
 def _empty_plan():
     return stanok.SessionPlan(
-        declared_paths=(), mutable_paths=(),
+        declared_paths=(),
     )
 
 

@@ -2,10 +2,11 @@
 
 Hermetic: parse a sample ticket header, build the plan exactly as
 cmd_run does, and pin the T1 invariants:
-  - declared_paths == mutable_paths (T1: no divergence)
+  - declared_paths is the single policy list (the former mutable_paths
+    duplicate was collapsed into it — always == declared_paths, CC-125)
   - git_mode == "ro"
-  - the contract_lock exemption is generalized to mutable_paths:
-    a mutable protected path is not flagged; a non-mutable one is.
+  - the contract_lock exemption is generalized to declared_paths:
+    a declared protected path is not flagged; a non-declared one is.
 
 CC-132 adds the single-source zone/kind pins:
   - sandbox.WRITABLE_ZONES is the only literal zone list; its consumers
@@ -44,12 +45,11 @@ from conftest import repo, write
 
 def _build_plan(ticket_text):
     """Mirror cmd_run's T1 construction: parse the header, then build the
-    plan with mutable=declared (the plan carries no mount/protected lists —
-    T4/CC-135 derives the rw mounts, T4b/CC-136 the :ro binds)."""
+    plan (the plan carries no mount/protected lists — T4/CC-135 derives the
+    rw mounts, T4b/CC-136 the :ro binds)."""
     declared, edit_paths, _ = stanok.parse_ticket_header(ticket_text)
     return stanok.SessionPlan(
         declared_paths=tuple(declared),
-        mutable_paths=tuple(declared),
         git_mode="ro",
         edit_paths=tuple(edit_paths),
     )
@@ -67,13 +67,13 @@ _TICKET = (
 def test_plan_fields_from_ticket_header():
     plan = _build_plan(_TICKET)
     assert plan.declared_paths == ("src/mod.py", "tests/mod_test.py", "docs/mod.md")
-    assert plan.declared_paths == plan.mutable_paths
     assert plan.git_mode == "ro"
-    # T5/CC-137: exactly four fields — the mount/protected lists are derived
+    # T5/CC-137: exactly three fields — the mount/protected lists are derived
     # (rw_zones gone with CC-135, protected_paths gone with the hook it fed,
-    # bootstrap_paths gone with the bootstrap kind itself — CC-154).
+    # bootstrap_paths gone with the bootstrap kind itself — CC-154,
+    # mutable_paths collapsed into declared_paths — it was always equal).
     assert {f.name for f in dataclasses.fields(stanok.SessionPlan)} == {
-        "declared_paths", "mutable_paths", "git_mode", "edit_paths"}
+        "declared_paths", "git_mode", "edit_paths"}
 
 
 def test_plan_is_frozen():
@@ -91,9 +91,9 @@ def test_contract_lock_set_is_the_manifest_not_a_plan_field():
     assert not hasattr(stanok, "_pretooluse_lock_hook")
 
 
-def test_contract_lock_exempts_mutable_path(repo, monkeypatch):
-    # Generalized run.sh exemption: a mutable protected path is not
-    # flagged even when modified; a non-mutable protected path is.
+def test_contract_lock_exempts_declared_path(repo, monkeypatch):
+    # Generalized run.sh exemption: a declared protected path is not
+    # flagged even when modified; a non-declared protected path is.
     write(repo / "tests" / "x_test.py", "def test_x():\n    assert 1\n")
     (repo / "docs").mkdir()  # CC-135: a declared path needs an existing carve-out
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
@@ -107,12 +107,12 @@ def test_contract_lock_exempts_mutable_path(repo, monkeypatch):
         stanok._check_contract_lock(before, job, 1, plan)
         assert any("scripts/run.sh" in v
                    for v in job.get("contract_lock_violations", [])), \
-            f"non-mutable run.sh modification not flagged: {job}"
+            f"non-declared run.sh modification not flagged: {job}"
         job2 = {}
-        plan2 = dataclasses.replace(plan, mutable_paths=("scripts/run.sh",))
+        plan2 = dataclasses.replace(plan, declared_paths=("scripts/run.sh",))
         stanok._check_contract_lock(before, job2, 1, plan2)
         assert not job2.get("contract_lock_violations"), \
-            f"mutable run.sh modification wrongly flagged: {job2}"
+            f"declared run.sh modification wrongly flagged: {job2}"
     finally:
         runsh.write_text(orig, encoding="utf-8")
 
@@ -125,7 +125,7 @@ _EDIT_TICKET = (
 )
 
 
-def test_edit_path_parsed_and_still_mutable():
+def test_edit_path_parsed_and_still_declared():
     # CC-125: `edit:` is declared like any path (union) but also reported
     # separately so prepare_workspace can skip it.
     declared, edit_paths, reset_none = stanok.parse_ticket_header(_EDIT_TICKET)
@@ -133,7 +133,6 @@ def test_edit_path_parsed_and_still_mutable():
     assert edit_paths == ["tests/existing_test.py"]
     assert reset_none is False
     plan = _build_plan(_EDIT_TICKET)
-    assert plan.declared_paths == plan.mutable_paths
     assert plan.edit_paths == ("tests/existing_test.py",)
 
 

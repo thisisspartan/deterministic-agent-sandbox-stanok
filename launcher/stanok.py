@@ -91,7 +91,7 @@ _INTERRUPTED_RC = 0
 # consumers (parse/quarantine/contract_lock/verify_gate) read from this object;
 # no consumer keeps a free-floating policy list. git is always ro. Neither the
 # container's rw MOUNTS nor the :ro protected set is a field: the mounts are
-# derived from mutable_paths by declared_carveout (T4/CC-135) and the :ro binds
+# derived from declared_paths by declared_carveout (T4/CC-135) and the :ro binds
 # from the same manifest the post-turn diff hashes (host_ro_paths/T4b), so no
 # list in the plan can drift from the ticket or go stale. (The T2 probe_specs
 # placeholder was dropped when T2 was burned — CC-131; protected_paths was
@@ -99,11 +99,10 @@ _INTERRUPTED_RC = 0
 @dataclasses.dataclass(frozen=True)
 class SessionPlan:
     declared_paths:  tuple[str, ...]  # ticket header: impl:/test:/docs:/edit:
-    mutable_paths:   tuple[str, ...]  # always == declared_paths (edit: paths included, CC-125)
     git_mode:        str = "ro"       # .git is always RO (I7, verified 2026-09-24)
     # CC-125: `edit:`-declared paths are MODIFIED IN PLACE, not created from
     # scratch — prepare_workspace must not quarantine them. They stay in
-    # declared_paths/mutable_paths (positive contract + contract_lock exemption).
+    # declared_paths (positive contract + contract_lock exemption).
     edit_paths:      tuple[str, ...] = ()
 
 
@@ -698,7 +697,7 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
     an undeclarable path raises ValueError (fail-closed, rc=13 upstream).
 
     Returns (declared_paths, edit_paths, reset_none); declared_paths is the
-    union (edit paths included), so mutable_paths/verify_gate are unchanged."""
+    union (edit paths included), so verify_gate is unchanged."""
     entries: list[tuple[str, str]] = []
     reset_none = False
     for line in ticket_text.splitlines():
@@ -1037,14 +1036,14 @@ def _check_contract_lock(before: dict[str, str], job: dict, turn: int,
     """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
     that was MODIFIED or DELETED is a contract_lock violation (replaces the
     chmod a-w freeze, W2.5). New files are allowed (a ticket may declare
-    several). A mutable path is exempt (runner-update ticket, P2; T1:
-    mutable_paths == declared_paths — behavior-identical to the old
-    scripts/run.sh exemption, since the manifest is snapshotted AFTER
-    quarantine and a mutable path is therefore never in the manifest)."""
+    several). A declared path is exempt (runner-update ticket, P2;
+    behavior-identical to the old scripts/run.sh exemption, since the
+    manifest is snapshotted AFTER quarantine and a declared path is
+    therefore never in the manifest)."""
     after = _tests_manifest()
     violations = []
     for rel, digest in before.items():
-        if rel in plan.mutable_paths:
+        if rel in plan.declared_paths:
             continue
         if rel not in after:
             violations.append(f"DELETED: {rel}")
@@ -1751,7 +1750,6 @@ def cmd_run(args) -> int:
     # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
     plan = SessionPlan(
         declared_paths=tuple(declared_paths),
-        mutable_paths=tuple(declared_paths),
         git_mode="ro",
         edit_paths=tuple(edit_paths),
     )
