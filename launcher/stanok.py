@@ -12,7 +12,9 @@ Full integration with the L1 Supervisor:
      TURN-TIMEOUT code (rc=1) without the process dying on CancelledError.
   6. Verifier-output compression: last-N raw tail, no pattern heuristics at
      all (REVIEW-KISS-CLI-FIRST §3.3; the last substring filter — CC-138).
-  7. Process Reaper: a single process group with guaranteed termination of all children.
+  7. Process cleanup: guaranteed at the container boundary via `docker stop -t 5`
+     (client processes spawned with start_new_session=True are outside the
+     host process group — the Reaper's os.killpg(0) does not reach them).
 """
 
 import argparse
@@ -165,13 +167,20 @@ def label_paths(label: str) -> tuple[str, str]:
     return (os.path.join(REPO_ROOT, "evidence", label), live)
 
 
-def _publish_evidence(label: str) -> None:
+def _publish_evidence(label: str, container_rc: int) -> None:
     """Copy the container-written verdict from the rw LOG_DIR/<label> into the
     host-owned evidence/<label> (CC-134).
 
     Called in run_sandboxed's finally AFTER docker stop — the container has no
     rw view of evidence/, so the host is the only publisher. Missing files are
-    skipped: an aborted launch publishes nothing rather than a fake verdict."""
+    skipped: an aborted launch publishes nothing rather than a fake verdict.
+
+    I5 fail-closed integrity check (REVIEW-ISOLATION-2026-09-28 §6.2): the
+    host's container_rc (docker exit code = the container-side launcher's
+    exit code = the real run rc) is ground truth. A summary.json that claims
+    PASS after a non-zero container exit, or whose rc field disagrees with
+    the container exit, is a forged verdict from the PASS->publish TOCTOU
+    window — force FAIL and record the violation."""
     src = os.path.join(LOG_DIR, label)
     files = ("summary.json", "launcher.stdout.log")
     if not any(os.path.isfile(os.path.join(src, f)) for f in files):
@@ -182,6 +191,30 @@ def _publish_evidence(label: str) -> None:
         s = os.path.join(src, name)
         if os.path.isfile(s):
             shutil.copyfile(s, os.path.join(dst, name))
+    sum_dst = os.path.join(dst, "summary.json")
+    if not os.path.isfile(sum_dst):
+        return
+    try:
+        with open(sum_dst, encoding="utf-8") as f:
+            summary = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(summary, dict):
+        return
+    violations = []
+    if container_rc != 0 and summary.get("verifier") == "PASS":
+        violations.append(
+            f"container exited rc={container_rc} but summary claims PASS")
+    if summary.get("rc") != container_rc:
+        violations.append(
+            f"summary rc={summary.get('rc')!r} != container rc={container_rc}")
+    if violations:
+        summary["verifier"] = "FAIL"
+        summary["integrity_violation"] = "; ".join(violations)
+        with open(sum_dst, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        log(f"INTEGRITY: {label}: forged verdict rejected: "
+            + "; ".join(violations))
 
 
 def _rotate_stale_summary(label: str) -> None:
@@ -1922,6 +1955,7 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
         ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args),
         rw_paths=rw_paths, ro_paths=ro_paths)
     log(f"SANDBOX: docker container {name}")
+    rc = 1  # bound before the try: a Popen failure must not NameError the finally
     try:
         proc = subprocess.Popen(argv, start_new_session=True)
         rc = proc.wait()
@@ -1933,7 +1967,7 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
         # read-only there); publish it to the host-owned evidence/<label> now
         # that the container is gone. BEFORE the marker removal, so the
         # supervisor never sees "not running" with the summary still missing.
-        _publish_evidence(args.label)
+        _publish_evidence(args.label, rc)
         try:
             os.remove(marker)
         except OSError:

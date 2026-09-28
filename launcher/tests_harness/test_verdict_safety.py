@@ -17,9 +17,14 @@ Pins the fail-closed verdict paths in launcher/stanok.py:
   7  verify_gate suite mode (D4/CC-149): ONE `test --all` call per turn —
      rc=0 pass / rc=1 a (suite) failure / rc=6 ENV-FAIL / rc=124 TIMEOUT /
      rc=2 (no suite mode) falls back to per-file spawns
+  8  _publish_evidence I5 integrity check: a summary claiming PASS after a
+     non-zero container exit, or with an rc field disagreeing with the
+     container exit, is rewritten to FAIL + integrity_violation; clean
+     summaries pass through untouched
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_verdict_safety.py -q
 """
+import json
 import sys
 from pathlib import Path
 
@@ -258,3 +263,68 @@ def test_verify_gate_suite_rc2_fallback_perfile(tmp_path, monkeypatch):
     assert env_fail is False
     assert any(name == "tests/t_test.py" for name, _ in failures)
     assert not any(name == "(suite)" for name, _ in failures)
+
+
+# --- 8: _publish_evidence I5 integrity check -----------------------------------
+
+def _publish_tree(tmp_path, label, summary):
+    """A host tree: LOG_DIR/<label> holds the container-written verdict,
+    REPO_ROOT/evidence is where the host publishes it."""
+    repo = tmp_path / "repo"
+    logdir = tmp_path / "logs"
+    live = logdir / label
+    live.mkdir(parents=True)
+    (live / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    (live / "launcher.stdout.log").write_text("log\n", encoding="utf-8")
+    return repo, logdir
+
+
+def _published(repo, label):
+    return json.loads(
+        (repo / "evidence" / label / "summary.json").read_text(encoding="utf-8"))
+
+
+def test_publish_evidence_forces_fail_on_forged_pass(tmp_path, monkeypatch):
+    # The I5 window: a surviving container child rewrites the verdict to
+    # PASS after the container exited non-zero. The host rc is ground truth.
+    repo, logdir = _publish_tree(tmp_path, "lbl", {"rc": 0, "verifier": "PASS"})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    monkeypatch.setattr(stanok, "LOG_DIR", str(logdir))
+    stanok._publish_evidence("lbl", 1)
+    dst = _published(repo, "lbl")
+    assert dst["verifier"] == "FAIL"
+    assert "integrity_violation" in dst
+    assert "claims PASS" in dst["integrity_violation"]
+
+
+def test_publish_evidence_forces_fail_on_rc_field_tamper(tmp_path, monkeypatch):
+    # rc field forged 1 -> 0 while the verifier stays FAIL: the verdict text
+    # is unchanged but the rc disagrees with the container exit.
+    repo, logdir = _publish_tree(tmp_path, "lbl", {"rc": 0, "verifier": "FAIL"})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    monkeypatch.setattr(stanok, "LOG_DIR", str(logdir))
+    stanok._publish_evidence("lbl", 1)
+    dst = _published(repo, "lbl")
+    assert dst["verifier"] == "FAIL"
+    assert "integrity_violation" in dst
+    assert "!= container rc=1" in dst["integrity_violation"]
+
+
+def test_publish_evidence_clean_pass_untouched(tmp_path, monkeypatch):
+    repo, logdir = _publish_tree(tmp_path, "lbl", {"rc": 0, "verifier": "PASS"})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    monkeypatch.setattr(stanok, "LOG_DIR", str(logdir))
+    stanok._publish_evidence("lbl", 0)
+    dst = _published(repo, "lbl")
+    assert dst == {"rc": 0, "verifier": "PASS"}
+    assert "integrity_violation" not in dst
+
+
+def test_publish_evidence_clean_fail_untouched(tmp_path, monkeypatch):
+    repo, logdir = _publish_tree(tmp_path, "lbl", {"rc": 1, "verifier": "FAIL"})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    monkeypatch.setattr(stanok, "LOG_DIR", str(logdir))
+    stanok._publish_evidence("lbl", 1)
+    dst = _published(repo, "lbl")
+    assert dst == {"rc": 1, "verifier": "FAIL"}
+    assert "integrity_violation" not in dst
