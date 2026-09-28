@@ -97,7 +97,7 @@ def test_publish_evidence_copies_the_verdict(tmp_path, monkeypatch):
     (container_dir / "launcher.stdout.log").write_text("log\n", encoding="utf-8")
     (container_dir / "session-x.jsonl").write_text("{}\n", encoding="utf-8")
 
-    stanok._publish_evidence("run1")
+    stanok._publish_evidence("run1", 0)
 
     published = repo / "evidence" / "run1"
     assert (published / "summary.json").read_text(encoding="utf-8") == '{"rc": 0}'
@@ -108,7 +108,7 @@ def test_publish_evidence_copies_the_verdict(tmp_path, monkeypatch):
 
 def test_publish_evidence_absent_is_a_noop(tmp_path, monkeypatch):
     repo, _ = _host_paths(tmp_path, monkeypatch)
-    stanok._publish_evidence("never-started")
+    stanok._publish_evidence("never-started", 0)
     assert not (repo / "evidence").exists()
 
 

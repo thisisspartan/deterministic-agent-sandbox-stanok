@@ -58,13 +58,15 @@
         "../evidence",
         "../hooks",
         "../launcher",
-        "../.claude"
+        "../.claude",
+        "/tmp/stanok-logs"
       ],
       "denyRead": [
         "../hooks",
         "../launcher",
         "../evidence",
-        "../.claude"
+        "../.claude",
+        "/tmp/stanok-logs"
       ]
     },
     "network": {
