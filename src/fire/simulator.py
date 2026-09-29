@@ -12,6 +12,10 @@ TASK-FIRE-03 adds a smoothly drifting target wind (``update_wind``) and a
 system of floating embers (``spawn_sparks``): rare very-hot particles that
 rise 2 rows per tick — faster than the main flame — creating the effect of
 embers shooting out of the fire.
+
+TASK-FIRE-11 adds a separate smoke grid (``smoke``): rare gray particles
+spawned just above the flame top (``spawn_smoke``) that rise one row per
+tick and fade (``update_smoke``). Smoke never touches the heat buffer.
 """
 
 from __future__ import annotations
@@ -70,6 +74,9 @@ class FireSimulation:
         self.target_wind: float = 0.0
         self._wind_phase: float = 0.0
         self._embers: List[Tuple[int, int, int]] = []  # (x, y, heat)
+        # TASK-FIRE-11: smoke grid, same size as the buffer. 0 = no smoke,
+        # > 0 = remaining life of the particle in that cell.
+        self.smoke: List[List[int]] = [[0] * width for _ in range(height)]
 
     def update_wind(self) -> None:
         """Drift the target wind smoothly within ``[-2, 2]``.
@@ -105,6 +112,51 @@ class FireSimulation:
             self.buffer[y][x] = heat
             self._embers.append((x, y, heat))
 
+    def update_smoke(self) -> None:
+        """Advance the smoke grid by one tick.
+
+        Every particle rises one row and loses one life: a cell with
+        ``life > 1`` and ``y > 0`` moves to ``(x, y - 1)`` with life
+        ``life - 1`` (the destination keeps the larger life if two
+        particles land there). A particle on row 0 or with ``life == 1``
+        vanishes.
+        """
+        new: List[List[int]] = [[0] * self.width for _ in range(self.height)]
+        for y in range(self.height):
+            for x in range(self.width):
+                life = self.smoke[y][x]
+                if life > 1 and y > 0:
+                    if life - 1 > new[y - 1][x]:
+                        new[y - 1][x] = life - 1
+        self.smoke = new
+
+    def spawn_smoke(self) -> None:
+        """Spawn one smoke particle above the flame (probability 0.5).
+
+        A random column ``x`` is picked; the spawn anchor is the
+        bottommost hot cell of that column (the largest ``y`` with
+        ``buffer[y][x] > 0``). If it exists and ``y > 0``, a particle with
+        life ``randint(8, 16)`` is placed one row above it, at
+        ``(x, y - 1)`` (the destination keeps the larger life). If the
+        column has no flame, no particle is spawned. The particle then
+        rises one row per tick, tracking just above the rising flame front
+        (so smoke keeps appearing above the flame even once the flame has
+        filled the buffer).
+        """
+        if self._rng.random() >= 0.5:
+            return
+        x = self._rng.randrange(self.width)
+        top = None
+        for y in range(self.height - 1, -1, -1):
+            if self.buffer[y][x] > 0:
+                top = y
+                break
+        if top is None or top == 0:
+            return
+        life = self._rng.randint(8, 16)
+        if life > self.smoke[top - 1][x]:
+            self.smoke[top - 1][x] = life
+
     def ignite_bottom(
         self, intensity_min: int = 200, intensity_max: int = 255
     ) -> None:
@@ -138,6 +190,11 @@ class FireSimulation:
         An ember that would rise above row 0 is removed from the ember
         list (it no longer re-heats row 0 on every tick); an ember that
         lands exactly on row 0 lives this tick and is removed on the next.
+
+        TASK-FIRE-11: at the end of the step, ``spawn_smoke()`` (a rare
+        particle above the flame top) and ``update_smoke()`` (rise one
+        row, lose one life) are called on the separate ``smoke`` grid;
+        the heat buffer is not affected by smoke.
         """
         if wind is None:
             wind = self.target_wind
@@ -167,3 +224,8 @@ class FireSimulation:
                     self.buffer[new_y][x] = heat
                 floated.append((x, new_y, heat))
             self._embers = floated
+        # TASK-FIRE-11: smoke is a separate grid — spawn a particle above
+        # the flame top, then let the smoke rise and fade. The heat buffer
+        # is not touched by smoke.
+        self.spawn_smoke()
+        self.update_smoke()

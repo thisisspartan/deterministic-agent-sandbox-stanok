@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import select
 import signal
 import sys
@@ -265,6 +266,11 @@ class FireApp:
         self._old_termios = None
         self._prev_sigint = None
         self._prev_sigwinch = None
+        # TASK-FIRE-11: per-frame global intensity factor, driven by the
+        # app's OWN PRNG (never ``sim._rng``) so the stub in cli_test.py
+        # stays valid.
+        self._flicker = 1.0
+        self._flicker_rng = random.Random(seed)
         self.handle_resize()
 
     # --- construction / dynamic resize ----------------------------------------
@@ -352,7 +358,9 @@ class FireApp:
 
         ``auto`` wind drifts the simulator's target wind; a static wind is
         passed to ``step`` directly. Every frame also spawns floating
-        embers (``spawn_sparks``) in both branches.
+        embers (``spawn_sparks``) in both branches. At the end of the
+        frame the per-frame flicker factor is recomputed from the app's
+        own PRNG (``self._flicker`` in ``[0.85, 1.15]``).
         """
         if self.wind == WIND_AUTO:
             self.sim.update_wind()
@@ -360,6 +368,9 @@ class FireApp:
         else:
             self.sim.step(wind=self.wind)
         self.sim.spawn_sparks()
+        # TASK-FIRE-11: per-frame global intensity in [0.85, 1.15], from
+        # the app's own PRNG (no new calls to self.sim).
+        self._flicker = 1.0 + self._flicker_rng.uniform(-0.15, 0.15)
 
     def advance(self, n: int) -> None:
         """Advance the simulation by ``n`` frames (``n`` calls to ``_step``)."""
@@ -367,8 +378,14 @@ class FireApp:
             self._step()
 
     def current_frame(self) -> str:
-        """The currently rendered frame as a string."""
-        return self.renderer.render(self.sim.buffer)
+        """The currently rendered frame as a string.
+
+        TASK-FIRE-11: rendered with the current per-frame ``flicker`` and
+        the simulator's ``smoke`` grid.
+        """
+        return self.renderer.render(
+            self.sim.buffer, flicker=self._flicker, smoke=self.sim.smoke
+        )
 
     def _poll_key(self) -> Optional[str]:
         """Non-blocking read of one key (``None`` if none is available)."""
@@ -399,7 +416,7 @@ class FireApp:
                 start = time.perf_counter()
                 self._step()
                 self.stream.write(CURSOR_HOME)
-                self.stream.write(self.renderer.render(self.sim.buffer))
+                self.stream.write(self.current_frame())
                 self.stream.flush()
                 elapsed = time.perf_counter() - start
                 self.sleep_frame(elapsed)

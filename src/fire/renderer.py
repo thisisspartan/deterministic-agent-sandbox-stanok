@@ -17,6 +17,13 @@ Realism effects (TASK-FIRE-10):
   order) so flat heat areas do not produce hard color steps;
 - **Flicker** — ``render(buffer, flicker)`` scales every cell value by
   ``flicker`` (clamped to ``[0, 255]``); ``1.0`` is a no-op.
+
+TASK-FIRE-11 adds **smoke**: ``render(buffer, flicker=1.0, smoke=None)``
+accepts a rectangular grid of ints ``>= 0`` of the same size as the
+buffer (or ``None``). After the flicker/jitter transforms, a cell with
+``smoke[y][x] > 0`` takes ``SMOKE_GRAY`` as its foreground and a cell
+with ``smoke[y + 1][x] > 0`` takes ``SMOKE_GRAY`` as its background
+(instead of the palette colors).
 """
 
 from __future__ import annotations
@@ -28,6 +35,9 @@ RGB = Tuple[int, int, int]
 
 HALF_BLOCK = "\u2580"  # ▀
 _RESET = "\033[0m"
+
+# TASK-FIRE-11: the gray color of a smoke particle (fg or bg override).
+SMOKE_GRAY: RGB = (60, 60, 65)
 
 
 def _validate_palette(palette) -> List[RGB]:
@@ -78,7 +88,12 @@ class FireRenderer:
         self.base_rows = base_rows
         self.jitter_seed = jitter_seed
 
-    def render(self, buffer: List[List[int]], flicker: float = 1.0) -> str:
+    def render(
+        self,
+        buffer: List[List[int]],
+        flicker: float = 1.0,
+        smoke: Optional[List[List[int]]] = None,
+    ) -> str:
         """Render the heat buffer into a frame of half-block lines.
 
         ``buffer`` must be a rectangular matrix of height ``2 * H`` (even)
@@ -87,6 +102,10 @@ class FireRenderer:
         code is emitted only when it differs from the previous pixel's
         (the terminal color state persists across the whole frame); the
         frame ends with a color reset (``\\033[0m``).
+
+        ``smoke`` (TASK-FIRE-11) is ``None`` or a rectangular grid of ints
+        ``>= 0`` of the same size as ``buffer``; a ``ValueError`` is
+        raised otherwise.
 
         Each cell value is transformed before the palette lookup, in order:
 
@@ -98,7 +117,11 @@ class FireRenderer:
            bottom, left to right) — same buffer => same frame;
         3. palette selection: buffer row ``y`` (and ``y + 1`` for bg) is
            taken from ``blue_palette`` if ``y >= height - base_rows``, else
-           from ``palette``.
+           from ``palette``;
+        4. smoke override: if ``smoke`` is given, ``smoke[y][x] > 0``
+           replaces the foreground with ``SMOKE_GRAY`` and
+           ``smoke[y + 1][x] > 0`` replaces the background with
+           ``SMOKE_GRAY``.
         """
         if not isinstance(flicker, (int, float)) or flicker <= 0:
             raise ValueError("flicker must be a number > 0")
@@ -118,6 +141,20 @@ class FireRenderer:
                     raise ValueError(
                         f"buffer value {value!r} outside [0..{max_value}]"
                     )
+        if smoke is not None:
+            if not isinstance(smoke, (list, tuple)):
+                raise ValueError("smoke must be a list of rows or None")
+            for row in smoke:
+                if not isinstance(row, (list, tuple)) or len(row) != width:
+                    raise ValueError("smoke must be rectangular like buffer")
+            if len(smoke) != height:
+                raise ValueError("smoke must have the same size as buffer")
+            for row in smoke:
+                for value in row:
+                    if not isinstance(value, int) or value < 0:
+                        raise ValueError(
+                            f"smoke value {value!r} must be an int >= 0"
+                        )
 
         # Per-cell transforms: flicker, then jitter (row-major order).
         rng = (
@@ -149,6 +186,12 @@ class FireRenderer:
             for x in range(width):
                 fg = fg_palette[top[x]]
                 bg = bg_palette[bottom[x]]
+                # TASK-FIRE-11: smoke overrides the palette colors.
+                if smoke is not None:
+                    if smoke[y][x] > 0:
+                        fg = SMOKE_GRAY
+                    if smoke[y + 1][x] > 0:
+                        bg = SMOKE_GRAY
                 if fg != cur_fg:
                     parts.append(f"\033[38;2;{fg[0]};{fg[1]};{fg[2]}m")
                     cur_fg = fg
