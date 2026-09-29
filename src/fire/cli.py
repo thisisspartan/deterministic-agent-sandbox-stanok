@@ -14,7 +14,18 @@ CLI arguments (``argparse``):
 
 - ``--fps``: target frames per second, ``1..60`` (default ``30``);
 - ``--palette``: ``fire`` or ``blue`` (default ``fire``);
-- ``--wind``: static wind ``-3..3`` or ``auto`` (default ``auto``).
+- ``--wind``: static wind ``-3..3`` or ``auto`` (default ``auto``);
+- ``--seed``: PRNG seed for the simulator (deterministic frames);
+- ``--width`` / ``--height``: override the terminal size (``>= 1``);
+- ``--frame N``: render exactly frame N and exit (``>= 0``);
+- ``--frames N``: render N frames (0..N-1) and exit (``>= 0``);
+  ``--frame`` and ``--frames`` are mutually exclusive.
+
+Headless entry point (TASK-FIRE-09): ``main(argv=None, stream=None)``
+parses the CLI, renders deterministically and returns the exit code.
+Without ``--frame``/``--frames`` and with a non-TTY stdin exactly one
+frame (frame 0) is written to the stream; on a TTY the interactive
+animation runs. ``python3 -m fire`` is supported via ``fire/__main__.py``.
 """
 
 from __future__ import annotations
@@ -92,6 +103,32 @@ def _wind(value: str) -> Union[int, str]:
     return wind
 
 
+def _non_negative_int(value: str) -> int:
+    """argparse type: integer ``>= 0``."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"must be a non-negative integer, got {value!r}"
+        )
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
+    return n
+
+
+def _positive_int(value: str) -> int:
+    """argparse type: integer ``>= 1``."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer, got {value!r}"
+        )
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -127,6 +164,42 @@ def build_parser() -> argparse.ArgumentParser:
             f"(default: auto)"
         ),
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="N",
+        help="PRNG seed for the simulator (deterministic frames)",
+    )
+    parser.add_argument(
+        "--width",
+        type=_positive_int,
+        default=None,
+        metavar="W",
+        help="override the terminal width (>= 1)",
+    )
+    parser.add_argument(
+        "--height",
+        type=_positive_int,
+        default=None,
+        metavar="H",
+        help="override the terminal height (>= 1)",
+    )
+    frame_group = parser.add_mutually_exclusive_group()
+    frame_group.add_argument(
+        "--frame",
+        type=_non_negative_int,
+        default=None,
+        metavar="N",
+        help="render exactly frame N and exit with code 0",
+    )
+    frame_group.add_argument(
+        "--frames",
+        type=_non_negative_int,
+        default=None,
+        metavar="N",
+        help="render N frames (0..N-1) and exit with code 0",
+    )
     return parser
 
 
@@ -153,7 +226,10 @@ class FireApp:
     ``fps`` is the target frame rate (``1..60``); ``palette_name`` is
     ``fire`` or ``blue``; ``wind`` is ``auto`` or a static integer in
     ``[-3, 3]``. ``stream`` is the writable output (defaults to
-    ``sys.stdout``) — injectable for testing.
+    ``sys.stdout``) — injectable for testing. ``seed`` (``None`` or an
+    int) seeds the simulator's PRNG for deterministic frames;
+    ``width``/``height`` (``None`` or ``>= 1``) override the terminal
+    size instead of ``shutil.get_terminal_size``.
     """
 
     def __init__(
@@ -162,6 +238,9 @@ class FireApp:
         palette_name: str = "fire",
         wind: Union[int, str] = WIND_AUTO,
         stream=None,
+        seed: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
     ) -> None:
         if not isinstance(fps, int) or not MIN_FPS <= fps <= MAX_FPS:
             raise ValueError(f"fps must be an int in [{MIN_FPS}..{MAX_FPS}]")
@@ -175,6 +254,9 @@ class FireApp:
         self.palette_name = palette_name
         self.wind = wind
         self.stream = stream if stream is not None else sys.stdout
+        self.seed = seed
+        self._width = width
+        self._height = height
         self._resize_requested = False
         self._running = True
         self._old_termios = None
@@ -187,21 +269,25 @@ class FireApp:
     def handle_resize(self) -> None:
         """Recreate the simulator and its buffer for the current size.
 
-        The terminal size is read with ``shutil.get_terminal_size``; the
-        heat buffer is ``2 * lines`` rows tall so that the half-block
-        renderer produces exactly ``lines`` terminal rows. The fresh
-        simulator is re-ignited at the fuel line.
+        The terminal size is read with ``shutil.get_terminal_size``
+        unless ``width``/``height`` were given to the constructor
+        (a non-``None`` override wins); the heat buffer is ``2 * lines``
+        rows tall so that the half-block renderer produces exactly
+        ``lines`` terminal rows. The fresh simulator is re-ignited at
+        the fuel line with the constructor's ``seed``.
         """
         size = get_terminal_size()
-        width = max(1, size.columns)
-        height = max(1, size.lines)
+        width = self._width if self._width is not None else size.columns
+        height = self._height if self._height is not None else size.lines
+        width = max(1, width)
+        height = max(1, height)
         self.width = width
         self.height = height
         if self.palette_name == "fire":
             palette = generate_fire_palette()
         else:
             palette = generate_blue_fire_palette()
-        self.sim = FireSimulation(width=width, height=2 * height)
+        self.sim = FireSimulation(width=width, height=2 * height, seed=self.seed)
         self.sim.ignite_bottom()
         self.renderer = FireRenderer(palette)
 
@@ -267,6 +353,15 @@ class FireApp:
             self.sim.step(wind=self.wind)
         self.sim.spawn_sparks()
 
+    def advance(self, n: int) -> None:
+        """Advance the simulation by ``n`` frames (``n`` calls to ``_step``)."""
+        for _ in range(n):
+            self._step()
+
+    def current_frame(self) -> str:
+        """The currently rendered frame as a string."""
+        return self.renderer.render(self.sim.buffer)
+
     def _poll_key(self) -> Optional[str]:
         """Non-blocking read of one key (``None`` if none is available)."""
         try:
@@ -310,3 +405,54 @@ class FireApp:
             self._restore_termios()
             exit_fullscreen(self.stream)
             self._restore_signal_handlers()
+
+
+def main(argv: Optional[List[str]] = None, stream=None) -> int:
+    """Headless-capable CLI entry point (TASK-FIRE-09).
+
+    Parses ``argv`` (``None`` -> ``sys.argv[1:]``) with
+    ``build_parser()``, constructs a ``FireApp`` and:
+
+    - ``--frame N``: advance N frames, write the rendered frame to
+      ``stream``, return 0;
+    - else ``--frames N``: N times write ``current_frame() + "\\n"``
+      (frames 0..N-1) then advance one frame, return 0;
+    - else if stdin is NOT a TTY: write one frame (frame 0) to
+      ``stream``, return 0;
+    - else (interactive TTY): run the animation, return 0.
+
+    ``--frame``/``--frames`` take priority over the TTY check.
+    ``stream`` defaults to ``sys.stdout``.
+    """
+    args = build_parser().parse_args(argv)
+    out = stream if stream is not None else sys.stdout
+    app = FireApp(
+        fps=args.fps,
+        palette_name=args.palette,
+        wind=args.wind,
+        stream=out,
+        seed=args.seed,
+        width=args.width,
+        height=args.height,
+    )
+    if args.frame is not None:
+        app.advance(args.frame)
+        out.write(app.current_frame())
+        out.flush()
+        return 0
+    if args.frames is not None:
+        for _ in range(args.frames):
+            out.write(app.current_frame() + "\n")
+            app.advance(1)
+        out.flush()
+        return 0
+    if not sys.stdin.isatty():
+        out.write(app.current_frame())
+        out.flush()
+        return 0
+    app.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
