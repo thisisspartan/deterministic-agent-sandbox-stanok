@@ -257,13 +257,15 @@ class FireApp:
         """Advance the simulation by one frame.
 
         ``auto`` wind drifts the simulator's target wind; a static wind is
-        passed to ``step`` directly.
+        passed to ``step`` directly. Every frame also spawns floating
+        embers (``spawn_sparks``) in both branches.
         """
         if self.wind == WIND_AUTO:
             self.sim.update_wind()
             self.sim.step()
         else:
             self.sim.step(wind=self.wind)
+        self.sim.spawn_sparks()
 
     def _poll_key(self) -> Optional[str]:
         """Non-blocking read of one key (``None`` if none is available)."""

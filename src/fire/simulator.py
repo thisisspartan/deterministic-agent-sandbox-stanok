@@ -129,6 +129,9 @@ class FireSimulation:
         (rounded to an integer) is used. After the main propagation, the
         floating embers rise ``_EMBER_RISE`` rows (2 per tick — faster than
         the flame's 1 row), so rare hot particles shoot up above the flame.
+        An ember that would rise above row 0 is removed from the ember
+        list (it no longer re-heats row 0 on every tick); an ember that
+        lands exactly on row 0 lives this tick and is removed on the next.
         """
         if wind is None:
             wind = self.target_wind
@@ -144,13 +147,16 @@ class FireSimulation:
                     dst_x = self.width - 1
                 heat = src_row[x] - random.randint(self.decay_min, self.decay_max)
                 dst_row[dst_x] = heat if heat > 0 else 0
-        # TASK-FIRE-03: float the embers upward, 2 rows per tick.
+        # TASK-FIRE-03: float the embers upward, 2 rows per tick. An ember
+        # that would rise above row 0 (new_y < 0) is REMOVED — it must not
+        # be clamped to row 0 and re-heat it on every tick. An ember that
+        # lands exactly on row 0 lives this tick and is removed next.
         if self._embers:
             floated: List[Tuple[int, int, int]] = []
             for x, y, heat in self._embers:
                 new_y = y - _EMBER_RISE
                 if new_y < 0:
-                    new_y = 0
+                    continue
                 if heat > self.buffer[new_y][x]:
                     self.buffer[new_y][x] = heat
                 floated.append((x, new_y, heat))

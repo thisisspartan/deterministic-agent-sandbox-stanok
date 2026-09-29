@@ -187,3 +187,38 @@ def test_sparks_rise_faster_than_flame():
     sim.step()
     target_row = spark_row - 2
     assert any(v >= 250 for v in sim.buffer[target_row])
+
+
+# --- TASK-FIRE-07: embers must exit at the top edge, not stick on row 0 ----
+
+
+def test_ember_removed_when_above_top():
+    # An ember that would rise above row 0 (new_y < 0) is REMOVED from the
+    # ember list — it must not be clamped to row 0 and re-heat it forever.
+    sim = FireSimulation(width=20, height=10)
+    sim._embers = [(5, 1, 255)]
+    sim.step()
+    assert sim._embers == []
+
+
+def test_ember_lands_on_row0_then_removed():
+    # An ember landing exactly on row 0 lives this tick (and heats the cell),
+    # then is removed on the next tick.
+    sim = FireSimulation(width=20, height=10)
+    sim._embers = [(5, 2, 255)]
+    sim.step()
+    assert (5, 0, 255) in sim._embers
+    assert sim.buffer[0][5] == 255
+    sim.step()
+    assert sim._embers == []
+
+
+def test_all_embers_exit_from_top():
+    # Embers start in rows height-2/height-3 and rise 2 rows per tick, so
+    # every one of them must have exited above the top within 10 ticks.
+    random.seed(77)
+    sim = FireSimulation(width=20, height=10)
+    sim.spawn_sparks(count=5)
+    for _ in range(10):
+        sim.step()
+    assert sim._embers == []
