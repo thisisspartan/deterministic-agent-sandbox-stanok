@@ -50,6 +50,7 @@ class FireSimulation:
         height: int,
         decay_min: int = 1,
         decay_max: int = 4,
+        seed: Optional[int] = None,
     ) -> None:
         if width < 1 or height < 1:
             raise ValueError("width and height must be >= 1")
@@ -59,6 +60,11 @@ class FireSimulation:
         self.height = height
         self.decay_min = decay_min
         self.decay_max = decay_max
+        # TASK-FIRE-08: per-instance PRNG. seed=None -> system entropy
+        # (the previous non-deterministic behavior); seed=N -> a
+        # deterministic sequence, so identical runs produce identical
+        # frames.
+        self._rng = random.Random(seed)
         self.buffer: List[List[int]] = [[0] * width for _ in range(height)]
         # TASK-FIRE-03: wind state and floating embers.
         self.target_wind: float = 0.0
@@ -73,7 +79,7 @@ class FireSimulation:
         always stays inside ``[-2, 2]``: negative blows left, positive
         blows right.
         """
-        self._wind_phase += random.uniform(0.05, 0.2)
+        self._wind_phase += self._rng.uniform(0.05, 0.2)
         self.target_wind = _WIND_AMPLITUDE * math.sin(self._wind_phase)
 
     def spawn_sparks(self, count: int = 3) -> None:
@@ -93,9 +99,9 @@ class FireSimulation:
         if not candidate_rows:
             return
         for _ in range(count):
-            y = random.choice(candidate_rows)
-            x = random.randrange(self.width)
-            heat = random.randint(_EMBER_MIN_HEAT, _EMBER_MAX_HEAT)
+            y = self._rng.choice(candidate_rows)
+            x = self._rng.randrange(self.width)
+            heat = self._rng.randint(_EMBER_MIN_HEAT, _EMBER_MAX_HEAT)
             self.buffer[y][x] = heat
             self._embers.append((x, y, heat))
 
@@ -110,10 +116,10 @@ class FireSimulation:
         """
         bottom = self.buffer[-1]
         for x in range(self.width):
-            if random.random() < _GAP_PROBABILITY:
+            if self._rng.random() < _GAP_PROBABILITY:
                 bottom[x] = 0
             else:
-                bottom[x] = random.randint(intensity_min, intensity_max)
+                bottom[x] = self._rng.randint(intensity_min, intensity_max)
 
     def step(self, wind: Optional[float] = None) -> None:
         """Advance the simulation by one frame.
@@ -140,12 +146,12 @@ class FireSimulation:
             src_row = self.buffer[y + 1]
             dst_row = self.buffer[y]
             for x in range(self.width):
-                dst_x = x - wind + random.choice((-1, 0, 1))
+                dst_x = x - wind + self._rng.choice((-1, 0, 1))
                 if dst_x < 0:
                     dst_x = 0
                 elif dst_x >= self.width:
                     dst_x = self.width - 1
-                heat = src_row[x] - random.randint(self.decay_min, self.decay_max)
+                heat = src_row[x] - self._rng.randint(self.decay_min, self.decay_max)
                 dst_row[dst_x] = heat if heat > 0 else 0
         # TASK-FIRE-03: float the embers upward, 2 rows per tick. An ember
         # that would rise above row 0 (new_y < 0) is REMOVED — it must not
