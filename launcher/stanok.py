@@ -70,7 +70,9 @@ API_TIMEOUT_MS = str(int(API_TIMEOUT_S * 1000))
 # Native Bash replaces the old MCP `run` tool (Docker refactor): the model
 # runs `bash scripts/run.sh {list,test,smoke}` directly; the boundary is the
 # container, not a per-command allowlist.
-CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+# AUDIT #2 experiment (temporary): WebFetch added to probe whether the curated
+# set over-blocks. Revert after the run.
+CURATED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebFetch"]
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 # The ONE kind list for a ticket header (CC-132). `scripts` is a ZONE, not a
