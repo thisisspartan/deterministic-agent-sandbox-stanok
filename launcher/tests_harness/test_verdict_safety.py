@@ -58,7 +58,7 @@ def test_declared_path_traversal_rejected():
 
 def _empty_plan():
     return stanok.SessionPlan(
-        declared_paths=(), mutable_paths=(),
+        declared_paths=(),
     )
 
 
@@ -328,3 +328,31 @@ def test_publish_evidence_clean_fail_untouched(tmp_path, monkeypatch):
     dst = _published(repo, "lbl")
     assert dst == {"rc": 1, "verifier": "FAIL"}
     assert "integrity_violation" not in dst
+
+
+def test_publish_evidence_noop_pass_untouched(tmp_path, monkeypatch):
+    # A NO-OP run intentionally returns rc=1 with verifier=PASS (the machine
+    # did no work; the artifacts pre-existed and the verifier really passed).
+    # The I5 "claims PASS" check must not fire on that intentional combination.
+    repo, logdir = _publish_tree(tmp_path, "lbl", {
+        "rc": 1, "verifier": "PASS", "probe_result": "NO-OP-PASS"})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    monkeypatch.setattr(stanok, "LOG_DIR", str(logdir))
+    stanok._publish_evidence("lbl", 1)
+    dst = _published(repo, "lbl")
+    assert dst["verifier"] == "PASS"
+    assert "integrity_violation" not in dst
+
+
+def test_publish_evidence_noop_rc_tamper_still_caught(tmp_path, monkeypatch):
+    # The rc-field consistency check still applies to a NO-OP: a forged rc
+    # field (summary rc=0 while the container exited 1) is still a violation.
+    repo, logdir = _publish_tree(tmp_path, "lbl", {
+        "rc": 0, "verifier": "PASS", "probe_result": "NO-OP-PASS"})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    monkeypatch.setattr(stanok, "LOG_DIR", str(logdir))
+    stanok._publish_evidence("lbl", 1)
+    dst = _published(repo, "lbl")
+    assert dst["verifier"] == "FAIL"
+    assert "integrity_violation" in dst
+    assert "!= container rc=1" in dst["integrity_violation"]
