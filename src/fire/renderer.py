@@ -5,16 +5,45 @@ cell in the Foreground color (``\\033[38;2;R;G;Bm``) and the lower half in
 the Background color (``\\033[48;2;R;G;Bm``). A heat buffer of height
 ``2 * H`` therefore renders into ``H`` terminal lines with vertical
 resolution ``2 * H``.
+
+Realism effects (TASK-FIRE-10):
+
+- **Blue combustion base** — the ``base_rows`` bottom buffer rows (counted
+  from the last) are indexed into ``blue_palette`` (the gas palette)
+  instead of ``palette``;
+- **Anti-banding jitter** — when ``jitter_seed`` is not ``None``, each cell
+  value gets a deterministic ``{-1, 0, 1}`` perturbation (a fresh
+  ``random.Random(jitter_seed)`` per ``render()`` call, consumed in row-major
+  order) so flat heat areas do not produce hard color steps;
+- **Flicker** — ``render(buffer, flicker)`` scales every cell value by
+  ``flicker`` (clamped to ``[0, 255]``); ``1.0`` is a no-op.
 """
 
 from __future__ import annotations
 
+import random
 from typing import List, Optional, Tuple
 
 RGB = Tuple[int, int, int]
 
 HALF_BLOCK = "\u2580"  # ▀
 _RESET = "\033[0m"
+
+
+def _validate_palette(palette) -> List[RGB]:
+    """Validate a palette and return it as a list of ``(r, g, b)`` tuples."""
+    if not isinstance(palette, (list, tuple)) or not palette:
+        raise ValueError("palette must be a non-empty list of (r, g, b) tuples")
+    for entry in palette:
+        if (
+            not isinstance(entry, (tuple, list))
+            or len(entry) != 3
+            or any(not isinstance(c, int) or not 0 <= c <= 255 for c in entry)
+        ):
+            raise ValueError(
+                "palette entries must be (r, g, b) tuples of ints in [0..255]"
+            )
+    return [tuple(entry) for entry in palette]
 
 
 class FireRenderer:
@@ -24,23 +53,32 @@ class FireRenderer:
     ``[0..255]``); buffer values index into it: the upper half of a cell
     takes ``palette[buffer[y][x]]`` as foreground, the lower half takes
     ``palette[buffer[y + 1][x]]`` as background.
+
+    ``blue_palette`` (same validation as ``palette``) or ``None``: when
+    given, the ``base_rows`` bottom buffer rows (counted from the last) are
+    indexed into it instead of ``palette`` (the blue combustion base).
+    ``base_rows`` must be an int ``>= 0``; ``0`` or ``blue_palette=None``
+    disables the effect. ``jitter_seed`` (int or ``None``) enables the
+    deterministic anti-banding jitter when not ``None``.
     """
 
-    def __init__(self, palette: List[RGB]) -> None:
-        if not isinstance(palette, (list, tuple)) or not palette:
-            raise ValueError("palette must be a non-empty list of (r, g, b) tuples")
-        for entry in palette:
-            if (
-                not isinstance(entry, (tuple, list))
-                or len(entry) != 3
-                or any(not isinstance(c, int) or not 0 <= c <= 255 for c in entry)
-            ):
-                raise ValueError(
-                    "palette entries must be (r, g, b) tuples of ints in [0..255]"
-                )
-        self.palette: List[RGB] = [tuple(entry) for entry in palette]
+    def __init__(
+        self,
+        palette: List[RGB],
+        blue_palette: Optional[List[RGB]] = None,
+        base_rows: int = 0,
+        jitter_seed: Optional[int] = None,
+    ) -> None:
+        self.palette: List[RGB] = _validate_palette(palette)
+        self.blue_palette: Optional[List[RGB]] = (
+            _validate_palette(blue_palette) if blue_palette is not None else None
+        )
+        if not isinstance(base_rows, int) or base_rows < 0:
+            raise ValueError("base_rows must be an int >= 0")
+        self.base_rows = base_rows
+        self.jitter_seed = jitter_seed
 
-    def render(self, buffer: List[List[int]]) -> str:
+    def render(self, buffer: List[List[int]], flicker: float = 1.0) -> str:
         """Render the heat buffer into a frame of half-block lines.
 
         ``buffer`` must be a rectangular matrix of height ``2 * H`` (even)
@@ -49,7 +87,21 @@ class FireRenderer:
         code is emitted only when it differs from the previous pixel's
         (the terminal color state persists across the whole frame); the
         frame ends with a color reset (``\\033[0m``).
+
+        Each cell value is transformed before the palette lookup, in order:
+
+        1. ``flicker`` (a number ``> 0``): ``value = clamp(round(value *
+           flicker), 0, 255)``; ``1.0`` is a no-op;
+        2. jitter (when ``jitter_seed is not None``): add ``{-1, 0, 1}``,
+           clamped to ``[0, 255]``; a fresh ``random.Random(jitter_seed)`` is
+           created per call and consumed in row-major order (rows top to
+           bottom, left to right) — same buffer => same frame;
+        3. palette selection: buffer row ``y`` (and ``y + 1`` for bg) is
+           taken from ``blue_palette`` if ``y >= height - base_rows``, else
+           from ``palette``.
         """
+        if not isinstance(flicker, (int, float)) or flicker <= 0:
+            raise ValueError("flicker must be a number > 0")
         if not isinstance(buffer, (list, tuple)):
             raise ValueError("buffer must be a list of rows")
         width = len(buffer[0]) if buffer else 0
@@ -67,15 +119,36 @@ class FireRenderer:
                         f"buffer value {value!r} outside [0..{max_value}]"
                     )
 
+        # Per-cell transforms: flicker, then jitter (row-major order).
+        rng = (
+            random.Random(self.jitter_seed) if self.jitter_seed is not None else None
+        )
+        values: List[List[int]] = []
+        for y in range(height):
+            row_values: List[int] = []
+            for x in range(width):
+                value = min(255, max(0, round(buffer[y][x] * flicker)))
+                if rng is not None:
+                    value = min(255, max(0, value + rng.choice((-1, 0, 1))))
+                row_values.append(value)
+            values.append(row_values)
+
+        # Blue combustion base: the bottom ``base_rows`` buffer rows index
+        # ``blue_palette`` (disabled when ``blue_palette`` is ``None``).
+        blue_from = (
+            height - self.base_rows if self.blue_palette is not None else height
+        )
         parts: List[str] = []
         cur_fg: Optional[RGB] = None
         cur_bg: Optional[RGB] = None
         for y in range(0, height, 2):
-            top = buffer[y]
-            bottom = buffer[y + 1]
+            top = values[y]
+            bottom = values[y + 1]
+            fg_palette = self.blue_palette if y >= blue_from else self.palette
+            bg_palette = self.blue_palette if (y + 1) >= blue_from else self.palette
             for x in range(width):
-                fg = self.palette[top[x]]
-                bg = self.palette[bottom[x]]
+                fg = fg_palette[top[x]]
+                bg = bg_palette[bottom[x]]
                 if fg != cur_fg:
                     parts.append(f"\033[38;2;{fg[0]};{fg[1]};{fg[2]}m")
                     cur_fg = fg

@@ -68,6 +68,9 @@ WIND_MIN = -3
 WIND_MAX = 3
 WIND_AUTO = "auto"
 PALETTES = ("fire", "blue")
+# Blue combustion base: the number of BOTTOM heat-buffer rows (2 buffer
+# rows = 1 terminal line) rendered with the blue (gas) palette.
+BASE_ROWS = 4
 
 
 def _fps(value: str) -> int:
@@ -289,7 +292,12 @@ class FireApp:
             palette = generate_blue_fire_palette()
         self.sim = FireSimulation(width=width, height=2 * height, seed=self.seed)
         self.sim.ignite_bottom()
-        self.renderer = FireRenderer(palette)
+        self.renderer = FireRenderer(
+            palette,
+            blue_palette=generate_blue_fire_palette(),
+            base_rows=BASE_ROWS,
+            jitter_seed=self.seed,
+        )
 
     # --- signals -----------------------------------------------------------------
 
