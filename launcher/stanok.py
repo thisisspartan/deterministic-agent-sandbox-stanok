@@ -219,7 +219,13 @@ def _publish_evidence(label: str, container_rc: int) -> None:
         violations.append(
             f"summary rc={summary.get('rc')!r} != container rc={container_rc}")
     if violations:
+        # A forged verdict must not leave any PASS-shaped field behind:
+        # override the whole verdict, not just the verifier flag.
         summary["verifier"] = "FAIL"
+        summary["rc"] = container_rc
+        summary["c5"] = "FAIL"
+        summary["review_verdict"] = "FAIL"
+        summary["probe_result"] = "INTEGRITY-FAIL"
         summary["integrity_violation"] = "; ".join(violations)
         with open(sum_dst, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
@@ -1953,6 +1959,15 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
     with open(marker, "w", encoding="utf-8") as f:
         f.write(f"{int(time.time())} {os.getpid()}\n")
 
+    # Isolate this process into its own group BEFORE installing the
+    # handlers: the handler's killpg(0) must hit this run's group, not
+    # the caller's (same guard as cmd_run).
+    try:
+        if os.getpgid(0) != os.getpid():
+            os.setpgid(0, 0)
+    except OSError:
+        pass
+
     _install_signal_handlers()
     image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
     # The container runs the IMAGE's system python (the SDK is baked in);
@@ -2096,10 +2111,21 @@ def main() -> int:
         def early_abort(rc: int, err_msg: str) -> int:
             log(err_msg)
             if os.path.exists(marker):
+                # A live run's marker must survive an early abort of a
+                # concurrent launch attempt: remove it only when the
+                # recorded process is dead (or the marker is unparseable).
+                live = False
                 try:
-                    os.remove(marker)
-                except OSError:
+                    with open(marker, encoding="utf-8") as f:
+                        pid = int(f.read().split()[-1])
+                    live = _pid_alive(pid)
+                except (OSError, ValueError):
                     pass
+                if not live:
+                    try:
+                        os.remove(marker)
+                    except OSError:
+                        pass
             os.makedirs(evidence_dir, exist_ok=True)
             sum_path = os.path.join(evidence_dir, "summary.json")
             if not os.path.exists(sum_path):
