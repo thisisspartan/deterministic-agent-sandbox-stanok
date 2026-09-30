@@ -454,12 +454,21 @@ def sandbox_config_gate() -> list[str]:
     return problems
 
 
+# Safety margin between the server's live n_ctx and the derived required
+# window when STANOK_REQUIRED_WINDOW is not set (preflight_server).
+REQUIRED_WINDOW_MARGIN = 2000
+
+
 def _required_context_window() -> int | None:
     """Required context window, from the env only: STANOK_REQUIRED_WINDOW
     (exported by P0-launch.sh). cli.js likewise reads
     CLAUDE_CODE_AUTO_COMPACT_WINDOW from env (rQ); there is no settings source —
     the former .claude/settings.stanok.json fallback read a key that no longer
-    exists (CC-127)."""
+    exists (CC-127). When the env var is unset, preflight_server derives the
+    required window from the live server (n_ctx - REQUIRED_WINDOW_MARGIN)
+    instead of skipping the check — a stale env number must not be the only
+    thing standing between a healthy server and rc=20 (incident
+    smoke-cc183-retry1: env 128000 vs server n_ctx 125184)."""
     env_val = os.environ.get("STANOK_REQUIRED_WINDOW")
     if env_val:
         try:
@@ -483,26 +492,39 @@ def context_rot_threshold() -> int:
     return int(window * 0.8)
 
 
-def preflight_server() -> bool:
-    if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
-        return True
+def _fetch_server_props() -> dict | None:
+    """GET {SERVER_URL}/props (no proxy, 5 s timeout). None on any failure."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(urllib.request.Request(f"{SERVER_URL}/props"), timeout=5) as resp:
-            props = json.loads(resp.read().decode("utf-8", errors="replace"))
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
     except Exception as e:
         log(f"SERVER UNAVAILABLE ({SERVER_URL}: {type(e).__name__}) (rc=20)")
-        return False
+        return None
 
-    required = _required_context_window()
-    if required is None:
-        log("PREFLIGHT: server reachable, no required window configured — OK")
+
+def preflight_server() -> bool:
+    if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
         return True
+    props = _fetch_server_props()
+    if props is None:
+        return False
 
     n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
     if not isinstance(n_ctx, int) or n_ctx <= 0:
         log(f"PREFLIGHT: unparseable n_ctx in /props (fail-closed) (rc=20)")
         return False
+
+    required = _required_context_window()
+    if required is None:
+        # No hard window in env — derive it from the live server so the check
+        # tracks the actual n_ctx instead of a possibly stale env number.
+        required = n_ctx - REQUIRED_WINDOW_MARGIN
+        if required <= 0:
+            log(f"PREFLIGHT: server n_ctx={n_ctx} <= margin {REQUIRED_WINDOW_MARGIN} (fail-closed) (rc=20)")
+            return False
+        log(f"PREFLIGHT: STANOK_REQUIRED_WINDOW unset — derived required window "
+            f"{required} (n_ctx {n_ctx} - margin {REQUIRED_WINDOW_MARGIN})")
     if n_ctx < required:
         log(f"PREFLIGHT: server n_ctx={n_ctx} < required window {required} (rc=20)")
         return False
