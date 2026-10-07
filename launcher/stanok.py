@@ -682,7 +682,7 @@ def _validate_declared_path(rel: str) -> bool:
     return declared_carveout(rel) is not None
 
 
-def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
+def host_ro_paths(rw_paths: tuple) -> tuple[str, ...]:
     """The pre-existing contract files to re-bind `:ro` ON TOP of a rw carve-out
     (T4b, CC-136).
 
@@ -694,14 +694,17 @@ def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
     binding the protected files :ro restores immutability natively — this is the
     FIRST echelon; the post-turn manifest diff (T5/CC-137) is the second.
 
-    Two exclusions: a file outside every carve-out needs no bind (the repo `:ro`
-    mount already covers it), and a DECLARED path is never bound (`edit:` on an
-    existing test is exactly the case that must stay writable)."""
-    declared_set = set(declared)
+    One exclusion: a file outside every carve-out needs no bind (the repo
+    `:ro` mount already covers it).
+
+    CC-206: every protected file under a carve-out is ALWAYS bound :ro — the
+    former declared-path exemption is gone. A declared
+    path is never protected because the gate
+    (`assert_edit_paths_are_not_protected`, rc=13) refuses `edit:` on a
+    protected path before the container starts; the mount layer does not trust
+    the declaration either way."""
     ro: list[str] = []
     for rel in _protected_files():
-        if rel in declared_set:
-            continue
         if not any(rel == carve or rel.startswith(carve + "/")
                    for carve in rw_paths):
             continue
@@ -728,9 +731,11 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
     `#` title lines and blank lines are skipped inside the header block; the
     first other line ends it (a path mentioned in the body is never matched).
 
-    `edit:` marks a path that the ticket MODIFIES IN PLACE (typically an
-    existing test whose contract changes) — it is declared like any other path
-    but is NOT quarantined (CC-125). Paths are validated against the
+    `edit:` marks a path that the ticket MODIFIES IN PLACE — it is declared
+    like any other path but is NOT quarantined (CC-125). CC-206: `edit:` on a
+    protected file (pre-existing `tests/**` or an existing `scripts/run.sh`) is
+    refused by assert_edit_paths_are_not_protected (rc=13) before the container
+    starts — a pre-existing test/entrypoint is immutable to the machine. Paths are validated against the
     filesystem (declared_carveout: relative, no `..`, no symlink out of the
     repo, and an existing path or an existing ancestor BELOW the repo root);
     an undeclarable path raises ValueError (fail-closed, rc=13 upstream).
@@ -786,14 +791,51 @@ def assert_create_paths_are_new(declared: list[str], edit_paths: list[str]) -> N
     a first ticket in a new project may legitimately declare
     `edit: scripts/run.sh` before run.sh exists."""
     skip = set(edit_paths)
+    protected = set(_protected_files())
     for rel in declared:
         if rel in skip:
             continue
         if os.path.exists(os.path.join(REPO_ROOT, rel)):
+            if rel in protected:
+                # CC-206: `edit: <rel>` would now hit the new gate — do not
+                # suggest it as the fix for a PROTECTED stale path.
+                raise ValueError(
+                    f"declared path {rel!r} already exists but is declared as a "
+                    f"create (impl:/test:/docs:); it is a protected file, so "
+                    f"`edit: {rel}` is refused too (CC-206) — remove the stale "
+                    f"artifact or edit it host-side before launch"
+                )
             raise ValueError(
                 f"declared path {rel!r} already exists but is declared as a create "
                 f"(impl:/test:/docs:); declare it as `edit: {rel}` to modify it in "
                 f"place, or remove the stale artifact"
+            )
+
+
+def assert_edit_paths_are_not_protected(edit_paths: list[str]) -> None:
+    """CC-206: `edit:` on a protected file is a ticket defect (rc=13),
+    refused BEFORE any container start.
+
+    The CC-204-retry3 incident: the ticket declared `edit: tests/smoke_math_test.py`;
+    `host_ro_paths` voluntarily dropped it from the :ro bind (the former
+    declared-path exemption), the machine edited a reference
+    test, the isolation probe failed, and the run deadlocked in a 31-Read loop
+    (1584 s) — the ticket created an unsatisfiable contract.
+
+    The invariant: a pre-existing `tests/**` file or an existing
+    `scripts/run.sh` (exactly `_protected_files()`) is immutable to the
+    machine. Edit it host-side before launch, or point the ticket at `src/`.
+    An ABSENT `scripts/run.sh` is not protected (bootstrap stays legal,
+    CC-154); `edit:` on a non-protected path (e.g. `src/mod.py`) is the
+    normal case and stays legal. Fail-closed: ValueError -> rc=13 upstream,
+    before SessionPlan/preflight_server/sandbox_argv."""
+    protected = set(_protected_files())
+    for rel in edit_paths:
+        if rel in protected:
+            raise ValueError(
+                f"edit: {rel!r} names a protected file (pre-existing tests/** "
+                f"or scripts/run.sh) — immutable to the machine; edit it "
+                f"host-side before launch, or point the ticket at src/"
             )
 
 
@@ -1762,6 +1804,9 @@ def cmd_run(args) -> int:
         # CC-133: the create/edit split is derived from the filesystem, not
         # trusted from the header (ValueError -> rc=13 below).
         assert_create_paths_are_new(declared_paths, edit_paths)
+        # CC-206: `edit:` on a protected file is an unsatisfiable contract
+        # (CC-204-retry3) — refuse it here, before any workspace mutation.
+        assert_edit_paths_are_not_protected(edit_paths)
     except (OSError, ValueError) as e:
         job["rc"] = 13
         job["error"] = f"ticket parse error: {e}"
@@ -2246,10 +2291,13 @@ def main() -> int:
             with open(args.ticket_path, encoding="utf-8") as f:
                 declared, edit_paths, _ = parse_ticket_header(f.read())
             assert_create_paths_are_new(declared, edit_paths)
+            # CC-206: same gate as cmd_run — the host must not start a
+            # container for a ticket that edits a protected file.
+            assert_edit_paths_are_not_protected(edit_paths)
         except (OSError, ValueError) as e:
             return early_abort(13, f"ERROR: ticket parse error: {e}")
         rw_paths = host_rw_paths(declared)
-        ro_paths = host_ro_paths(declared, rw_paths)
+        ro_paths = host_ro_paths(rw_paths)
         return run_sandboxed(args, rw_paths, ro_paths)
 
     return 0
