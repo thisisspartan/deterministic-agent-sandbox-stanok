@@ -1162,6 +1162,45 @@ def _contract_lock_forced_fail(job: dict, turn: int) -> int | None:
 
 
 # ==================================================================================
+# Loop-trap circuit breaker (CC-207)
+# ==================================================================================
+def _loop_trap_path() -> str:
+    """CC-207: single source of the marker path. The hook writes it (via the
+    STANOK_LOOP_TRAP_FILE env handed to the machine process), the launcher
+    reads it. _live_dir (LOG_DIR/<label>) is mounted rw in the container
+    (sandbox.py) — the channel needs no new mount."""
+    return os.path.join(_live_dir, "loop-trap.json")
+
+
+def _read_loop_trap(marker_path: str) -> dict | None:
+    """Best-effort read of the loop-guard termination marker: missing /
+    unreadable / non-JSON / directory -> None. A broken marker must never
+    kill the turn — the hook's fail-open invariant, mirrored on the reader."""
+    try:
+        with open(marker_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _loop_trap_verdict(job: dict, loop_trap: dict) -> int:
+    """CC-207: the circuit-breaker verdict on a job dict (the
+    _contract_lock_forced_fail pattern). No fix prompt, no local retries: a
+    retry re-enters the same loop — the marker is cumulative for the
+    session. rc=1 is the existing defect code (no new rc)."""
+    job["probe_result"] = "LOOP-TRAP"
+    job["loop_trap"] = loop_trap
+    job["verifier"] = "FAIL"
+    job["error"] = (
+        f"LOOP-TRAP: {loop_trap.get('tool')} repeated {loop_trap.get('n')}x "
+        "consecutively — session terminated by the circuit breaker"
+    )
+    log("LOOP-TRAP: fail-closed (no fix prompt, no retry — the marker is cumulative)")
+    return 1
+
+
+# ==================================================================================
 # Inference environment (Prefix Invariance)
 # ==================================================================================
 def build_agent_env() -> dict[str, str]:
@@ -1188,6 +1227,10 @@ def build_agent_env() -> dict[str, str]:
         "CLAUDE_CODE_SUBAGENT_MODEL": LOCAL_MODEL,
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW": os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "128000"),
         "API_TIMEOUT_MS": API_TIMEOUT_MS,
+        # CC-207: the loop-guard termination-marker channel. The hook writes
+        # it at the 5th consecutive identical call; _execute_turn reads it
+        # mid-turn. Derived-from-runtime (per-run dir) -> belongs here.
+        "STANOK_LOOP_TRAP_FILE": _loop_trap_path(),
     }
 
 
@@ -1209,8 +1252,8 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> tuple[dict, dict, int, str]:
-    """Returns (turn_total, live_window, writes, turn_error).
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> tuple[dict, dict, int, str, dict | None]:
+    """Returns (turn_total, live_window, writes, turn_error, loop_trap).
 
     turn_total  — ResultMessage.usage: cumulative across the turn's API calls
                   (for session totals).
@@ -1220,6 +1263,9 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
                   W2.4; immune to test side effects, unlike a file manifest).
     turn_error  — "" on a clean turn; otherwise the API/max-turns error string
                   (CLI_MAX_TURNS_EXCEEDED or the ResultMessage error detail).
+    loop_trap   — CC-207: the loop-guard termination marker read mid-turn
+                  (the hook denied the 5th consecutive identical call), or
+                  None if the breaker did not trip.
     """
     from claude_agent_sdk import ResultMessage
 
@@ -1228,6 +1274,8 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
     turn_total = {}
     writes = 0
     turn_error = ""
+    loop_trap = None
+    marker_path = _loop_trap_path()
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
         if not sid and hasattr(msg, "data") and isinstance(msg.data, dict):
@@ -1269,7 +1317,16 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
                     writes += 1
 
         _write_stream_msg(stream_f, turn, msg)
-    return (turn_total or live_window), live_window, writes, turn_error
+
+        # CC-207: mid-turn breaker check — CC-204-retry3 burned the whole
+        # 1584 s turn before any turn-end check could fire. One stat per
+        # message, no polling loop; a broken marker is not fatal (retried
+        # on the next message).
+        if loop_trap is None and os.path.exists(marker_path):
+            loop_trap = _read_loop_trap(marker_path)
+            if loop_trap is not None:
+                break
+    return (turn_total or live_window), live_window, writes, turn_error, loop_trap
 
 
 # contract_lock (T5, CC-137): the PreToolUse deny hook is GONE. Its job — a
@@ -1458,7 +1515,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 )
 
                 try:
-                    turn_usage, live_window, turn_writes, turn_error = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
+                    turn_usage, live_window, turn_writes, turn_error, loop_trap = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
                 except asyncio.TimeoutError:
                     log(f"TIMEOUT: turn {turn} exceeded {TURN_TIMEOUT_S:.0f}s (silent stall) -> interrupt")
                     try:
@@ -1478,6 +1535,23 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     job["verifier"] = "FAIL"
                     job["turns"] = turn
                     return 1
+
+                # CC-207: the loop-guard circuit breaker tripped mid-turn —
+                # the model repeated one identical call 5x in a row and the
+                # hook signalled termination. NO fix prompt, NO local retries:
+                # a retry re-enters the same loop (the marker is cumulative
+                # for the session). Interrupt the session best-effort, then
+                # fail closed with probe_result "LOOP-TRAP".
+                if loop_trap:
+                    log(f"LOOP-TRAP (turn {turn}): {loop_trap.get('tool')!r} "
+                        f"repeated {loop_trap.get('n')}x consecutively — "
+                        "circuit breaker tripped, interrupting the session")
+                    try:
+                        await client.interrupt()
+                    except Exception as e:
+                        log(f"WARN: client.interrupt() finished with an error: {e}")
+                    job["turns"] = turn
+                    return _loop_trap_verdict(job, loop_trap)
 
                 elapsed_turn = time.time() - t0
 
