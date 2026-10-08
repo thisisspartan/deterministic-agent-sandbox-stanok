@@ -20,8 +20,10 @@ Pins the fail-closed verdict paths in launcher/stanok.py:
      per-file fallback was removed (PLAN-HYGIENE 2026-10-08)
   8  _publish_evidence I5 integrity check: a summary claiming PASS after a
      non-zero container exit, or with an rc field disagreeing with the
-     container exit, is rewritten to FAIL + integrity_violation; clean
-     summaries pass through untouched
+     container exit, is rewritten to FAIL + probe_result INTEGRITY-FAIL +
+     rc=container_rc + integrity_violation (no PASS-shaped field survives,
+     a container-written probe_result is overwritten); clean summaries pass
+     through untouched
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_verdict_safety.py -q
 """
@@ -290,6 +292,8 @@ def test_publish_evidence_forces_fail_on_forged_pass(tmp_path, monkeypatch):
     stanok._publish_evidence("lbl", 1)
     dst = _published(repo, "lbl")
     assert dst["verifier"] == "FAIL"
+    assert dst["probe_result"] == "INTEGRITY-FAIL"
+    assert dst["rc"] == 1
     assert "integrity_violation" in dst
     assert "claims PASS" in dst["integrity_violation"]
 
@@ -303,8 +307,25 @@ def test_publish_evidence_forces_fail_on_rc_field_tamper(tmp_path, monkeypatch):
     stanok._publish_evidence("lbl", 1)
     dst = _published(repo, "lbl")
     assert dst["verifier"] == "FAIL"
+    assert dst["probe_result"] == "INTEGRITY-FAIL"
+    assert dst["rc"] == 1
     assert "integrity_violation" in dst
     assert "!= container rc=1" in dst["integrity_violation"]
+
+
+def test_publish_evidence_overrides_pass_shaped_probe_result(tmp_path, monkeypatch):
+    # A forged verdict must not leave any PASS-shaped field behind: a
+    # probe_result written by the container ("CLEAN-FIRST") is overwritten
+    # to INTEGRITY-FAIL, not kept alongside the forced verifier=FAIL.
+    repo, logdir = _publish_tree(tmp_path, "lbl", {
+        "rc": 0, "verifier": "PASS", "probe_result": "CLEAN-FIRST"})
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    monkeypatch.setattr(stanok, "LOG_DIR", str(logdir))
+    stanok._publish_evidence("lbl", 1)
+    dst = _published(repo, "lbl")
+    assert dst["probe_result"] == "INTEGRITY-FAIL"
+    assert dst["verifier"] == "FAIL"
+    assert dst["rc"] == 1
 
 
 def test_publish_evidence_clean_pass_untouched(tmp_path, monkeypatch):
@@ -351,5 +372,7 @@ def test_publish_evidence_noop_rc_tamper_still_caught(tmp_path, monkeypatch):
     stanok._publish_evidence("lbl", 1)
     dst = _published(repo, "lbl")
     assert dst["verifier"] == "FAIL"
+    assert dst["probe_result"] == "INTEGRITY-FAIL"
+    assert dst["rc"] == 1
     assert "integrity_violation" in dst
     assert "!= container rc=1" in dst["integrity_violation"]
