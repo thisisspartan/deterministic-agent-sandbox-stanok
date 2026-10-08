@@ -11,7 +11,7 @@ lazily, the gates are pure stdlib) and STANOK_NO_SANDBOX=1 (the tests check
 the RUNNER, not the sandbox; the Docker container does not mount the host
 /tmp, so mktemp /tmp/... tickets are invisible inside — rc=13).
 
-Gate order (single source: launcher/stanok.py main()):
+Gate order (single source: launcher/cli.py main()):
   label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->
   dirty-tree (rc=22) -> lock (rc=21) -> [cmd_run: W2.1 ticket header
   (rc=13: no impl:/test:/docs:/reset:none, or a create-declared path that
@@ -74,7 +74,9 @@ def test_settings_valid_json():
 
 
 def test_verifier_hook_in_process():
-    src = (REPO_ROOT / "launcher" / "stanok.py").read_text(encoding="utf-8")
+    # The hook is launcher code (session.py since the PLAN-HYGIENE split), not
+    # an external hook script — pinned at its real home.
+    src = (REPO_ROOT / "launcher" / "session.py").read_text(encoding="utf-8")
     assert "_verifier_hook" in src
 
 

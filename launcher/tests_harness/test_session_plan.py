@@ -87,7 +87,6 @@ def test_contract_lock_set_is_the_manifest_not_a_plan_field():
     # diff hashes is exactly the set host_ro_paths may bind :ro.
     plan = _build_plan(_TICKET)
     assert not hasattr(plan, "protected_paths")
-    assert not hasattr(stanok, "_pretooluse_lock_hook")
 
 
 def test_contract_lock_exempts_declared_path(repo, monkeypatch):
