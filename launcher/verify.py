@@ -283,11 +283,18 @@ def _contract_lock_forced_fail(job: dict, turn: int) -> int | None:
     snapshot — a verify_gate PASS was computed against tampered tests and is
     not a PASS. No retry: the list is cumulative and can never be cleared
     inside the session, so a fix prompt cannot succeed; the supervisor
-    relaunches with a refined ticket. Returns the run rc (1) or None when
-    clean."""
+    relaunches with a refined ticket. Sets probe_result "CONTRACT-FAIL" (an
+    override, see test_contract_fail_probe.py) so the summary distinguishes a
+    contract violation from a test failure. Returns the run rc (1) or None
+    when clean."""
     violations = job.get("contract_lock_violations") or []
     if not violations:
         return None
+    # probe_result override (operator review 2026-10-09), by the NO-OP-PASS /
+    # LOOP-TRAP pattern: without it decide() falls through to the table and
+    # the summary says VERIFY-FAIL — a contract violation would be
+    # indistinguishable from a test failure. The table is unchanged.
+    job["probe_result"] = "CONTRACT-FAIL"
     job["verifier"] = "FAIL"
     job["error"] = ("CONTRACT-LOCK: the machine modified or deleted protected "
                    "files (tests/, scripts/run.sh) or created a symlink in a "

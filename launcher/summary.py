@@ -31,7 +31,12 @@ def _publish_evidence(cfg, label: str, container_rc: int) -> None:
     returns rc=1 with verifier=PASS (the machine did no work; the artifacts
     pre-existed and the verifier really passed). That rc=1+PASS combination is
     legitimate, not a forgery, so the "claims PASS" check is skipped for it;
-    the rc-field consistency check still applies."""
+    the rc-field consistency check still applies.
+
+    CONTRACT-FAIL exemption: a contract violation outranks the integrity
+    label (spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL) — the
+    violation is recorded and the rc fixed, but probe_result stays
+    CONTRACT-FAIL."""
     src = os.path.join(cfg.log_dir, label)
     files = ("summary.json", "launcher.stdout.log")
     if not any(os.path.isfile(os.path.join(src, f)) for f in files):
@@ -67,9 +72,15 @@ def _publish_evidence(cfg, label: str, container_rc: int) -> None:
     if violations:
         # A forged verdict must not leave any PASS-shaped field behind:
         # override the whole verdict, not just the verifier flag.
+        # CONTRACT-FAIL exemption (operator review 2026-10-09): the spec
+        # priority is CONTRACT-FAIL > INTEGRITY-FAIL — a contract violation
+        # is the defect class the supervisor must see. The violation is still
+        # recorded and the container rc stays ground truth, but the verdict
+        # CLASS is not downgraded.
         summary["verifier"] = "FAIL"
         summary["rc"] = container_rc
-        summary["probe_result"] = "INTEGRITY-FAIL"
+        if summary.get("probe_result") != "CONTRACT-FAIL":
+            summary["probe_result"] = "INTEGRITY-FAIL"
         summary["integrity_violation"] = "; ".join(violations)
         with open(sum_dst, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
@@ -113,8 +124,8 @@ def _status_fields(rc: int, verifier: str, turns: int) -> str:
 
 def decide(job: dict) -> str:
     """probe_result with the priority made explicit (red-team review
-    2026-10-08): the session/host override (NO-OP-PASS, LOOP-TRAP) wins;
-    otherwise the derived table. INTEGRITY-FAIL is NOT here — the host sets
+    2026-10-08): the session/host override (NO-OP-PASS, LOOP-TRAP,
+    CONTRACT-FAIL) wins; otherwise the derived table. INTEGRITY-FAIL is NOT here — the host sets
     it after build_summary, in _publish_evidence. test_verdict_table.py
     pins this priority: any change here must pass it UNCHANGED."""
     override = job.get("probe_result")
