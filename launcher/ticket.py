@@ -33,14 +33,20 @@ def declared_carveout(cfg, rel: str) -> str | None:
         resolves a bind source's realpath, so a link inside the repo could
         smuggle an outside dir in — run.sh already refuses symlinked test
         paths, SEC-01);
-      - the FIRST component of the path must be one of sandbox.WRITABLE_ZONES
-        (the zone rule, cc217-impl incident): the container can only write
-        under the zones — the repo is `:ro`, the rw carve-outs exist only
-        inside them, settings.stanok.json denies Edit outside them. An
-        existing out-of-zone dir (`launcher/`) made an absent path declarable
-        through the ancestor rule and the machine burned ~141 s discovering
-        the write is physically impossible; refusal is at header parse (rc=13)
-        instead;
+      - NO component of the declared path may be a symlink (cc217 review,
+        2026-10-09; SEC-01 alignment with run.sh): Docker resolves a bind
+        source's realpath, so `src/link -> launcher/` would hand the
+        out-of-zone launcher/ a rw mount even though the string starts with
+        a zone (proven by test_docker_bind_resolves_symlink_source);
+      - the FIRST component of the RESOLVED repo-relative path (realpath,
+        not the string) must be one of sandbox.WRITABLE_ZONES — exact
+        membership, not a prefix match (`srcfoo` is not a zone). The zone
+        rule (cc217-impl incident): the container can only write under the
+        zones — the repo is `:ro`, the rw carve-outs exist only inside them,
+        settings.stanok.json denies Edit outside them. An existing out-of-zone
+        dir (`launcher/`) made an absent path declarable through the ancestor
+        rule and the machine burned ~141 s discovering the write is
+        physically impossible; refusal is at header parse (rc=13) instead;
       - a bare zone name (`src`, `tests/`) is not a file -> None (quarantine
         would move the whole zone out of the tree);
       - the path exists (file or dir) -> itself: a per-file/per-dir rw bind;
@@ -54,12 +60,24 @@ def declared_carveout(cfg, rel: str) -> str | None:
         return None
     if ".." in rel.split("/"):
         return None
-    if rel.split("/")[0] not in sandbox.WRITABLE_ZONES:
-        return None
     if rel.rstrip("/") in sandbox.WRITABLE_ZONES:
         return None
     root = os.path.realpath(cfg.repo_root)
-    if not os.path.realpath(os.path.join(root, rel)).startswith(root + os.sep):
+    # No component of the declared path may be a symlink (cc217 review,
+    # 2026-10-09): Docker resolves a bind source's realpath, so a
+    # zone-internal link (`src/link -> launcher/`) would mount its target
+    # instead (SEC-01 alignment with run.sh).
+    prefix = ""
+    for part in rel.split("/"):
+        prefix = os.path.join(prefix, part)
+        if os.path.islink(os.path.join(root, prefix)):
+            return None
+    resolved = os.path.realpath(os.path.join(root, rel))
+    if not resolved.startswith(root + os.sep):
+        return None
+    # The zone rule reads the RESOLVED location, not the path string
+    # (exact membership: `srcfoo` is not a zone).
+    if os.path.relpath(resolved, root).split("/")[0] not in sandbox.WRITABLE_ZONES:
         return None
     if os.path.exists(os.path.join(root, rel)):
         return rel
@@ -131,9 +149,10 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
     protected file (pre-existing `tests/**` or an existing `scripts/run.sh`) is
     refused by assert_edit_paths_are_not_protected (rc=13) before the container
     starts — a pre-existing test/entrypoint is immutable to the machine. Paths are validated against the
-    filesystem (declared_carveout: first component is a writable zone,
-    relative, no `..`, no symlink out of the repo, and an existing path or an
-    existing ancestor BELOW the repo root); an undeclarable path raises
+    filesystem (declared_carveout: no symlink component, the RESOLVED path
+    has a writable zone as its first component, relative, no `..`, inside the
+    repo, and an existing path or an existing ancestor BELOW the repo root);
+    an undeclarable path raises
     ValueError (fail-closed, rc=13 upstream). The zone rule does NOT weaken
     CC-206: `edit:` on a pre-existing protected file stays refused even
     though its zone is writable — the two checks are complementary.
@@ -159,13 +178,15 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
     for kind, rel in entries:
         if not _validate_declared_path(cfg, rel):
             raise ValueError(
-                f"invalid declared path {rel!r}: the first path component must "
-                f"be a writable zone ({', '.join(sandbox.WRITABLE_ZONES)}) — "
-                f"outside a writable zone the container cannot write there; "
-                f"inside a zone the path must be relative, contain no '..', "
-                f"resolve inside the repo (no symlink out), and either exist "
-                f"or lie under an existing directory — a NEW top-level "
-                f"file/dir has no safe rw carve-out"
+                f"invalid declared path {rel!r}: no path component may be a "
+                f"symlink, and the first component of the RESOLVED path "
+                f"(realpath relative to the repo root) must be a writable "
+                f"zone ({', '.join(sandbox.WRITABLE_ZONES)}) — outside a "
+                f"writable zone the container cannot write there; inside a "
+                f"zone the path must be relative, contain no '..', resolve "
+                f"inside the repo, and either exist or lie under an existing "
+                f"directory — a NEW top-level file/dir has no safe rw "
+                f"carve-out"
             )
         if kind == "edit":
             edit_paths.append(rel)
