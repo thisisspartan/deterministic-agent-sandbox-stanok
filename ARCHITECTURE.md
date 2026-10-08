@@ -17,7 +17,8 @@ the machine session — do not move them here).
 
 ## The chain of one run
 
-HOST (`launch.sh` -> `launcher/cli.py main()` — the gate order is the
+HOST (`launch.sh` -> `launcher/cli.py main()` -> `cli._launch_gates` — the
+gate order lives in `_launch_gates`, one readable function; it is the
 launch-level rc contract, the namespace is `ExitCode` in
 `launcher/exitcodes.py`):
 
@@ -130,8 +131,8 @@ COPY).
 
 ## Where to change what
 
-- A new rc or gate -> `cli.py main()` (the order) + `exitcodes.py ExitCode`
-  (the namespace) + this table.
+- A new rc or gate -> `cli.py _launch_gates` (the order) + `exitcodes.py
+  ExitCode` (the namespace) + this table.
 - A new test stack -> `scripts/stacks/*.toml` only (run.sh and the
   launcher derive from it at runtime).
 - Editing any digest input (`Dockerfile`, `scripts/run.sh`,

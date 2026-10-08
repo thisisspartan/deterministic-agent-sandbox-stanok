@@ -1,5 +1,0 @@
-[run]
-parallel = true
-data_file = /tmp/stanok-cov/.coverage
-source = /home/hermes/darkcast/stanok/launcher
-omit = /home/hermes/darkcast/stanok/launcher/tests_harness/*
