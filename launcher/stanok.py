@@ -597,7 +597,7 @@ def preflight_image(image: str) -> bool:
         return False
     if got != want:
         log(f"PREFLIGHT-IMAGE: digest mismatch — image label {got!r} != "
-            f"sha256(Dockerfile+run.sh) {want!r}; rebuild via ./setup.sh (doctor image preflight)")
+            f"sha256(Dockerfile+run.sh+stacks) {want!r}; rebuild via ./setup.sh (doctor image preflight)")
         return False
     log(f"PREFLIGHT-IMAGE: digest OK ({want[:12]}…)")
     for pre in _stack_preflights():
@@ -1078,9 +1078,9 @@ def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
 
 def _protected_files() -> list[str]:
     """The pre-existing contract files — the ONE source for "protected"
-    (CC-136): tests/** plus scripts/run.sh. Both the contract_lock manifest and
-    the host's :ro bind list (host_ro_paths) read this list, so the two cannot
-    drift.
+    (CC-136): tests/**, scripts/run.sh and scripts/stacks/*.toml. Both the
+    contract_lock manifest and the host's :ro bind list (host_ro_paths) read
+    this list, so the two cannot drift.
 
     Only PRE-EXISTING files: a missing scripts/run.sh (a new project's first
     ticket) is free to create. __pycache__/ is skipped: .pyc files are
@@ -1096,6 +1096,17 @@ def _protected_files() -> list[str]:
                 protected.append(os.path.relpath(os.path.join(root, name), REPO_ROOT))
     if os.path.isfile(os.path.join(REPO_ROOT, "scripts", "run.sh")):
         protected.append("scripts/run.sh")
+    # B1 (PLAN-AUDIT-2026-10-08): run.sh derives its STACKS registry
+    # (test_runner, test_glob, verdict_config) from these manifests at every
+    # invocation, and scripts/ is a machine RW zone whenever a ticket declares
+    # a path under it. A manifest left writable lets the machine swap
+    # test_runner for `true` and get a PASS with no test ever run.
+    stacks_dir = os.path.join(REPO_ROOT, "scripts", "stacks")
+    if os.path.isdir(stacks_dir):
+        for name in sorted(os.listdir(stacks_dir)):
+            if name.endswith(".toml"):
+                protected.append(os.path.relpath(
+                    os.path.join(stacks_dir, name), REPO_ROOT))
     return protected
 
 

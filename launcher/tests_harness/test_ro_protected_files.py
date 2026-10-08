@@ -61,24 +61,32 @@ def _host_repo(tmp_path, monkeypatch, tests=("old_test.py",), runsh=True):
 
 # --- the protected list: one source ---------------------------------------------
 
-def test_protected_files_are_tests_and_runsh(repo, monkeypatch):
+def test_protected_files_are_tests_runsh_and_stacks(repo, monkeypatch):
     write(repo / "tests" / "a_test.py", "def test_a():\n    assert 1\n")
     write(repo / "tests" / "sub" / "b_test.py", "def test_b():\n    assert 1\n")
     write(repo / "tests" / "__pycache__" / "a_test.cpython-313.pyc", "junk")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
     protected = stanok._protected_files()
+    # B1 (PLAN-AUDIT-2026-10-08): the stacks manifests are contract files too
+    # (run.sh derives its registry from them) — see test_stacks_protected.py.
     assert set(protected) == {"tests/a_test.py", "tests/sub/b_test.py",
-                              "scripts/run.sh"}
+                              "scripts/run.sh",
+                              "scripts/stacks/jq.toml", "scripts/stacks/js.toml",
+                              "scripts/stacks/py.toml"}
     # The manifest and the :ro list are the same rule, not two policy lists.
     assert set(stanok._tests_manifest()) == set(protected)
 
 
 def test_protected_list_without_a_runsh(repo, monkeypatch):
     # Bootstrap: a missing scripts/run.sh is not protected (it may be created).
+    # The stacks manifests are pre-existing infrastructure — protected anyway.
     write(repo / "tests" / "a_test.py", "def test_a():\n    assert 1\n")
     (repo / "scripts" / "run.sh").unlink()
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok._protected_files() == ["tests/a_test.py"]
+    assert stanok._protected_files() == [
+        "tests/a_test.py",
+        "scripts/stacks/jq.toml", "scripts/stacks/js.toml",
+        "scripts/stacks/py.toml"]
 
 
 # --- host_ro_paths --------------------------------------------------------------
@@ -289,3 +297,48 @@ def test_host_hardlink_escapes_ro_bind_contract_lock_detects(tmp_path, monkeypat
     assert job["contract_lock_violations"] == ["turn 1: MODIFIED: tests/old_test.py"]
     assert stanok._contract_lock_forced_fail(job, 1) == 1
     assert job["verifier"] == "FAIL"
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
+def test_stack_manifest_is_erofs_under_a_scripts_carve_out(repo, tmp_path,
+                                                           monkeypatch):
+    """B1 (PLAN-AUDIT-2026-10-08), the FS echelon: a ticket declaring
+    `impl: scripts/probe.sh` makes scripts/ a rw carve-out — the stacks
+    manifests under it must be re-bound :ro, so the machine cannot swap
+    test_runner for `true` at the filesystem layer (the Python-level lock in
+    test_stacks_protected.py proves detection; this proves prevention).
+    The conftest `repo` fixture installs the live run.sh + scripts/stacks
+    (CC-168), so this drives the real manifests."""
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    declared, _, _ = stanok.parse_ticket_header("impl: scripts/probe.sh\n")
+    rw = stanok.host_rw_paths(declared)
+    assert rw == ("scripts",)
+    ro = stanok.host_ro_paths(rw)
+    assert set(ro) == {"scripts/run.sh",
+                       "scripts/stacks/jq.toml", "scripts/stacks/js.toml",
+                       "scripts/stacks/py.toml"}
+
+    cmd = (
+        f"if (echo '# x' >> '{repo}/scripts/stacks/py.toml') 2>/dev/null; "
+        f"then echo PYTOML-WRITTEN; else echo PYTOML-DENIED; fi; "
+        f"touch '{repo}/scripts/probe.sh' && echo PROBE-OK"
+    )
+    # `repo` IS tmp_path (the fixture returns it) — keep logs a sibling,
+    # unique per test, like the other docker tests keep it under tmp_path.
+    log = tmp_path.parent / f"{tmp_path.name}-logs"
+    log.mkdir()
+    image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
+    name, argv = sandbox.sandbox_argv(str(repo), str(log), image,
+                                      ["bash", "-c", cmd],
+                                      rw_paths=rw, ro_paths=ro)
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    finally:
+        sandbox.docker_stop(name)
+    assert "PYTOML-DENIED" in proc.stdout, proc
+    assert "PROBE-OK" in proc.stdout, proc
+    # The host manifest is untouched (the mount refused the write) and the
+    # declared path was creatable — the carve-out itself still works.
+    assert "# x" not in (repo / "scripts" / "stacks" / "py.toml").read_text(
+        encoding="utf-8")
+    assert (repo / "scripts" / "probe.sh").is_file()
