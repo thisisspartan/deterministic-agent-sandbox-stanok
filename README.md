@@ -72,42 +72,21 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 ## Structure
 
 ```
-launcher/stanok.py            — the hub: circuit constants, mutable run state,
-                                ExitCode, SessionPlan, logging, label_paths + the
-                                facade (`import stanok` stays the single entry
-                                point, PEP 562); functional submodules
-                                gates/ticket/verify/session/summary/cli/opik
-                                (PLAN-HYGIENE-2026-10-08 split)
-launcher/sandbox.py           — the Docker boundary (R2, former sandbox-run.sh):
-                                repo mounted read-only with per-ticket writable
-                                carve-outs (T4/CC-135: derived from the declared
-                                paths — an existing declared path binds itself,
-                                an absent one its nearest existing ancestor dir),
-                                and the pre-existing contract files (tests/**,
-                                scripts/run.sh) re-bound :ro on top of a carve-out
-                                dir (T4b/CC-136), so reference tests are
-                                immutable at the fs layer, not only in the hook;
-                                evidence/ is HOST-ONLY: read-only in the
-                                container, the host publishes the verdict into it
-                                (CC-134); .git read-only; cap-drop=ALL,
-                                no-new-privileges, resource limits
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
-Dockerfile                    — the machine image (debian + toolchain +
-                                uv + claude-agent-sdk + pytest + Node.js +
-                                Claude Code CLI 2.1.88 + bubblewrap + socat
-                                + jq)
-hooks/                        — doctor (thin pytest wrapper, R5; the TDD
-                                verifier is in-process in
-                                launcher/session.py, R1)
-launcher/tests_harness/       — the doctor checks as pytest (R5)
-.claude/settings.stanok.json  — the machine config (allow/deny,
-                                native sandbox + allowedDomains)
+launcher/                     — the Runner: stanok.py (hub) + functional
+                                submodules cli/gates/ticket/sandbox/session/
+                                verify/summary/opik + tests_harness/ (the
+                                doctor checks as pytest)
+hooks/doctor.sh               — thin pytest wrapper
+.claude/settings.stanok.json  — the machine config (allow/deny, native
+                                sandbox + allowedDomains)
+Dockerfile / setup.sh         — the machine image and environment deployment
 CLAUDE.md                     — the machine role (auto-loaded inside the repo)
-setup.sh                      — environment deployment (.venv + docker image)
-src/ tests/ docs/ scripts/    — the machine working directories (the zones the
-                                hidden-file gate watches; T4 mounts only what
-                                the ticket declares)
+src/ tests/ docs/ scripts/    — the machine working directories
 ```
+
+The call chain, the module/ownership map, the coupling design and the
+"where to change what" guide: **`ARCHITECTURE.md`**.
 
 ## Configuration (all via env)
 
@@ -128,83 +107,18 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
 | `STANOK_CONTAINER_PIDS`| `512`                   | container pids limit             |
 | `STANOK_CONTAINER_CPUS`| `2`                     | container CPU limit              |
 
-## How it works (briefly)
+## How it works
 
-1. `launch.sh` (thin shim → Runner) — the Runner passes the fail-closed
-   gates in this order (single source: `launcher/cli.py main()`):
-   label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
-   ticket (rc=13) -> dirty-tree (rc=22, uncommitted changes — start
-   forbidden) -> then: `--follow` spawns a detached self-run (and blocks until
-   terminal), or sync
-   runs either in-process (host no-sandbox / container side — the lock
-   (rc=21) is taken there) or as a supervised `docker run`
-   (`launcher/sandbox.py`; the container-side Runner re-runs the gates and
-   takes the lock). The image preflight (the image LABEL `stanok.digest`
-   must equal sha256(Dockerfile + scripts/run.sh + scripts/stacks/*.toml —
-   the STACKS registry, sorted by filename) and every stack's
-   preflight command must succeed inside the image, `docker run --rm`)
-   no longer blocks the launch path (CC-106) — it runs in doctor
-   (`test_docker_image_digest_matches`): a stale image is a doctor failure,
-   not a mid-run ENV-FAIL -> ticket header (rc=13: an `impl:`/`test:`/`docs:` line
-   or `reset: none` is required — the ticket-scoped invariant, W2.1; literal
-   paths are validated against the filesystem: relative, no `..`, no symlink
-   out of the repo, and either existing or under an existing directory —
-   T4/CC-135, the same rule that derives the container's rw carve-outs, so a
-   path with no carve-out is refused before any container starts) -> pre-flight `/props` of the server (rc=20;
-   fail-closed also when the server `n_ctx` is below the required window).
-   The dirty-tree gate is fail-closed: no destructive reset/clean — the
-   operator commits before launch.
-2. The Runner opens ONE Claude session (cwd = repo) inside the Docker
-   container (`launcher/sandbox.py`): the repo is `:ro` and exactly the
-   declared paths are re-mounted `:rw` on top (an existing declared path binds
-   itself; an absent one binds its nearest existing ancestor dir, since Docker
-   creates a missing bind source as a root-owned directory — T4/CC-135), with
-   the pre-existing contract files under such a dir re-bound `:ro` (a file bind
-   over a dir bind wins — CC-136), so declaring a new test cannot make the
-   existing ones writable; settings from `.claude/settings.stanok.json`,
-   tools Read/Write/Edit/Grep/Glob/Bash — Bash is native and UNRESTRICTED;
-   the boundary is the container (cap-drop=ALL, no-new-privileges,
-   resource limits) plus the claude-code native sandbox (bwrap per Bash
-   command, `enableWeakerNestedSandbox`, network restricted to
-   `allowedDomains`); subagents (Agent/Task) are unavailable — the session's
-   tool surface is restricted to the six curated tools via the SDK `tools`
-   option (not a settings deny entry).
-3. Monolithic TDD in a single session: the model writes the test first
-   (red), then the implementation (green), then docs. After every Write/Edit
-   under `tests/`: the in-process PostToolUse hook (launcher/session.py,
-   SDK `hooks` option — no shell command) runs the matching test through
-   `scripts/run.sh` and injects the verdict (RED CONFIRMED) into the
-   session — the TDD red phase is harness-provided, not model discipline.
-   The contract_lock (pre-existing `tests/` + `scripts/run.sh`) is enforced
-   at two points: the `:ro` file bind (the kernel refuses the write with
-   EROFS — T4b/CC-136; the PreToolUse deny hook it replaced was removed by
-   T5/CC-137) and the post-turn SHA256 manifest diff (the independent second
-   echelon, which also catches deletion of a protected file).
-4. On verifier FAIL the Runner appends an in-session retry turn
-   (`--local-retries`, default 2) with the failure block.
-5. Final: `verifier: PASS/FAIL`, `probe_result: CLEAN-FIRST |
-   PASS-AFTER-LOCAL-RETRY | VERIFY-FAIL | EARLY-ABORT | NO-OP-PASS |
-   ENV-FAIL | INTEGRITY-FAIL` (NO-OP-PASS: the deliverable already satisfies
-   its tests; ENV-FAIL: runner missing from the image; INTEGRITY-FAIL: the
-   host rejected a forged verdict and overwrote it to FAIL), Runner rc —
-   typed `evidence/<label>/summary.json` (no regex parsing of stdout). The
-   container cannot write `evidence/` (read-only there, CC-134): it stages
-   `summary.json` in `$STANOK_LOG_DIR/<label>` and the HOST publishes it into
-   `evidence/<label>/` after the container exits.
-
-## Ownership map (rule -> owner file; every other surface references it)
-
-- `scripts/run.sh` header — the run.sh contract: subcommands, the W12 rc table,
-  the STACK REGISTRY format. `CLAUDE.md` carries only the machine rules and
-  points here.
-- `scripts/stacks/*.toml` — the per-stack registry (ext/test_glob/name_regex/
-  runners/preflight/verdict_config): the single source for run.sh and the launcher.
-- `launcher/cli.py main()` — the gate order and launch-level rc codes (the
-  ExitCode docstring in `launcher/stanok.py` is the rc namespace contract).
-- `launcher/summary.py build_summary` — the summary.json schema; the
-  consumer-facing contract is the §"How it works" item 5 above.
-- `CLAUDE.supervisor.md` — the supervisor protocol: verdict reading and stop
-  conditions.
+The full chain (host gates -> container session -> verdict publishing), the
+ownership map, the coupling design and the change guide are in
+**`ARCHITECTURE.md`** — the single source for the architecture description.
+In one line: the Runner passes fail-closed gates, opens ONE Claude session
+in the container (the repo `:ro` plus per-ticket `:rw` carve-outs, the
+pre-existing contract files re-bound `:ro`), the TDD red phase is
+harness-provided by the in-process verifier hook, on verifier FAIL the
+Runner appends an in-session retry turn (`--local-retries`), and the host
+re-checks the container's verdict (I5) before publishing it to
+`evidence/<label>/summary.json`.
 
 ## Commits
 
