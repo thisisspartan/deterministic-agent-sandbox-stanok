@@ -24,7 +24,7 @@ from config import Config  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SH = REPO_ROOT / "setup.sh"
 
-LOCKFILE = "uv.lock"
+LOCKFILE = "image-requirements.lock"
 
 
 def _setup_sh_digest_inputs() -> list[str]:

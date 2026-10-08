@@ -343,11 +343,12 @@ def _stack_preflights(cfg) -> list[str]:
 # concatenate them (modernization batch 2, 2026-10-08): setup.sh bakes
 # sha256 of these into the image LABEL stanok.digest at build; _image_digest()
 # re-computes the same hash in doctor. A glob entry is resolved sorted by
-# filename. uv.lock is an input: a dependency-lock change must move the
-# digest, or a stale image passes the doctor check while carrying a different
-# package set than the tree declares. test_image_digest_inputs.py pins that
-# setup.sh's cat list and this tuple cannot drift.
-DIGEST_INPUTS = ("Dockerfile", "scripts/run.sh", "scripts/stacks/*.toml", "uv.lock")
+# filename. image-requirements.lock is an input: a dependency-lock change
+# must move the digest, or a stale image passes the doctor check while
+# carrying a different package set than the tree declares.
+# test_image_digest_inputs.py pins that setup.sh's cat list and this tuple
+# cannot drift.
+DIGEST_INPUTS = ("Dockerfile", "scripts/run.sh", "scripts/stacks/*.toml", "image-requirements.lock")
 
 
 def _image_digest(cfg) -> str:
@@ -370,7 +371,7 @@ def _image_digest(cfg) -> str:
 def preflight_image(cfg, image: str) -> bool:
     """Host-side image provenance + runner preflight.
     1. The image LABEL stanok.digest must equal sha256 over gates.DIGEST_INPUTS
-       (Dockerfile + run.sh + scripts/stacks/*.toml + uv.lock) — an image
+       (Dockerfile + run.sh + scripts/stacks/*.toml + image-requirements.lock) — an image
        older than the Dockerfile, the STACKS registry or the dependency lock
        is caught here, not mid-run.
     2. Each stack's preflight command must succeed INSIDE the image

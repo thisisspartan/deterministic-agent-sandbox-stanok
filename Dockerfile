@@ -42,7 +42,7 @@ ARG STANOK_UID=10001
 ARG STANOK_GID=10001
 
 # Image provenance: setup.sh computes sha256 over the digest inputs
-# (Dockerfile + scripts/run.sh + scripts/stacks/*.toml sorted + uv.lock —
+# (Dockerfile + scripts/run.sh + scripts/stacks/*.toml sorted + image-requirements.lock —
 # the same list gates.DIGEST_INPUTS declares) and passes it as
 # --build-arg STANOK_DIGEST.
 # Doctor re-computes the same digest via the SAME function (stanok.py
@@ -123,17 +123,18 @@ ENV UV_SYSTEM_PYTHON=1 \
     UV_BREAK_SYSTEM_PACKAGES=1
 
 # --- Launcher runtime ---------------------------------------------------
-# The image's package set is pinned by uv.lock — the single source: the two
-# direct pins (claude-agent-sdk, pytest) plus their full transitive closure
-# (mcp/anyio/sniffio/...), every package with sha256 hashes, resolved for
-# python 3.11/linux (the image's system python). Bump a dependency by
-# regenerating the lock deliberately:
+# The image's package set is pinned by image-requirements.lock — the single
+# source: the two direct pins (claude-agent-sdk, pytest) plus their full
+# transitive closure (mcp/anyio/sniffio/...), every package with sha256
+# hashes, resolved for python 3.11/linux (the image's system python).
+# Requirements format (pip-style), NOT uv's TOML project lock — the name says
+# what it is. Bump a dependency by regenerating the lock deliberately:
 #   printf 'claude-agent-sdk==X\npytest==Y\n' | \
-#     uv pip compile - -o uv.lock --python-version 3.11 \
+#     uv pip compile - -o image-requirements.lock --python-version 3.11 \
 #       --python-platform linux --generate-hashes
-# uv.lock is a digest input (setup.sh + gates.DIGEST_INPUTS): a lock change
-# moves the image digest, so doctor fails a stale image instead of silently
-# shipping a different package set.
+# image-requirements.lock is a digest input (setup.sh + gates.DIGEST_INPUTS):
+# a lock change moves the image digest, so doctor fails a stale image instead
+# of silently shipping a different package set.
 # --no-binary claude-agent-sdk: install from sdist, NOT the wheel — the
 # wheel ships _bundled/claude (a second CLI, ~300 MB). The sdist build has
 # no _bundled dir; cli_path (stanok.py) resolves `claude` on PATH — inside
@@ -144,8 +145,8 @@ ENV UV_SYSTEM_PYTHON=1 \
 # on every rebuild, and a missing pytest in the image is exactly the
 # ENV-FAIL class that run.sh's rc=6 and doctor's image preflight
 # (preflight_image, CC-106 — off the launch path) exist to catch.
-COPY uv.lock /opt/uv.lock
-RUN uv pip install --no-binary claude-agent-sdk -r /opt/uv.lock
+COPY image-requirements.lock /opt/image-requirements.lock
+RUN uv pip install --no-binary claude-agent-sdk -r /opt/image-requirements.lock
 
 # --- Node.js + Claude Code CLI (R4: hermetic image) ------------------------
 # Node: official nodejs.org tarball, extracted over /usr/local (bin/node,
