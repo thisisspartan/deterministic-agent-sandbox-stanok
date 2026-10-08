@@ -23,11 +23,17 @@ import sandbox
 import stanok
 from stanok import ExitCode, SessionPlan, log
 from config import Config, RunState
-from gates import check_test_config, dirty_tree_gate, hidden_files_gate, preflight_server, root_refusal, sandbox_config_gate, validate_label
+from gates import (
+    check_test_config, dirty_tree_gate, hidden_files_gate, preflight_server,
+    root_refusal, sandbox_config_gate, validate_label,
+)
 from opik import _opik_trace_count
 from session import _install_signal_handlers, run_continuous_session
 from summary import _publish_evidence, _rotate_stale_summary, build_summary, write_summary
-from ticket import assert_create_paths_are_new, assert_edit_paths_are_not_protected, host_ro_paths, host_rw_paths, parse_ticket_header, prepare_workspace
+from ticket import (
+    assert_create_paths_are_new, assert_edit_paths_are_not_protected,
+    host_ro_paths, host_rw_paths, parse_ticket_header, prepare_workspace,
+)
 
 
 
@@ -429,14 +435,32 @@ def main() -> int:
     root_refusal()
     cfg = Config.from_env()
 
-    p = argparse.ArgumentParser(prog="stanok", description="Stanok Runner")
+    p = argparse.ArgumentParser(
+        prog="stanok",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "stanok — ticket-driven runner: launches a Claude Code machine in a\n"
+            "Docker sandbox against a ticket file, verifies the result with\n"
+            "scripts/run.sh test --all after every turn, and writes the verdict\n"
+            "to evidence/<label>/summary.json (rc, verifier, probe_result)."
+        ),
+        epilog=(
+            "Architecture: stanok/ARCHITECTURE.md (the call chain, the module\n"
+            "map, the verdict table). Exit codes: the ExitCode namespace in\n"
+            "launcher/stanok.py."
+        ),
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # R2: argparse is the single source of the CLI (the former launch.sh flag
     # parsing is gone). `--` separates the label from extra positionals — a
     # label starting with `--` stays positional (the label-guard test relies
     # on it: `run <ticket> -- --background` -> label="--background" -> rc=15).
-    r = sub.add_parser("run")
+    r = sub.add_parser(
+        "run",
+        help="run a ticket: launch the machine in the sandbox, verify each "
+             "turn; --follow blocks until the run is terminal",
+    )
     r.add_argument("ticket")
     r.add_argument("label")
     r.add_argument("extra", nargs="*", default=[])
@@ -449,14 +473,22 @@ def main() -> int:
     # foreground sync run.
     r.add_argument("--follow", action="store_true")
 
-    s = sub.add_parser("status")
+    s = sub.add_parser(
+        "status", help="print the current state of a run label as JSON",
+    )
     s.add_argument("label")
 
-    w = sub.add_parser("wait")
+    w = sub.add_parser(
+        "wait", help="block until a run reaches a terminal state (or the "
+                     "timeout cap) and print its status JSON",
+    )
     w.add_argument("label")
     w.add_argument("--timeout", type=int, default=WAIT_TIMEOUT_S)
 
-    st = sub.add_parser("stop")
+    st = sub.add_parser(
+        "stop", help="stop a running run: terminate the launcher and its "
+                     "container",
+    )
     st.add_argument("label")
 
     args = p.parse_args()
