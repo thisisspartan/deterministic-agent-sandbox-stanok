@@ -32,6 +32,7 @@ import sys
 import time
 import urllib.request
 import uuid
+from enum import IntEnum
 
 try:
     import tomllib  # stdlib TOML (Python 3.11+); CC-151 manifest-driven guard
@@ -48,7 +49,7 @@ REPO_ROOT = os.path.abspath(os.environ.get("STANOK_REPO", DEFAULT_REPO))
 LOG_DIR = os.environ.get("STANOK_LOG_DIR", "/tmp/stanok-logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-DEFAULT_MODEL = "Qwen3.8-27B-MTP"
+DEFAULT_MODEL = "qwen3.8-flash-next-iq3_xxs"
 LOCAL_MODEL = os.environ.get("STANOK_MODEL", DEFAULT_MODEL)
 SERVER_URL = os.environ.get("STANOK_SERVER_URL", "http://127.0.0.1:8080")
 CLAUDE_BIN = os.environ.get("STANOK_CLAUDE_BIN", shutil.which("claude") or "claude")
@@ -84,6 +85,36 @@ _marker_path = None
 _evidence_dir = None
 _live_dir = None
 _INTERRUPTED_RC = 0
+
+
+class ExitCode(IntEnum):
+    """Launch-level exit codes — the `rc` field of summary.json (strict contract).
+
+    1  defect (exhausted retries / contract violation) / docker missing;
+    13 ticket: not found, header parse error, create-edit conflict, protected edit;
+    14 workspace prep error; 15 invalid label;
+    16 ENV-FAIL: test runner unavailable in the image (image defect, not a red test);
+    17 background child died before writing the .running marker;
+    20 server unavailable / context window fail-closed;
+    21 lock held by another run; 22 dirty machine tree;
+    24 role leak (parent CLAUDE.md above the repo);
+    26 hidden/TEMP files in src/tests/docs/scripts;
+    27 test-config files under tests/ (verdict-subversion, CC-151);
+    28 sandbox.filesystem deny entry invalid (CC-107/CC-157).
+    """
+    DEFECT = 1
+    TICKET = 13
+    WORKSPACE = 14
+    BAD_LABEL = 15
+    ENV_FAIL = 16
+    CHILD_DIED = 17
+    SERVER = 20
+    LOCK = 21
+    DIRTY_TREE = 22
+    ROLE_LEAK = 24
+    HIDDEN_FILES = 26
+    TEST_CONFIG = 27
+    SANDBOX_CONFIG = 28
 
 
 # T1 (CC-120): the single source of file policy (invariant I1). The policy
@@ -382,7 +413,7 @@ def _verdict_config_patterns() -> tuple[str, ...]:
     return tuple(sorted(patterns))
 
 
-def test_config_gate() -> bool:
+def check_test_config() -> bool:
     # W6 verdict-subversion gate (owner decision A, fail-closed); CC-151 makes
     # it stack-agnostic: the forbidden set is the union of the `verdict_config`
     # lists declared by the stack manifests (scripts/stacks/*.toml), not a
@@ -403,7 +434,7 @@ def test_config_gate() -> bool:
                     log(f"TEST-CONFIG: {os.path.join(dirpath, name)}")
                     return True
     except OSError:
-        log("WARN: walk failed in test_config_gate — fail-closed (treating as flagged)")
+        log("WARN: walk failed in check_test_config — fail-closed (treating as flagged)")
         return True
     return False
 
@@ -902,13 +933,13 @@ def prepare_workspace(plan: "SessionPlan") -> int:
         return 0
     except OSError as e:
         log(f"ERROR: repo prep failed: {e}")
-        return 14
+        return int(ExitCode.WORKSPACE)
 
 
 # ==================================================================================
-# Smart compression of verifier errors (Smart Diff Extraction)
+# Compression of verifier errors (_tail_output: raw last-N tail)
 # ==================================================================================
-def _extract_smart_diff(raw_text: str) -> str:
+def _tail_output(raw_text: str) -> str:
     """Compress verifier output for the fix prompt: keep the LAST lines (a test
     failure is reported at the tail).
 
@@ -964,17 +995,17 @@ def _run_suite(failures: list[tuple[str, str]], tests: list[str]) -> None:
     if rc == 0:
         return
     if rc == 6:
-        failures.append(("(suite)", "ENV-FAIL: " + _extract_smart_diff(raw)))
+        failures.append(("(suite)", "ENV-FAIL: " + _tail_output(raw)))
         return
     if rc == 124:
         failures.append(("(suite)",
                          "TIMEOUT: suite hit the per-file 60 s timeout "
-                         "(rc=124) — " + _extract_smart_diff(raw)))
+                         "(rc=124) — " + _tail_output(raw)))
         return
     # rc == 1 (a test failed / unclaimed file), rc == 2 (run.sh refused
     # `test --all` — strict contract) or any other non-zero rc:
     # surface the suite output so the fix prompt can localize the failure.
-    failures.append(("(suite)", _extract_smart_diff(raw)))
+    failures.append(("(suite)", _tail_output(raw)))
 
 
 def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]:
@@ -1009,7 +1040,7 @@ def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]
             # `list` failed and printed no tests (no tests/ dir, or only
             # unclaimed files): the reason is on stderr — surface it instead
             # of the generic "no tests" message.
-            failures.append(("(list)", _extract_smart_diff(lp.stderr)))
+            failures.append(("(list)", _tail_output(lp.stderr)))
             return (False, failures, False)
         if failures:
             return (False, failures, False)
@@ -1019,7 +1050,7 @@ def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]
         # still printing the claimed tests on stdout. The unrun test must not
         # pass the gate silently: record the listing failure, then still run
         # the claimed tests (their failures add signal to the fix prompt).
-        failures.append(("(list)", _extract_smart_diff(lp.stderr)))
+        failures.append(("(list)", _tail_output(lp.stderr)))
 
     _run_suite(failures, tests)
     failures.sort(key=lambda x: x[0])
@@ -1657,7 +1688,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     job["error"] = "ENV-FAIL: test runner unavailable (run.sh rc=6)"
                     job["failures"] = failures
                     job["turns"] = turn
-                    return 16
+                    return int(ExitCode.ENV_FAIL)
 
                 # Fail-closed on contract_lock (W2.5 + P2): a PASS computed
                 # against tampered tests is not a PASS. Checked after env_fail
@@ -1886,16 +1917,16 @@ def cmd_run(args) -> int:
         # (CC-204-retry3) — refuse it here, before any workspace mutation.
         assert_edit_paths_are_not_protected(edit_paths)
     except (OSError, ValueError) as e:
-        job["rc"] = 13
+        job["rc"] = int(ExitCode.TICKET)
         job["error"] = f"ticket parse error: {e}"
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
             except OSError: pass
-        return 13
+        return int(ExitCode.TICKET)
 
     if not declared_paths and not reset_none:
-        job["rc"] = 13
+        job["rc"] = int(ExitCode.TICKET)
         job["error"] = ("ticket declares no `impl:`/`test:`/`docs:`/`edit:` "
                         "line and no `reset: none` — the ticket-scoped invariant "
                         "cannot be enforced (fail-closed)")
@@ -1903,7 +1934,7 @@ def cmd_run(args) -> int:
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
             except OSError: pass
-        return 13
+        return int(ExitCode.TICKET)
     if declared_paths:
         log(f"DECLARED PATHS: {declared_paths}")
     if edit_paths:
@@ -1916,22 +1947,22 @@ def cmd_run(args) -> int:
     )
 
     if not preflight_server():
-        job["rc"] = 20
+        job["rc"] = int(ExitCode.SERVER)
         job["error"] = f"Server unavailable ({SERVER_URL})"
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
             except OSError: pass
-        return 20
+        return int(ExitCode.SERVER)
 
     if prepare_workspace(plan) != 0:
-        job["rc"] = 14
+        job["rc"] = int(ExitCode.WORKSPACE)
         job["error"] = "workspace prep error"
         write_summary(job, int(time.time()) - start_ts)
         if os.path.exists(_marker_path):
             try: os.remove(_marker_path)
             except OSError: pass
-        return 14
+        return int(ExitCode.WORKSPACE)
 
     rc = 1
     try:
@@ -2178,11 +2209,11 @@ def launch_background(args) -> int:
                 return cmd_wait(args.label)
             log(f"ERROR: background child (PID {child.pid}) exited "
                 f"rc={child.returncode} before writing the .running marker")
-            return 17
+            return int(ExitCode.CHILD_DIED)
         if time.monotonic() > deadline:
             log(f"ERROR: background child (PID {child.pid}) did not write the "
                 f".running marker within 60s")
-            return 17
+            return int(ExitCode.CHILD_DIED)
         time.sleep(0.2)
     log(f"Machine launched in the background (PID {child.pid}). Log: {log_path}")
     return cmd_wait(args.label)
@@ -2252,7 +2283,7 @@ def main() -> int:
         evidence_dir, _ = label_paths(args.label)
         marker = os.path.join(evidence_dir, ".running")
 
-        def early_abort(rc: int, err_msg: str) -> int:
+        def abort(code: ExitCode, err_msg: str) -> int:
             log(err_msg)
             if os.path.exists(marker):
                 # A live run's marker must survive an early abort of a
@@ -2276,7 +2307,7 @@ def main() -> int:
                 job = {
                     "label": args.label,
                     "ticket": args.ticket,
-                    "rc": rc,
+                    "rc": int(code),
                     "verifier": "FAIL",
                     "probe_result": "EARLY-ABORT",
                     "turns": 0,
@@ -2284,13 +2315,13 @@ def main() -> int:
                 }
                 with open(sum_path, "w", encoding="utf-8") as f:
                     json.dump(build_summary(job, 0), f, ensure_ascii=False, indent=2)
-            return rc
+            return int(code)
 
         if validate_label(args.label):
-            return early_abort(15, f"ERROR: Invalid label {args.label}")
+            return abort(ExitCode.BAD_LABEL, f"ERROR: Invalid label {args.label}")
 
         # A stale summary.json from an earlier run of this label must not
-        # survive: early_abort writes only when the file is absent, so the
+        # survive: abort writes only when the file is absent, so the
         # supervisor could otherwise read a verdict from the previous run.
         _rotate_stale_summary(args.label)
 
@@ -2299,24 +2330,24 @@ def main() -> int:
         # reset/lock/preflight, no side effects.
         parent_claude = os.path.join(os.path.dirname(REPO_ROOT), "CLAUDE.md")
         if os.path.isfile(parent_claude):
-            return early_abort(24, f"ERROR: ROLE-LEAK: parent CLAUDE.md above the repo: {parent_claude}")
+            return abort(ExitCode.ROLE_LEAK, f"ERROR: ROLE-LEAK: parent CLAUDE.md above the repo: {parent_claude}")
 
         args.ticket_path = _resolve_ticket(args.ticket, direct=args.direct)
         if not os.path.isfile(args.ticket_path):
-            return early_abort(13, f"ERROR: Ticket not found: {args.ticket_path}")
+            return abort(ExitCode.TICKET, f"ERROR: Ticket not found: {args.ticket_path}")
 
         if dirty_tree_gate():
-            return early_abort(22, "ERROR: the machine repo contains uncommitted changes (rc=22)")
+            return abort(ExitCode.DIRTY_TREE, "ERROR: the machine repo contains uncommitted changes (rc=22)")
 
         # W4 hygiene gate (rc=26): hidden/TEMP leftovers in src/tests/docs/scripts
         # leak into the machine's context and slip past dirty_tree_gate.
         if hidden_files_gate():
-            return early_abort(26, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
+            return abort(ExitCode.HIDDEN_FILES, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
 
         # W6 verdict-subversion gate (rc=27): pytest config files under tests/
         # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
-        if test_config_gate():
-            return early_abort(27, "ERROR: pytest config files in tests/ (rc=27)")
+        if check_test_config():
+            return abort(ExitCode.TEST_CONFIG, "ERROR: pytest config files in tests/ (rc=27)")
 
         # W7 sandbox-config gate (rc=28): a sandbox.filesystem deny entry that
         # resolves (against the settings dir, per cli.js) to a non-existent
@@ -2324,8 +2355,8 @@ def main() -> int:
         # The abort message carries the offending entries + fix (CC-157).
         sandbox_problems = sandbox_config_gate()
         if sandbox_problems:
-            return early_abort(
-                28, "ERROR: sandbox.filesystem deny entry invalid (rc=28): "
+            return abort(
+                ExitCode.SANDBOX_CONFIG, "ERROR: sandbox.filesystem deny entry invalid (rc=28): "
                 + "; ".join(sandbox_problems))
 
         # R2: launch orchestration (the former launch.sh branches, in Python).
@@ -2348,7 +2379,7 @@ def main() -> int:
             try:
                 fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                return early_abort(21, f"LOCK: the repo is already busy with another run ({lock_path})")
+                return abort(ExitCode.LOCK, f"LOCK: the repo is already busy with another run ({lock_path})")
             return cmd_run(args)
 
         # Host sync: supervise the Docker container (launcher/sandbox.py).
@@ -2357,7 +2388,7 @@ def main() -> int:
         # launch path — it lives in doctor
         # (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
         if shutil.which("docker") is None:
-            return early_abort(1, "ERROR: docker not found on PATH")
+            return abort(ExitCode.DEFECT, "ERROR: docker not found on PATH")
         # T4 (CC-135): the container's rw carve-outs must be fixed BEFORE
         # `docker run`, but the SessionPlan is built later, inside the
         # container — so the host derives them from the same ticket text with
@@ -2372,7 +2403,7 @@ def main() -> int:
             # container for a ticket that edits a protected file.
             assert_edit_paths_are_not_protected(edit_paths)
         except (OSError, ValueError) as e:
-            return early_abort(13, f"ERROR: ticket parse error: {e}")
+            return abort(ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
         rw_paths = host_rw_paths(declared)
         ro_paths = host_ro_paths(rw_paths)
         return run_sandboxed(args, rw_paths, ro_paths)

@@ -94,8 +94,8 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
 
 | Variable             | Default                   | What it sets                     |
 |----------------------|---------------------------|----------------------------------|
-| `STANOK_SERVER_URL`  | `http://127.0.0.1:8080`   | llama-server                     |
-| `STANOK_MODEL`       | `Qwen3.8-27B-MTP`         | local model                      |
+| `STANOK_SERVER_URL`  | `http://127.0.0.1:8080`   | inference server                 |
+| `STANOK_MODEL`       | `qwen3.8-flash-next-iq3_xxs` | local model                     |
 | `STANOK_CLAUDE_BIN`  | `claude` (from PATH)      | claude-code binary               |
 | `STANOK_PY`          | `<repo>/.venv/bin/python` | python for the Runner (host-side; remapped to the image python inside the container) |
 | `STANOK_REPO`        | `<repo>/stanok`           | machine root (override)          |
