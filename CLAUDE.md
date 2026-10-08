@@ -45,7 +45,10 @@ the ONE fixed contract in this project regardless of language:
 
 ```
 scripts/run.sh list              # print one test path per line
-scripts/run.sh test <path>       # run exactly one test file; exit 0 = pass
+scripts/run.sh test <path>...    # run one or more test files; the final rc is
+                                 # the LAST file's result (runner 2/6 remapped to 1)
+scripts/run.sh test --all        # run every registered test file; rc=1 if ANY
+                                 # failed, rc=124 at the first 60 s timeout
 scripts/run.sh smoke <path>      # sanity-load one module; exit 0 = clean
 ```
 
@@ -61,8 +64,9 @@ REGISTRY. The test framework is fixed by that registry — **py** runs `pytest`,
 
 The STACK REGISTRY is derived at RUNTIME by `run.sh` from the per-stack TOML manifests
 in `scripts/stacks/` (one manifest per stack: `ext`, `test_glob`, `name_regex`,
-`test_runner`, `smoke_runner`, `preflight`) — the single source of truth, no generated
-artifact to keep in sync. The manifests are fixed infrastructure: you do not create or
+`test_runner`, `smoke_runner`, `preflight`, plus `verdict_config` — read by the
+launcher, not run.sh: the forbidden test-config filenames behind the rc=27
+gate) — the single source of truth, no generated artifact to keep in sync. The manifests are fixed infrastructure: you do not create or
 edit them (tickets declare `src/`/`tests/`/`docs/` paths, plus `scripts/run.sh` only
 in the bootstrap case above).
 
@@ -73,9 +77,10 @@ The test framework is chosen by the `scripts/run.sh` STACK REGISTRY, not by you:
   `from src import x` or bare `import x` (`src` is on `sys.path` via `pythonpath=src`).
 - **js** — `node:test` functions in `tests/**/*.test.js` (run via `node --test`).
 - **jq** — JSON validation stack: `tests/**/*.json` files are validated with
-  `jq empty` (exit 0 = well-formed JSON). `run.sh test`/`smoke` accept `.json`
-  paths; the doctor image preflight probes `jq` availability in the image
-  (doctor fails if missing — CC-106 moved it off the launch path).
+  `jq empty` (exit 0 = well-formed JSON). `run.sh test` accepts `.json` paths
+  (`smoke` accepts only `src/*.jq` modules); the doctor image preflight probes
+  `jq` availability in the image (doctor fails if missing — CC-106 moved it
+  off the launch path).
 A bare module-level `assert` is NOT a test (the verifier sees rc=5 "no tests ran").
 Do not introduce another framework (`go test`, `cargo test`, ...): the registry does not run it.
 
@@ -95,9 +100,9 @@ node --test 0/1, jq 0/5):
 | 3,4,5 | pytest's own codes, passed through (5 = no tests ran; jq's parse error also exits 5) |
 
 `list` fails closed (rc=1) when `tests/` contains a test-like file (basename
-contains "test", case-insensitive; `fixtures/`, `data/` and `__pycache__/`
-dirs exempt) that no registry line claims — an unrun test must never pass
-the gate silently.
+contains "test", case-insensitive; files directly inside `fixtures/`,
+`data/` or `__pycache__/` are exempt — immediate parent only) that no
+registry line claims — an unrun test must never pass the gate silently.
 
 ## TDD discipline (Red -> Green)
 

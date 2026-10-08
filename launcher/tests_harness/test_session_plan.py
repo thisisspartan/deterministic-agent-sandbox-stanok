@@ -246,11 +246,15 @@ def test_stale_create_path_is_a_defect(repo, monkeypatch):
 
 
 def test_create_paths_that_are_new_pass(repo, monkeypatch):
-    write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
+    # CC-206: the edit here moved from tests/ to src/ — `edit:` on a
+    # pre-existing protected test is now refused by
+    # assert_edit_paths_are_not_protected (a separate gate); this test keeps
+    # pinning ONLY the CC-133 create-vs-edit direction.
+    write(repo / "src" / "old.py", "x = 1\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
     declared, edit_paths, _ = stanok.parse_ticket_header(
         "test: tests/new_test.py\n"
-        "edit: tests/old_test.py\n"
+        "edit: src/old.py\n"
         "impl: src/new.py\n"
     )
     stanok.assert_create_paths_are_new(declared, edit_paths)  # no raise
@@ -262,3 +266,64 @@ def test_edit_path_that_is_absent_is_not_a_defect(repo, monkeypatch):
     # file exists).
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
     stanok.assert_create_paths_are_new(["src/new.py"], ["scripts/run.sh"])
+
+
+# --- CC-206: `edit:` on a protected file is a ticket defect (rc=13) -----------
+#
+# The CC-204-retry3 root cause: the ticket declared `edit: tests/...`, the
+# launcher dropped it from the :ro bind, the machine edited a reference test,
+# the isolation probe failed, the model deadlocked on the contradiction. The
+# gate refuses that ticket BEFORE any container start.
+
+def test_edit_on_existing_test_is_a_defect(repo, monkeypatch):
+    write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    _, edit_paths, _ = stanok.parse_ticket_header(
+        "edit: tests/old_test.py\n"
+        "test: tests/new_test.py\n"
+    )
+    with pytest.raises(ValueError) as exc:
+        stanok.assert_edit_paths_are_not_protected(edit_paths)
+    assert "tests/old_test.py" in str(exc.value)
+
+
+def test_edit_on_existing_runsh_is_a_defect(repo, monkeypatch):
+    # scripts/run.sh exists (the repo fixture installs the live one) -> it is
+    # protected -> the machine may not edit it in place.
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    _, edit_paths, _ = stanok.parse_ticket_header("edit: scripts/run.sh\n")
+    with pytest.raises(ValueError) as exc:
+        stanok.assert_edit_paths_are_not_protected(edit_paths)
+    assert "scripts/run.sh" in str(exc.value)
+
+
+def test_edit_on_absent_runsh_is_legal_bootstrap(repo, monkeypatch):
+    # The bootstrap direction stays legal: an ABSENT scripts/run.sh is not in
+    # _protected_files(), so `edit: scripts/run.sh` is not refused (the
+    # machine may create it).
+    (repo / "scripts" / "run.sh").unlink()
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    _, edit_paths, _ = stanok.parse_ticket_header("edit: scripts/run.sh\n")
+    stanok.assert_edit_paths_are_not_protected(edit_paths)  # no raise
+
+
+def test_edit_on_existing_src_file_is_legal(repo, monkeypatch):
+    # src/ is not protected: an in-place edit of implementation code is the
+    # normal case and must stay legal.
+    write(repo / "src" / "mod.py", "x = 1\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    _, edit_paths, _ = stanok.parse_ticket_header("edit: src/mod.py\n")
+    stanok.assert_edit_paths_are_not_protected(edit_paths)  # no raise
+
+
+def test_cmd_run_gate_order_rejects_before_any_workspace_mutation(repo, monkeypatch):
+    # The gate is wired into cmd_run's existing validation try-block: a ticket
+    # with `edit: tests/...` returns rc=13 without touching the workspace.
+    write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
+    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    declared, edit_paths, _ = stanok.parse_ticket_header(
+        "edit: tests/old_test.py\n"
+    )
+    stanok.assert_create_paths_are_new(declared, edit_paths)  # CC-133: no raise
+    with pytest.raises(ValueError):
+        stanok.assert_edit_paths_are_not_protected(edit_paths)

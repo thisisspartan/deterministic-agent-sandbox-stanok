@@ -12,6 +12,9 @@ Pins the launch mechanisms in launcher/stanok.py:
   5  verify_gate: stub run.sh (test -> rc=6) -> env_fail True, "ENV-FAIL:" message
   6  _status_fields(16, "FAIL", 1) == ("ENV-FAIL", "FAIL", "ENV-FAIL")
   7  _verifier_hook: rc=6 -> {} + "ENV-FAIL" log; rc=1 -> "RED CONFIRMED" context; rc=0/2 -> {}
+  8  preflight_server: env unset -> required derived as n_ctx - REQUIRED_WINDOW_MARGIN
+     (incident smoke-cc183-retry1: stale env 128000 vs live n_ctx 125184 -> rc=20);
+     explicit env stays a hard requirement (fail-closed when n_ctx < env)
 
 CC-106: the former test 8 (full path digest mismatch -> process rc=25) is
 gone with the launch-path preflight — the digest check now lives in doctor
@@ -208,3 +211,76 @@ def test_verifier_hook_call_logged(tmp_path, monkeypatch, capsys):
         {"tool_input": {"file_path": str(repo / "src" / "x.js")}}, "toolu_43", None))
     assert res == {}
     assert "HOOK-CALL id=toolu_43" in capsys.readouterr().out
+
+
+# --- 8: preflight_server — required-window derivation -------------------------
+
+def _props(n_ctx):
+    if n_ctx is None:
+        return {"default_generation_settings": {}}
+    return {"default_generation_settings": {"n_ctx": n_ctx}}
+
+
+def _clear_window_env(monkeypatch):
+    monkeypatch.delenv("STANOK_REQUIRED_WINDOW", raising=False)
+    monkeypatch.delenv("STANOK_SKIP_SERVER_CHECK", raising=False)
+
+
+def test_preflight_server_derives_window_when_env_unset(monkeypatch, capsys):
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(125184))
+    assert stanok.preflight_server() is True
+    out = capsys.readouterr().out
+    assert "derived required window 123184" in out
+    assert "n_ctx 125184 - margin 2000" in out
+
+
+def test_preflight_server_derived_window_fails_on_tiny_n_ctx(monkeypatch, capsys):
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(1000))
+    assert stanok.preflight_server() is False
+    assert "fail-closed" in capsys.readouterr().out
+
+
+def test_preflight_server_env_window_ok(monkeypatch, capsys):
+    _clear_window_env(monkeypatch)
+    monkeypatch.setenv("STANOK_REQUIRED_WINDOW", "123000")
+    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(125184))
+    assert stanok.preflight_server() is True
+    assert ">= required window 123000" in capsys.readouterr().out
+
+
+def test_preflight_server_stale_env_window_fails(monkeypatch, capsys):
+    # Regression pin for smoke-cc183-retry1: an EXPLICIT env window is a hard
+    # requirement — stale 128000 vs live n_ctx 125184 must fail-closed.
+    _clear_window_env(monkeypatch)
+    monkeypatch.setenv("STANOK_REQUIRED_WINDOW", "128000")
+    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(125184))
+    assert stanok.preflight_server() is False
+    assert "n_ctx=125184 < required window 128000" in capsys.readouterr().out
+
+
+def test_preflight_server_unavailable(monkeypatch):
+    # The "SERVER UNAVAILABLE" log is emitted inside the real
+    # _fetch_server_props; the None contract here is what preflight sees.
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: None)
+    assert stanok.preflight_server() is False
+
+
+def test_preflight_server_unparseable_n_ctx(monkeypatch, capsys):
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(None))
+    assert stanok.preflight_server() is False
+    assert "unparseable n_ctx" in capsys.readouterr().out
+
+
+def test_preflight_server_skip_env(monkeypatch):
+    _clear_window_env(monkeypatch)
+    monkeypatch.setenv("STANOK_SKIP_SERVER_CHECK", "1")
+
+    def _boom():
+        raise AssertionError("must not fetch props when the check is skipped")
+
+    monkeypatch.setattr(stanok, "_fetch_server_props", _boom)
+    assert stanok.preflight_server() is True

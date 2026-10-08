@@ -454,12 +454,21 @@ def sandbox_config_gate() -> list[str]:
     return problems
 
 
+# Safety margin between the server's live n_ctx and the derived required
+# window when STANOK_REQUIRED_WINDOW is not set (preflight_server).
+REQUIRED_WINDOW_MARGIN = 2000
+
+
 def _required_context_window() -> int | None:
     """Required context window, from the env only: STANOK_REQUIRED_WINDOW
     (exported by P0-launch.sh). cli.js likewise reads
     CLAUDE_CODE_AUTO_COMPACT_WINDOW from env (rQ); there is no settings source —
     the former .claude/settings.stanok.json fallback read a key that no longer
-    exists (CC-127)."""
+    exists (CC-127). When the env var is unset, preflight_server derives the
+    required window from the live server (n_ctx - REQUIRED_WINDOW_MARGIN)
+    instead of skipping the check — a stale env number must not be the only
+    thing standing between a healthy server and rc=20 (incident
+    smoke-cc183-retry1: env 128000 vs server n_ctx 125184)."""
     env_val = os.environ.get("STANOK_REQUIRED_WINDOW")
     if env_val:
         try:
@@ -483,26 +492,39 @@ def context_rot_threshold() -> int:
     return int(window * 0.8)
 
 
-def preflight_server() -> bool:
-    if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
-        return True
+def _fetch_server_props() -> dict | None:
+    """GET {SERVER_URL}/props (no proxy, 5 s timeout). None on any failure."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(urllib.request.Request(f"{SERVER_URL}/props"), timeout=5) as resp:
-            props = json.loads(resp.read().decode("utf-8", errors="replace"))
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
     except Exception as e:
         log(f"SERVER UNAVAILABLE ({SERVER_URL}: {type(e).__name__}) (rc=20)")
-        return False
+        return None
 
-    required = _required_context_window()
-    if required is None:
-        log("PREFLIGHT: server reachable, no required window configured — OK")
+
+def preflight_server() -> bool:
+    if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
         return True
+    props = _fetch_server_props()
+    if props is None:
+        return False
 
     n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
     if not isinstance(n_ctx, int) or n_ctx <= 0:
         log(f"PREFLIGHT: unparseable n_ctx in /props (fail-closed) (rc=20)")
         return False
+
+    required = _required_context_window()
+    if required is None:
+        # No hard window in env — derive it from the live server so the check
+        # tracks the actual n_ctx instead of a possibly stale env number.
+        required = n_ctx - REQUIRED_WINDOW_MARGIN
+        if required <= 0:
+            log(f"PREFLIGHT: server n_ctx={n_ctx} <= margin {REQUIRED_WINDOW_MARGIN} (fail-closed) (rc=20)")
+            return False
+        log(f"PREFLIGHT: STANOK_REQUIRED_WINDOW unset — derived required window "
+            f"{required} (n_ctx {n_ctx} - margin {REQUIRED_WINDOW_MARGIN})")
     if n_ctx < required:
         log(f"PREFLIGHT: server n_ctx={n_ctx} < required window {required} (rc=20)")
         return False
@@ -575,7 +597,7 @@ def preflight_image(image: str) -> bool:
         return False
     if got != want:
         log(f"PREFLIGHT-IMAGE: digest mismatch — image label {got!r} != "
-            f"sha256(Dockerfile+run.sh) {want!r}; rebuild via ./setup.sh (doctor image preflight)")
+            f"sha256(Dockerfile+run.sh+stacks) {want!r}; rebuild via ./setup.sh (doctor image preflight)")
         return False
     log(f"PREFLIGHT-IMAGE: digest OK ({want[:12]}…)")
     for pre in _stack_preflights():
@@ -660,7 +682,7 @@ def _validate_declared_path(rel: str) -> bool:
     return declared_carveout(rel) is not None
 
 
-def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
+def host_ro_paths(rw_paths: tuple) -> tuple[str, ...]:
     """The pre-existing contract files to re-bind `:ro` ON TOP of a rw carve-out
     (T4b, CC-136).
 
@@ -672,14 +694,17 @@ def host_ro_paths(declared: list[str], rw_paths: tuple) -> tuple[str, ...]:
     binding the protected files :ro restores immutability natively — this is the
     FIRST echelon; the post-turn manifest diff (T5/CC-137) is the second.
 
-    Two exclusions: a file outside every carve-out needs no bind (the repo `:ro`
-    mount already covers it), and a DECLARED path is never bound (`edit:` on an
-    existing test is exactly the case that must stay writable)."""
-    declared_set = set(declared)
+    One exclusion: a file outside every carve-out needs no bind (the repo
+    `:ro` mount already covers it).
+
+    CC-206: every protected file under a carve-out is ALWAYS bound :ro — the
+    former declared-path exemption is gone. A declared
+    path is never protected because the gate
+    (`assert_edit_paths_are_not_protected`, rc=13) refuses `edit:` on a
+    protected path before the container starts; the mount layer does not trust
+    the declaration either way."""
     ro: list[str] = []
     for rel in _protected_files():
-        if rel in declared_set:
-            continue
         if not any(rel == carve or rel.startswith(carve + "/")
                    for carve in rw_paths):
             continue
@@ -706,9 +731,11 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
     `#` title lines and blank lines are skipped inside the header block; the
     first other line ends it (a path mentioned in the body is never matched).
 
-    `edit:` marks a path that the ticket MODIFIES IN PLACE (typically an
-    existing test whose contract changes) — it is declared like any other path
-    but is NOT quarantined (CC-125). Paths are validated against the
+    `edit:` marks a path that the ticket MODIFIES IN PLACE — it is declared
+    like any other path but is NOT quarantined (CC-125). CC-206: `edit:` on a
+    protected file (pre-existing `tests/**` or an existing `scripts/run.sh`) is
+    refused by assert_edit_paths_are_not_protected (rc=13) before the container
+    starts — a pre-existing test/entrypoint is immutable to the machine. Paths are validated against the
     filesystem (declared_carveout: relative, no `..`, no symlink out of the
     repo, and an existing path or an existing ancestor BELOW the repo root);
     an undeclarable path raises ValueError (fail-closed, rc=13 upstream).
@@ -764,14 +791,51 @@ def assert_create_paths_are_new(declared: list[str], edit_paths: list[str]) -> N
     a first ticket in a new project may legitimately declare
     `edit: scripts/run.sh` before run.sh exists."""
     skip = set(edit_paths)
+    protected = set(_protected_files())
     for rel in declared:
         if rel in skip:
             continue
         if os.path.exists(os.path.join(REPO_ROOT, rel)):
+            if rel in protected:
+                # CC-206: `edit: <rel>` would now hit the new gate — do not
+                # suggest it as the fix for a PROTECTED stale path.
+                raise ValueError(
+                    f"declared path {rel!r} already exists but is declared as a "
+                    f"create (impl:/test:/docs:); it is a protected file, so "
+                    f"`edit: {rel}` is refused too (CC-206) — remove the stale "
+                    f"artifact or edit it host-side before launch"
+                )
             raise ValueError(
                 f"declared path {rel!r} already exists but is declared as a create "
                 f"(impl:/test:/docs:); declare it as `edit: {rel}` to modify it in "
                 f"place, or remove the stale artifact"
+            )
+
+
+def assert_edit_paths_are_not_protected(edit_paths: list[str]) -> None:
+    """CC-206: `edit:` on a protected file is a ticket defect (rc=13),
+    refused BEFORE any container start.
+
+    The CC-204-retry3 incident: the ticket declared `edit: tests/smoke_math_test.py`;
+    `host_ro_paths` voluntarily dropped it from the :ro bind (the former
+    declared-path exemption), the machine edited a reference
+    test, the isolation probe failed, and the run deadlocked in a 31-Read loop
+    (1584 s) — the ticket created an unsatisfiable contract.
+
+    The invariant: a pre-existing `tests/**` file or an existing
+    `scripts/run.sh` (exactly `_protected_files()`) is immutable to the
+    machine. Edit it host-side before launch, or point the ticket at `src/`.
+    An ABSENT `scripts/run.sh` is not protected (bootstrap stays legal,
+    CC-154); `edit:` on a non-protected path (e.g. `src/mod.py`) is the
+    normal case and stays legal. Fail-closed: ValueError -> rc=13 upstream,
+    before SessionPlan/preflight_server/sandbox_argv."""
+    protected = set(_protected_files())
+    for rel in edit_paths:
+        if rel in protected:
+            raise ValueError(
+                f"edit: {rel!r} names a protected file (pre-existing tests/** "
+                f"or scripts/run.sh) — immutable to the machine; edit it "
+                f"host-side before launch, or point the ticket at src/"
             )
 
 
@@ -1014,9 +1078,9 @@ def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
 
 def _protected_files() -> list[str]:
     """The pre-existing contract files — the ONE source for "protected"
-    (CC-136): tests/** plus scripts/run.sh. Both the contract_lock manifest and
-    the host's :ro bind list (host_ro_paths) read this list, so the two cannot
-    drift.
+    (CC-136): tests/**, scripts/run.sh and scripts/stacks/*.toml. Both the
+    contract_lock manifest and the host's :ro bind list (host_ro_paths) read
+    this list, so the two cannot drift.
 
     Only PRE-EXISTING files: a missing scripts/run.sh (a new project's first
     ticket) is free to create. __pycache__/ is skipped: .pyc files are
@@ -1032,6 +1096,17 @@ def _protected_files() -> list[str]:
                 protected.append(os.path.relpath(os.path.join(root, name), REPO_ROOT))
     if os.path.isfile(os.path.join(REPO_ROOT, "scripts", "run.sh")):
         protected.append("scripts/run.sh")
+    # B1 (PLAN-AUDIT-2026-10-08): run.sh derives its STACKS registry
+    # (test_runner, test_glob, verdict_config) from these manifests at every
+    # invocation, and scripts/ is a machine RW zone whenever a ticket declares
+    # a path under it. A manifest left writable lets the machine swap
+    # test_runner for `true` and get a PASS with no test ever run.
+    stacks_dir = os.path.join(REPO_ROOT, "scripts", "stacks")
+    if os.path.isdir(stacks_dir):
+        for name in sorted(os.listdir(stacks_dir)):
+            if name.endswith(".toml"):
+                protected.append(os.path.relpath(
+                    os.path.join(stacks_dir, name), REPO_ROOT))
     return protected
 
 
@@ -1098,6 +1173,45 @@ def _contract_lock_forced_fail(job: dict, turn: int) -> int | None:
 
 
 # ==================================================================================
+# Loop-trap circuit breaker (CC-207)
+# ==================================================================================
+def _loop_trap_path() -> str:
+    """CC-207: single source of the marker path. The hook writes it (via the
+    STANOK_LOOP_TRAP_FILE env handed to the machine process), the launcher
+    reads it. _live_dir (LOG_DIR/<label>) is mounted rw in the container
+    (sandbox.py) — the channel needs no new mount."""
+    return os.path.join(_live_dir, "loop-trap.json")
+
+
+def _read_loop_trap(marker_path: str) -> dict | None:
+    """Best-effort read of the loop-guard termination marker: missing /
+    unreadable / non-JSON / directory -> None. A broken marker must never
+    kill the turn — the hook's fail-open invariant, mirrored on the reader."""
+    try:
+        with open(marker_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _loop_trap_verdict(job: dict, loop_trap: dict) -> int:
+    """CC-207: the circuit-breaker verdict on a job dict (the
+    _contract_lock_forced_fail pattern). No fix prompt, no local retries: a
+    retry re-enters the same loop — the marker is cumulative for the
+    session. rc=1 is the existing defect code (no new rc)."""
+    job["probe_result"] = "LOOP-TRAP"
+    job["loop_trap"] = loop_trap
+    job["verifier"] = "FAIL"
+    job["error"] = (
+        f"LOOP-TRAP: {loop_trap.get('tool')} repeated {loop_trap.get('n')}x "
+        "consecutively — session terminated by the circuit breaker"
+    )
+    log("LOOP-TRAP: fail-closed (no fix prompt, no retry — the marker is cumulative)")
+    return 1
+
+
+# ==================================================================================
 # Inference environment (Prefix Invariance)
 # ==================================================================================
 def build_agent_env() -> dict[str, str]:
@@ -1124,6 +1238,10 @@ def build_agent_env() -> dict[str, str]:
         "CLAUDE_CODE_SUBAGENT_MODEL": LOCAL_MODEL,
         "CLAUDE_CODE_AUTO_COMPACT_WINDOW": os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "128000"),
         "API_TIMEOUT_MS": API_TIMEOUT_MS,
+        # CC-207: the loop-guard termination-marker channel. The hook writes
+        # it at the 5th consecutive identical call; _execute_turn reads it
+        # mid-turn. Derived-from-runtime (per-run dir) -> belongs here.
+        "STANOK_LOOP_TRAP_FILE": _loop_trap_path(),
     }
 
 
@@ -1145,8 +1263,8 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> tuple[dict, dict, int, str]:
-    """Returns (turn_total, live_window, writes, turn_error).
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> tuple[dict, dict, int, str, dict | None]:
+    """Returns (turn_total, live_window, writes, turn_error, loop_trap).
 
     turn_total  — ResultMessage.usage: cumulative across the turn's API calls
                   (for session totals).
@@ -1156,6 +1274,9 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
                   W2.4; immune to test side effects, unlike a file manifest).
     turn_error  — "" on a clean turn; otherwise the API/max-turns error string
                   (CLI_MAX_TURNS_EXCEEDED or the ResultMessage error detail).
+    loop_trap   — CC-207: the loop-guard termination marker read mid-turn
+                  (the hook denied the 5th consecutive identical call), or
+                  None if the breaker did not trip.
     """
     from claude_agent_sdk import ResultMessage
 
@@ -1164,6 +1285,8 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
     turn_total = {}
     writes = 0
     turn_error = ""
+    loop_trap = None
+    marker_path = _loop_trap_path()
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
         if not sid and hasattr(msg, "data") and isinstance(msg.data, dict):
@@ -1205,7 +1328,16 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
                     writes += 1
 
         _write_stream_msg(stream_f, turn, msg)
-    return (turn_total or live_window), live_window, writes, turn_error
+
+        # CC-207: mid-turn breaker check — CC-204-retry3 burned the whole
+        # 1584 s turn before any turn-end check could fire. One stat per
+        # message, no polling loop; a broken marker is not fatal (retried
+        # on the next message).
+        if loop_trap is None and os.path.exists(marker_path):
+            loop_trap = _read_loop_trap(marker_path)
+            if loop_trap is not None:
+                break
+    return (turn_total or live_window), live_window, writes, turn_error, loop_trap
 
 
 # contract_lock (T5, CC-137): the PreToolUse deny hook is GONE. Its job — a
@@ -1394,7 +1526,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 )
 
                 try:
-                    turn_usage, live_window, turn_writes, turn_error = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
+                    turn_usage, live_window, turn_writes, turn_error, loop_trap = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
                 except asyncio.TimeoutError:
                     log(f"TIMEOUT: turn {turn} exceeded {TURN_TIMEOUT_S:.0f}s (silent stall) -> interrupt")
                     try:
@@ -1414,6 +1546,23 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     job["verifier"] = "FAIL"
                     job["turns"] = turn
                     return 1
+
+                # CC-207: the loop-guard circuit breaker tripped mid-turn —
+                # the model repeated one identical call 5x in a row and the
+                # hook signalled termination. NO fix prompt, NO local retries:
+                # a retry re-enters the same loop (the marker is cumulative
+                # for the session). Interrupt the session best-effort, then
+                # fail closed with probe_result "LOOP-TRAP".
+                if loop_trap:
+                    log(f"LOOP-TRAP (turn {turn}): {loop_trap.get('tool')!r} "
+                        f"repeated {loop_trap.get('n')}x consecutively — "
+                        "circuit breaker tripped, interrupting the session")
+                    try:
+                        await client.interrupt()
+                    except Exception as e:
+                        log(f"WARN: client.interrupt() finished with an error: {e}")
+                    job["turns"] = turn
+                    return _loop_trap_verdict(job, loop_trap)
 
                 elapsed_turn = time.time() - t0
 
@@ -1740,6 +1889,9 @@ def cmd_run(args) -> int:
         # CC-133: the create/edit split is derived from the filesystem, not
         # trusted from the header (ValueError -> rc=13 below).
         assert_create_paths_are_new(declared_paths, edit_paths)
+        # CC-206: `edit:` on a protected file is an unsatisfiable contract
+        # (CC-204-retry3) — refuse it here, before any workspace mutation.
+        assert_edit_paths_are_not_protected(edit_paths)
     except (OSError, ValueError) as e:
         job["rc"] = 13
         job["error"] = f"ticket parse error: {e}"
@@ -2224,10 +2376,13 @@ def main() -> int:
             with open(args.ticket_path, encoding="utf-8") as f:
                 declared, edit_paths, _ = parse_ticket_header(f.read())
             assert_create_paths_are_new(declared, edit_paths)
+            # CC-206: same gate as cmd_run — the host must not start a
+            # container for a ticket that edits a protected file.
+            assert_edit_paths_are_not_protected(edit_paths)
         except (OSError, ValueError) as e:
             return early_abort(13, f"ERROR: ticket parse error: {e}")
         rw_paths = host_rw_paths(declared)
-        ro_paths = host_ro_paths(declared, rw_paths)
+        ro_paths = host_ro_paths(rw_paths)
         return run_sandboxed(args, rw_paths, ro_paths)
 
     return 0

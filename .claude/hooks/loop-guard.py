@@ -3,11 +3,25 @@
 
 Считает только ПОДРЯД идущие повторения одного и того же вызова: любой
 другой tool call сбрасывает счётчик. TDD-цикл (run.sh test -> Edit ->
-run.sh test) не триггерит; 10 идентичных вызовов подряд — deny на 10-м.
-Fail-open: любой сбой = exit 0 (хук никогда не блокирует и не вешает turn)."""
-import sys, json, hashlib, os
+run.sh test) не триггерит; 5 идентичных вызовов подряд — deny на 5-м.
 
-THRESHOLD = 10
+CC-207 (инцидент CC-204-retry3: 31 идентичный Read, текст отказа вошёл в
+контекст как ещё одна строка и петлю не разорвал): отказ — это СИГНАЛ
+ЗАВЕРШЕНИЯ. На 5-м подряд identical-вызове хук пишет JSON-маркер
+{"tool","hash","n","ts"} в STANOK_LOOP_TRAP_FILE (env не задан — маркера
+нет: вне stanok-сессии хук остаётся чистой предупреждающей заглушкой).
+Лончер читает маркер и завершает run с probe_result "LOOP-TRAP".
+Fail-open: любой сбой = exit 0; сбой записи маркера никогда не блокирует
+отказ.
+
+Копия машинной сессии (cwd=stanok/). Копия supervisor-сессии
+(darkcast/.claude/hooks/loop-guard.py) намеренно НЕ синхронизируется
+(решение оператора 2026-10-08): supervisor-гард остаётся предупреждающим
+порога 10."""
+import sys, json, hashlib, os
+from datetime import datetime
+
+THRESHOLD = 5
 
 try:
     d = json.load(sys.stdin)
@@ -47,9 +61,20 @@ except OSError:
     pass
 
 if n >= THRESHOLD:
+    marker = os.environ.get("STANOK_LOOP_TRAP_FILE")
+    if marker:
+        try:
+            dname = os.path.dirname(marker)
+            if dname:
+                os.makedirs(dname, exist_ok=True)
+            with open(marker, "w") as f:
+                json.dump({"tool": name, "hash": h, "n": n,
+                           "ts": datetime.now().isoformat(timespec="seconds")}, f)
+        except Exception:
+            pass  # fail-open: отказ важнее маркера
     sys.stderr.write(
         f"Этот вызов ({name}) повторяется {n} раз подряд без любого другого "
-        "действия между вызовами. Не повторяй — действуй по уже полученному "
-        "результату или явно смени подход.\n")
+        "действия между вызовами. Сессия завершается circuit breaker'ом: "
+        "петля прервана, повторять этот вызов больше не будет.\n")
     sys.exit(2)
 sys.exit(0)

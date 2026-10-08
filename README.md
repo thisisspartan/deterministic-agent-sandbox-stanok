@@ -32,7 +32,6 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 
 ```bash
 ./launch.sh run <ticket.md> <label> [--follow] [--direct] [--local-retries N] [-- extra...]
-# `run` is optional: `./launch.sh <ticket.md> <label> ...` is equivalent.
 # The ticket is resolved against three bases (project root -> machine root -> as given),
 # so the canonical call from the project root is: `./stanok/launch.sh tickets/x.md <label>`.
 # The shim cd's into the machine root (the directory containing launch.sh):
@@ -143,7 +142,9 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
    the boundary is the container (cap-drop=ALL, no-new-privileges,
    resource limits) plus the claude-code native sandbox (bwrap per Bash
    command, `enableWeakerNestedSandbox`, network restricted to
-   `allowedDomains`); subagents (Agent/Task) are denied.
+   `allowedDomains`); subagents (Agent/Task) are unavailable — the session's
+   tool surface is restricted to the six curated tools via the SDK `tools`
+   option (not a settings deny entry).
 3. Monolithic TDD in a single session: the model writes the test first
    (red), then the implementation (green), then docs. After every Write/Edit
    under `tests/`: the in-process PostToolUse hook (launcher/stanok.py,
@@ -158,8 +159,11 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
 4. On verifier FAIL the Runner appends an in-session retry turn
    (`--local-retries`, default 2) with the failure block.
 5. Final: `verifier: PASS/FAIL`, `probe_result: CLEAN-FIRST |
-   PASS-AFTER-LOCAL-RETRY | VERIFY-FAIL | EARLY-ABORT`, Runner rc — typed
-   `evidence/<label>/summary.json` (no regex parsing of stdout). The
+   PASS-AFTER-LOCAL-RETRY | VERIFY-FAIL | EARLY-ABORT | NO-OP-PASS |
+   ENV-FAIL | INTEGRITY-FAIL` (NO-OP-PASS: the deliverable already satisfies
+   its tests; ENV-FAIL: runner missing from the image; INTEGRITY-FAIL: the
+   host rejected a forged verdict and overwrote it to FAIL), Runner rc —
+   typed `evidence/<label>/summary.json` (no regex parsing of stdout). The
    container cannot write `evidence/` (read-only there, CC-134): it stages
    `summary.json` in `$STANOK_LOG_DIR/<label>` and the HOST publishes it into
    `evidence/<label>/` after the container exits.
