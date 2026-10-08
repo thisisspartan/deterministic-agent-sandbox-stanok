@@ -140,7 +140,7 @@ def test_full_path_rc27(tmp_path):
     label = "w6-rc27"
     proc = subprocess.run(
         [sys.executable, str(LAUNCHER_DIR / "stanok.py"),
-         "run", "tickets/TASK-TEST.md", label, "--direct"],
+         "run", str(repo / "tickets" / "TASK-TEST.md"), label],
         cwd=repo, env=env, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 27, proc.stdout + proc.stderr

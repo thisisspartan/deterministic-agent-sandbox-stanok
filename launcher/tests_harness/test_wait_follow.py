@@ -130,8 +130,8 @@ def test_cli_wires_wait_and_run_follow(tmp_path, monkeypatch):
     # `run ... --follow` (the sole background flag) is accepted and takes the
     # background/launch branch: a missing ticket aborts at the ticket gate
     # (rc=13) before any launch — it does not fall through to a sync run.
-    proc = subprocess.run([sys.executable, py, "run", "no-such-ticket.md", "f1",
-                           "--follow", "--direct"],
+    proc = subprocess.run([sys.executable, py, "run", str(repo / "no-such-ticket.md"), "f1",
+                           "--follow"],
                           env=env, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 13, proc.stdout + proc.stderr
 

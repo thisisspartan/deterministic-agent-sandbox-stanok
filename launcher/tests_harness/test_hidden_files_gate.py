@@ -10,8 +10,8 @@ dotfiles).
   1  a hidden `.x.js` in src/ is found -> gate True
   2  only `.gitkeep` present -> gate False (clean)
   3  a file with `TEMP:` on its first line -> gate True
-  4  full path `python launcher/stanok.py run ... --direct` with a committed
-     hidden file -> process rc=26, evidence/<label>/summary.json EARLY-ABORT
+  4  full path `python launcher/stanok.py run <absolute ticket path>` with a
+     committed hidden file -> process rc=26, evidence/<label>/summary.json EARLY-ABORT
 
 CC-139 (audit Appendix A #3): the gate used to read only the zone top level,
 so a hidden leftover in a subdirectory was invisible. Pinned here:
@@ -115,7 +115,7 @@ def _rc26_launch(tmp_path, hidden_rel):
     label = "w4-rc26"
     proc = subprocess.run(
         [sys.executable, str(LAUNCHER_DIR / "stanok.py"),
-         "run", "tickets/TASK-TEST.md", label, "--direct"],
+         "run", str(repo / "tickets" / "TASK-TEST.md"), label],
         cwd=repo, env=env, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 26, proc.stdout + proc.stderr
