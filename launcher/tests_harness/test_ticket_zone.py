@@ -15,7 +15,18 @@ rule does NOT weaken CC-206: `edit:` on a pre-existing protected file stays
 refused even though its zone is writable — the two checks are complementary.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_ticket_zone.py -q
+
+Review follow-up (operator, 2026-10-09, on fd7e97e): the zone rule must read
+the RESOLVED location, not the path string — `src/link -> launcher/` (a
+symlink inside a zone) passed the string rule, and Docker resolves a bind
+source's realpath, so the rw mount would land on launcher/. Additionally no
+component of a declared path may be a symlink (SEC-01 alignment with run.sh),
+and zone membership is exact, not prefix-based (`srcfoo` is not a zone).
 """
+import os
+import shutil
+import subprocess
+
 import pytest
 
 from launcher import sandbox, ticket
@@ -136,3 +147,53 @@ def test_refusal_before_any_workspace_mutation(repo):
     # parse_ticket_header is cmd_run's first ticket step (cli.py): a raise here
     # means prepare_workspace/docker never run — nothing was quarantined.
     assert (repo / "launcher").is_dir()
+
+
+# --- the resolved location, not the path string (review follow-up) --------------
+
+def test_symlink_in_zone_to_out_of_zone_dir_is_refused(repo):
+    # The operator's case: `src/link -> ../launcher` (an existing out-of-zone
+    # dir). The string rule accepted `src/link` as a carve-out; Docker resolves
+    # the bind source's realpath, so the rw mount lands on launcher/.
+    (repo / "launcher").mkdir()
+    (repo / "src" / "link").symlink_to("../launcher")
+    cfg = _cfg(repo)
+    with pytest.raises(ValueError) as exc:
+        ticket.parse_ticket_header(cfg, "impl: src/link/x.py\n")
+    assert "src/link/x.py" in str(exc.value)
+    with pytest.raises(ValueError):
+        ticket.parse_ticket_header(cfg, "edit: src/link\n")
+
+
+def test_symlink_component_inside_zone_is_refused(repo):
+    # SEC-01 alignment (run.sh): NO component of a declared path may be a
+    # symlink — even a zone -> zone link. A symlinked component makes the
+    # mount location depend on the link target, not on the declaration.
+    (repo / "src" / "real").mkdir()
+    (repo / "src" / "link").symlink_to("real")
+    with pytest.raises(ValueError):
+        ticket.parse_ticket_header(_cfg(repo), "impl: src/link/x.py\n")
+
+
+def test_zone_membership_is_exact_not_prefix(repo):
+    # `srcfoo` is not a zone; a prefix match would wrongly accept it.
+    with pytest.raises(ValueError):
+        ticket.parse_ticket_header(_cfg(repo), "impl: srcfoo/x.py\n")
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
+def test_docker_bind_resolves_symlink_source(repo):
+    # The threat proven at the Docker layer (why the string rule is not
+    # enough): a rw bind whose SOURCE is a symlink writes through the
+    # resolved target — launcher/, outside the zone.
+    (repo / "launcher").mkdir()
+    (repo / "src" / "link").symlink_to("../launcher")
+    image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
+    proc = subprocess.run(
+        ["docker", "run", "--rm",
+         "--user", f"{os.getuid()}:{os.getgid()}",
+         "-v", f"{repo}/src/link:/mnt:rw",
+         image, "bash", "-c", "echo probe > /mnt/probe.txt"],
+        capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, proc
+    assert (repo / "launcher" / "probe.txt").read_text(encoding="utf-8").strip() == "probe"
