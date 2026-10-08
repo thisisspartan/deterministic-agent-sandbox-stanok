@@ -10,7 +10,7 @@ Pins the launch mechanisms in launcher/stanok.py:
      pin (the old regex over run.sh silently returned [] and disabled the
      doctor runner probes)
   5  verify_gate: stub run.sh (test -> rc=6) -> env_fail True, "ENV-FAIL:" message
-  6  _status_fields(16, "FAIL", 1) == ("ENV-FAIL", "FAIL", "ENV-FAIL")
+  6  _status_fields(16, "FAIL", 1) == "ENV-FAIL"
   7  _verifier_hook: rc=6 -> {} + "ENV-FAIL" log; rc=1 -> "RED CONFIRMED" context; rc=0/2 -> {}
   8  preflight_server: env unset -> required derived as n_ctx - REQUIRED_WINDOW_MARGIN
      (incident smoke-cc183-retry1: stale env 128000 vs live n_ctx 125184 -> rc=20);
@@ -159,7 +159,7 @@ def test_verify_gate_env_fail(tmp_path, monkeypatch):
 # --- 6: _status_fields ---------------------------------------------------------
 
 def test_status_fields_env_fail():
-    assert stanok._status_fields(16, "FAIL", 1) == ("ENV-FAIL", "FAIL", "ENV-FAIL")
+    assert stanok._status_fields(16, "FAIL", 1) == "ENV-FAIL"
 
 
 # --- 7: _verifier_hook rc semantics --------------------------------------------

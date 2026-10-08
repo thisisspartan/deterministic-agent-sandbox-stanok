@@ -3,7 +3,7 @@
 
 Full integration with the L1 Supervisor:
   1. Single Continuous Session (ClaudeSDKClient): retries inside ONE session (99% KV cache).
-  2. Strict summary.json contract (probe_result, c5, review_verdict, errors) for L1.
+  2. Strict summary.json contract (probe_result, errors) for L1.
   3. Adaptive Contract Lock: adaptation for creating tests from scratch and a ban on weakening assertions.
   4. Cumulative Token & Cache Telemetry: exact session_hit_rate calculation.
   5. Shielded Turn Watchdog: the turn timeout (default 1800s) is a terminal DoS

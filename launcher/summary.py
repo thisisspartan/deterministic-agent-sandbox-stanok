@@ -70,8 +70,6 @@ def _publish_evidence(label: str, container_rc: int) -> None:
         # override the whole verdict, not just the verifier flag.
         summary["verifier"] = "FAIL"
         summary["rc"] = container_rc
-        summary["c5"] = "FAIL"
-        summary["review_verdict"] = "FAIL"
         summary["probe_result"] = "INTEGRITY-FAIL"
         summary["integrity_violation"] = "; ".join(violations)
         with open(sum_dst, "w", encoding="utf-8") as f:
@@ -97,19 +95,18 @@ def _rotate_stale_summary(label: str) -> None:
             pass
 
 
-def _status_fields(rc: int, verifier: str, turns: int) -> tuple[str, str, str]:
-    """RC_TABLE — single source of the status fields, derived from
+def _status_fields(rc: int, verifier: str, turns: int) -> str:
+    """RC_TABLE — single source of probe_result, derived from
     (rc, verifier, turns). A new outcome = one row here.
     Fail-closed: only rc==0 AND verifier=="PASS" is a pass; everything
     else is a defect (no PASS-on-FAIL)."""
     if rc == 0 and verifier == "PASS":
-        probe_result = "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
-        return probe_result, "PASS", "CLEAN"
+        return "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
     if rc == 16:
         # ENV-FAIL: the image lacks the test runner — an infrastructure
         # failure (rebuild the image), neither a defect nor a NO-OP.
-        return "ENV-FAIL", "FAIL", "ENV-FAIL"
-    return "VERIFY-FAIL", "FAIL", "DEFECT"
+        return "ENV-FAIL"
+    return "VERIFY-FAIL"
 
 
 def build_summary(job: dict, elapsed_s: int) -> dict:
@@ -118,19 +115,14 @@ def build_summary(job: dict, elapsed_s: int) -> dict:
     turns = job.get("turns", 1)
     verifier = job.get("verifier", "FAIL")
     rc = job.get("rc", 1)
-    probe_result, c5, review_verdict = _status_fields(rc, verifier, turns)
+    probe_result = _status_fields(rc, verifier, turns)
     if job.get("probe_result"):
         probe_result = job["probe_result"]
         # rc=1 is polysemous: NO-OP-PASS vs exhausted-retries. Disambiguate by
         # probe_result, NOT rc — the rc->fields table cannot express two field
         # sets for one rc, so _status_fields is not a pure function of rc (the
         # probe_result override above already broke that); do not "restore" a
-        # pure rc->fields table. A NO-OP is a success: verify_gate really
-        # passed (c5=PASS is a fact), and review_verdict is the third outcome
-        # (NOOP) — neither CLEAN (no build) nor DEFECT (no defect).
-        if probe_result == "NO-OP-PASS":
-            c5 = "PASS"
-            review_verdict = "NOOP"
+        # pure rc->fields table.
 
     per_turn = job.get("turn_telemetry", [])
     inference_telemetry = {
@@ -159,8 +151,6 @@ def build_summary(job: dict, elapsed_s: int) -> dict:
         "rc": rc,
         "verifier": verifier,
         "probe_result": probe_result,
-        "review_verdict": review_verdict,
-        "c5": c5,
         "turns": turns,
         "elapsed_s": elapsed_s,
         "session_id": job.get("session_id"),
