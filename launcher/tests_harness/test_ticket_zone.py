@@ -29,7 +29,7 @@ import subprocess
 
 import pytest
 
-from launcher import sandbox, ticket
+from launcher import gates, sandbox, ticket
 from launcher.config import Config
 
 from conftest import repo, write
@@ -190,30 +190,34 @@ def test_dangling_symlink_component_is_refused(repo):
 
 
 # --- gaps: NOT covered by the declared-path rule, closed by the launch ban -----
+# These two tests state the ban's contract (refusal at LAUNCH, not at parse):
+# the declared-path rule inspects only declared paths, an undeclared symlink
+# in a zone is invisible to it. The ban landed (gates.zone_symlink_gate,
+# operator decision 2026-10-09); the xfail(strict) markers were removed in
+# the same commit the ban arrived (strict xpass = failure — the flip cannot
+# be forgotten).
 
-def test_existing_undeclared_symlink_not_blocked_yet_GAP(repo):
-    # GAP, documented on purpose: declared_carveout inspects only DECLARED
-    # paths. A symlink already in the zone, not declared by the ticket, does
-    # not block the header today. Do not read the zone tests as covering it —
-    # the launch-time ban (next commit) closes this; flip this test to expect
-    # refusal when the ban lands.
+def test_existing_undeclared_symlink_refused_at_launch_GAP(repo):
+    # declared_carveout inspects only DECLARED paths — an undeclared symlink
+    # in a zone is invisible to the header rule. The launch ban
+    # (gates.zone_symlink_gate) must refuse it.
     (repo / "launcher").mkdir()
     (repo / "src" / "link").symlink_to("../launcher")
-    declared, _, _ = ticket.parse_ticket_header(_cfg(repo), "impl: src/mod.py\n")
-    assert declared == ["src/mod.py"]
+    problems = gates.zone_symlink_gate(_cfg(repo))
+    assert any("src/link" in p for p in problems), problems
 
 
-def test_protected_symlink_flows_into_host_ro_paths_verbatim_GAP(repo):
-    # GAP, closed by the launch-time ban: a symlink under tests/ is listed by
-    # _protected_files (os.walk sees it as a file; the manifest hash is the
-    # TARGET's content) and handed to host_ro_paths verbatim — Docker
-    # resolves a bind source's realpath, so the :ro bind lands on the target.
+def test_protected_symlink_under_tests_refused_at_launch_GAP(repo):
+    # Without the ban: a symlink under tests/ is listed by _protected_files
+    # (os.walk sees it as a file; the manifest hash is the TARGET's content)
+    # and handed to host_ro_paths verbatim — Docker resolves a bind source's
+    # realpath, so the :ro bind lands on the target. The ban makes this state
+    # unreachable: the launch is refused before any bind is computed.
     (repo / "launcher").mkdir()
     write(repo / "launcher" / "target.py", "x = 1\n")
     (repo / "tests" / "link_test.py").symlink_to("../launcher/target.py")
-    cfg = _cfg(repo)
-    ro = ticket.host_ro_paths(cfg, ("tests",))
-    assert "tests/link_test.py" in ro
+    problems = gates.zone_symlink_gate(_cfg(repo))
+    assert any("tests/link_test.py" in p for p in problems), problems
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")

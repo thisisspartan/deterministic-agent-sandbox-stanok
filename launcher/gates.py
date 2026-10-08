@@ -98,6 +98,67 @@ def hidden_files_gate(cfg) -> bool:
     return False
 
 
+def zone_symlinks(cfg) -> list[str]:
+    """All symlinks under the writable zones — the ONE scanner shared by the
+    launch gate (zone_symlink_gate) and the post-turn check
+    (verify._check_zone_symlinks). The rule (cc217 review follow-up, operator
+    decision 2026-10-09): in src/tests/docs/scripts symlinks do not exist.
+
+    lstat semantics: os.walk with followlinks=False (a symlinked directory is
+    LISTED, never descended into) and os.path.islink on every entry — file
+    links, directory links and dangling links are all found; the zone
+    directory itself is checked too (`src -> launcher/` — no walk would see
+    its contents as zone content). Raises OSError on a walk error (callers
+    fail closed)."""
+    found: list[str] = []
+    for d in sandbox.WRITABLE_ZONES:
+        dirpath = os.path.join(cfg.repo_root, d)
+        if os.path.islink(dirpath):
+            found.append(d)
+            continue
+        if not os.path.isdir(dirpath):
+            continue
+        walk_errors: list[OSError] = []
+        for root, dirs, files in os.walk(dirpath, followlinks=False,
+                                         onerror=walk_errors.append):
+            for name in dirs + files:
+                path = os.path.join(root, name)
+                if os.path.islink(path):
+                    found.append(os.path.relpath(path, cfg.repo_root))
+        if walk_errors:
+            raise walk_errors[0]
+    return sorted(found)
+
+
+def zone_symlink_gate(cfg) -> list[str]:
+    """The zone-symlink ban at launch (rc=13, wired in cli._launch_gates):
+    no symlink may exist in src/tests/docs/scripts. The container mounts the
+    repo :ro and derives rw carve-outs only inside the zones; Docker resolves
+    a bind source's realpath, so a link hands rw access to its TARGET
+    (`src/link -> launcher/` — proven by test_docker_bind_resolves_symlink_source).
+    The ban covers UNDECLARED links (the declared-path rule inspects only
+    declared paths) and links under tests/ (host_ro_paths would bind them
+    :ro verbatim and Docker would resolve them to their targets). The
+    post-run counterpart is verify._check_zone_symlinks (CONTRACT-FAIL).
+
+    Returns the problem list (empty = OK); each problem names the path, its
+    target and the fix — an accidental operator-side symlink must come with
+    an actionable message. A scan error RAISES: a broken filesystem is not the
+    ticket's fault, the caller maps it to the infrastructure rc (ENV-FAIL,
+    rc=16), not to rc=13 (operator review 2026-10-09)."""
+    links = zone_symlinks(cfg)
+    problems: list[str] = []
+    for rel in links:
+        target = os.readlink(os.path.join(cfg.repo_root, rel))
+        problems.append(
+            f"{rel} -> {target}: replace the symlink with a regular "
+            f"file/directory — Docker resolves a bind source's realpath, "
+            f"so a symlink escapes the writable-zone boundary")
+    for p in problems:
+        log(f"ZONE-SYMLINK: {p}")
+    return problems
+
+
 # CC-151: the pre-manifest (W6) py verdict-config set. Fail-closed fallback
 # when no stack manifest parses (e.g. hermetic test repos with no
 # scripts/stacks/), so the guard never silently disables.

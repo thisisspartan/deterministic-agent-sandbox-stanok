@@ -28,7 +28,7 @@ from launcher.logs import log
 from launcher.plan import SessionPlan
 from launcher.gates import (
     check_test_config, dirty_tree_gate, hidden_files_gate, preflight_server,
-    root_refusal, sandbox_config_gate, validate_label,
+    root_refusal, sandbox_config_gate, validate_label, zone_symlink_gate,
 )
 from launcher.opik import _opik_trace_count
 from launcher.session import _install_signal_handlers, run_continuous_session
@@ -550,10 +550,10 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
 
     One readable sequence: label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
     ticket resolution (rc=13) -> dirty-tree (rc=22) -> hidden-files (rc=26)
-    -> test-config (rc=27) -> sandbox-config (rc=28). Returns None when all
-    gates pass, else (rc, message) for the caller to abort with. Sets
-    args.ticket_path on success (the resolved ticket, used by the launch
-    branches). Do not reorder: the order is the rc contract.
+    -> zone-symlink (rc=13) -> test-config (rc=27) -> sandbox-config (rc=28).
+    Returns None when all gates pass, else (rc, message) for the caller to
+    abort with. Sets args.ticket_path on success (the resolved ticket, used
+    by the launch branches). Do not reorder: the order is the rc contract.
     """
     if validate_label(args.label):
         return (ExitCode.BAD_LABEL, f"ERROR: Invalid label {args.label}")
@@ -581,6 +581,22 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
     # leak into the machine's context and slip past dirty_tree_gate.
     if hidden_files_gate(cfg):
         return (ExitCode.HIDDEN_FILES, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
+
+    # Zone-symlink ban (rc=13, cc217 review follow-up, operator 2026-10-09):
+    # no symlink in src/tests/docs/scripts — the zones are the only rw mounts
+    # and Docker resolves a bind source's realpath, so a link hands rw access
+    # to its target. Undeclared links and links under tests/ are in scope
+    # (the declared-path rule inspects only declared paths). The post-turn
+    # counterpart is verify._check_zone_symlinks (CONTRACT-FAIL). The abort
+    # message names each path, its target and the fix (CC-157-style).
+    try:
+        zone_links = zone_symlink_gate(cfg)
+    except OSError as e:
+        # A broken filesystem is not the ticket's fault: infrastructure rc.
+        return (ExitCode.ENV_FAIL, f"ERROR: zone-symlink scan failed (rc=16): {e}")
+    if zone_links:
+        return (ExitCode.TICKET, "ERROR: symlink in a writable zone (rc=13): "
+                + "; ".join(zone_links))
 
     # W6 verdict-subversion gate (rc=27): pytest config files under tests/
     # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).

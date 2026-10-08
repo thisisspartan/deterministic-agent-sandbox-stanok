@@ -49,12 +49,40 @@ The image preflight is NOT on this path (doctor-only, CC-106).
   CC-206 (`edit:` on a pre-existing protected file stays refused). Tests:
   `launcher/tests_harness/test_ticket_zone.py`.
 
+- Zone-symlink ban (cc217 review follow-up, operator decision 2026-10-09):
+  in the writable zones (src/tests/docs/scripts) symlinks do not exist. Two
+  enforcement points, ONE scanner (`gates.zone_symlinks`):
+  1. LAUNCH — `gates.zone_symlink_gate` in `cli._launch_gates` after the
+     hidden-files gate: any symlink in a zone — file, directory, dangling, or
+     the zone directory itself — refuses the launch (rc=13) with the path list
+     and the fix (replace the symlink with a regular file/directory). It
+     covers UNDECLARED links (the header rule inspects only declared paths)
+     and links under tests/ (host_ro_paths would bind them :ro verbatim and
+     Docker resolves them to their targets). An accidental operator-side
+     symlink is an operator-side fix, not a ticket defect: the error names the
+     path and the action. A SCAN failure raises and maps to rc=16 (ENV-FAIL):
+     a broken filesystem is not the ticket's fault. Hard links need no scan:
+     the base repo is :ro and each zone is a separate rw bind, so `ln()`
+     across the zone boundary is EXDEV (proven by
+     `test_docker_hardlink_across_mounts_fails`); a link inside one zone
+     stays inside it.
+  2. POST-TURN — `verify._check_zone_symlinks` from
+     `session._post_turn_decision` (after `_check_contract_lock`, and the
+     forced FAIL runs BEFORE `verify_gate` — the suite never executes on a
+     tree already declared tampered): a symlink CREATED in a zone during the
+     run is a contract_lock violation -> the existing forced-FAIL path
+     (CONTRACT-FAIL, no retry). Compared against
+     the session-start snapshot, NOT the ticket — a ticket never declares
+     arbitrary links. Tests: `launcher/tests_harness/test_zone_symlink_ban.py`
+     (the two former GAP tests in test_ticket_zone.py are green with the ban).
+
 CONTAINER (the same `cli.main` re-runs inside the image):
 
 ```
 gates re-run + lock (rc=21) -> session.run_continuous_session:
   per turn: session._execute_turn (the agent via the SDK)
   -> verify._check_contract_lock (SHA256 manifest diff)
+  -> verify._check_zone_symlinks (new zone symlink -> contract_lock)
   -> verify.verify_gate: scripts/run.sh test --all
   -> on FAIL: a retry turn with the failure block (--local-retries)
 ```
@@ -95,11 +123,11 @@ by `summary.decide` (override first, then the table); pinned by
 | `launcher/plan.py` | `SessionPlan` (the file-policy object, the single source — I1) |
 | `launcher/logs.py` | logging (`log()`; the per-run sink `_stdout_log_f` assigned by `cli.cmd_run`) |
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
-| `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, server preflight |
+| `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
 | `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits |
 | `launcher/session.py` | the one Claude session: turns, TDD hook, retry prompt, loop-guard |
-| `launcher/verify.py` | contract lock + test execution via `run.sh` (rc mapping, timeouts) |
+| `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts) |
 | `launcher/summary.py` | the summary.json schema (`decide`/`_status_fields`), evidence publishing, rotation |
 | `launcher/opik.py` | trace-count check (telemetry only) |
 | `scripts/run.sh` + `scripts/stacks/*.toml` | the run.sh contract + the stack registry (single source) |
