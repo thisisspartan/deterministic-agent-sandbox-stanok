@@ -49,7 +49,9 @@ VERDICT:
 
 ```
 summary.write_summary -> summary.json staged in LOG_DIR/<label>
-(the container cannot write evidence/, CC-134)
+(the container cannot write evidence/, CC-134; commit_sha is captured on the
+HOST by cli._capture_start_commit before any launch and passed via the
+STANOK_START_COMMIT env — the container never runs git, plan 2026-10-08)
 -> host summary._publish_evidence: the I5 check (the container exit is
 ground truth) may overwrite the verdict to INTEGRITY-FAIL
 -> evidence/<label>/summary.json is read exactly once by the supervisor

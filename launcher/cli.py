@@ -599,6 +599,28 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
     return None
 
 
+def _capture_start_commit(cfg) -> None:
+    """W2.6 provenance (plan 2026-10-08, step 1): capture HEAD on the HOST
+    before any launch and export it as STANOK_START_COMMIT — the container
+    never runs git (in a worktree `.git` is a file pointing outside the
+    mounted tree, rev-parse fails there). An already-set env is kept: the
+    background child must not re-capture a HEAD the operator may have moved
+    during the run — provenance is the commit at START, not at publish.
+    On failure: WARN + no env; build_summary then publishes an explicit None."""
+    if os.environ.get("STANOK_START_COMMIT"):
+        return
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cfg.repo_root,
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            os.environ["STANOK_START_COMMIT"] = out.stdout.strip()
+            return
+        log(f"WARN: commit provenance: git rev-parse HEAD failed "
+            f"(rc={out.returncode}): {out.stderr.strip()}")
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"WARN: commit provenance: git rev-parse HEAD error: {e}")
+
+
 def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
     """Host sync: supervise the Docker container (launcher/sandbox.py).
 
@@ -649,6 +671,12 @@ def main() -> int:
 
         def abort(code: ExitCode, err_msg: str) -> int:
             return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket, code, err_msg)
+
+        # W2.6 provenance: capture HEAD on the HOST before anything launches
+        # (gates, container, child) — the container-side build_summary reads
+        # the env, never git. Container-side main() skips: the env arrived.
+        if os.environ.get("STANOK_IN_CONTAINER") != "1":
+            _capture_start_commit(cfg)
 
         refused = _launch_gates(cfg, args)
         if refused is not None:
