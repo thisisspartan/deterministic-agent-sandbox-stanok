@@ -48,13 +48,20 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
   (CC-140/BL-1). Observe a detached launch: `tail -f /tmp/stanok-logs/<label>.launch.log`
 - `--direct` — headless directly, ticket path relative to the repo
 - `--local-retries N` — in-session retry turns on verifier FAIL (default 2)
+- `wait` / `run --follow` exit semantics: `0` on ANY terminal state (done/dead/missing —
+  including a completed-but-failed run), `124` at the 45-min cap. The verdict is read
+  from `evidence/<label>/summary.json`, never from the exit code (decision 2026-10-08:
+  documented as the current contract, not changed; `test_wait_follow` tests this semantics).
 
 ## Structure
 
 ```
-launcher/stanok.py            — THE single Runner (CLI run/status/wait/stop,
-                                gates, background self-spawn, Job/Attempt,
-                                typed summary.json)
+launcher/stanok.py            — the hub: circuit constants, mutable run state,
+                                ExitCode, SessionPlan, logging, label_paths + the
+                                facade (`import stanok` stays the single entry
+                                point, PEP 562); functional submodules
+                                gates/ticket/verify/session/summary/cli/opik
+                                (PLAN-HYGIENE-2026-10-08 split)
 launcher/sandbox.py           — the Docker boundary (R2, former sandbox-run.sh):
                                 repo mounted read-only with per-ticket writable
                                 carve-outs (T4/CC-135: derived from the declared
@@ -75,7 +82,7 @@ Dockerfile                    — the machine image (debian + toolchain +
                                 + jq)
 hooks/                        — doctor (thin pytest wrapper, R5; the TDD
                                 verifier is in-process in
-                                launcher/stanok.py, R1)
+                                launcher/session.py, R1)
 launcher/tests_harness/       — the doctor checks as pytest (R5)
 .claude/settings.stanok.json  — the machine config (allow/deny,
                                 native sandbox + allowedDomains)
@@ -90,8 +97,8 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
 
 | Variable             | Default                   | What it sets                     |
 |----------------------|---------------------------|----------------------------------|
-| `STANOK_SERVER_URL`  | `http://127.0.0.1:8080`   | llama-server                     |
-| `STANOK_MODEL`       | `Qwen3.8-27B-MTP`         | local model                      |
+| `STANOK_SERVER_URL`  | `http://127.0.0.1:8080`   | inference server                 |
+| `STANOK_MODEL`       | `qwen3.8-flash-next-iq3_xxs` | local model                     |
 | `STANOK_CLAUDE_BIN`  | `claude` (from PATH)      | claude-code binary               |
 | `STANOK_PY`          | `<repo>/.venv/bin/python` | python for the Runner (host-side; remapped to the image python inside the container) |
 | `STANOK_REPO`        | `<repo>/stanok`           | machine root (override)          |
@@ -108,7 +115,8 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
 ## How it works (briefly)
 
 1. `launch.sh` (thin shim → Runner) — the Runner passes the fail-closed
-   gates in this order: label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
+   gates in this order (single source: `launcher/cli.py main()`):
+   label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
    ticket (rc=13) -> dirty-tree (rc=22, uncommitted changes — start
    forbidden) -> then: `--follow` spawns a detached self-run (and blocks until
    terminal), or sync
@@ -147,7 +155,7 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
    option (not a settings deny entry).
 3. Monolithic TDD in a single session: the model writes the test first
    (red), then the implementation (green), then docs. After every Write/Edit
-   under `tests/`: the in-process PostToolUse hook (launcher/stanok.py,
+   under `tests/`: the in-process PostToolUse hook (launcher/session.py,
    SDK `hooks` option — no shell command) runs the matching test through
    `scripts/run.sh` and injects the verdict (RED CONFIRMED) into the
    session — the TDD red phase is harness-provided, not model discipline.
@@ -168,15 +176,25 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
    `summary.json` in `$STANOK_LOG_DIR/<label>` and the HOST publishes it into
    `evidence/<label>/` after the container exits.
 
-## Architecture references
+## Ownership map (rule -> owner file; every other surface references it)
 
-The security boundary, mount layout, integrity contours, the `run.sh`
-contract, and the rc namespace are documented factually in:
+- `scripts/run.sh` header — the run.sh contract: subcommands, the W12 rc table,
+  the STACK REGISTRY format. `CLAUDE.md` carries only the machine rules and
+  points here.
+- `scripts/stacks/*.toml` — the per-stack registry (ext/test_glob/name_regex/
+  runners/preflight/verdict_config): the single source for run.sh and the launcher.
+- `launcher/cli.py main()` — the gate order and launch-level rc codes (the
+  ExitCode docstring in `launcher/stanok.py` is the rc namespace contract).
+- `launcher/summary.py build_summary` — the summary.json schema; the
+  consumer-facing contract is the §"How it works" item 5 above.
+- `CLAUDE.supervisor.md` — the supervisor protocol: verdict reading and stop
+  conditions.
+
+Architecture reviews (darkcast-only — NOT published in the public skeleton):
 
 - `specs/HANDOFF-ARCH-REVIEW.md` — component map, stack-coupling seams.
 - `specs/SPEC-SESSION-PLAN-2026-09-24.md` — file-policy consumers (SessionPlan).
 - `specs/REVIEW-KISS-CLI-FIRST-2026-09-24.md` — native vs hand-rolled inventory.
-- `CLAUDE.supervisor.md` — verdict contract and stop conditions.
 
 ## Commits
 

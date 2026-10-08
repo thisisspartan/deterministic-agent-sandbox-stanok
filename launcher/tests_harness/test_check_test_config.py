@@ -1,4 +1,4 @@
-"""W6 — test_config_gate (hermetic).
+"""W6 — check_test_config (hermetic).
 
 Owner decision A: pytest config files under tests/ can subvert the verdict
 (a `conftest.py` with `pytest_sessionfinish: session.exitstatus = 0` turns a
@@ -27,7 +27,7 @@ tuple. Cases 1-4 run in repos with NO manifests -> the fail-closed fallback
   9  a manifest declaring a custom pattern -> that file is flagged (True),
      proving the guard reads the manifest, not a hardcoded tuple
 
-Run: <venv>/bin/python -m pytest launcher/tests_harness/test_test_config_gate.py -q
+Run: <venv>/bin/python -m pytest launcher/tests_harness/test_check_test_config.py -q
 """
 import json
 import os
@@ -83,7 +83,7 @@ def test_conftest_in_tests_flagged(tmp_path, monkeypatch):
                       "def pytest_sessionfinish(session, exitstatus):\n"
                       "    session.exitstatus = 0\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.test_config_gate() is True
+    assert stanok.check_test_config() is True
 
 
 # --- 2: nested conftest.py -----------------------------------------------------
@@ -93,7 +93,7 @@ def test_nested_conftest_flagged(tmp_path, monkeypatch):
                       "def pytest_sessionfinish(session, exitstatus):\n"
                       "    session.exitstatus = 0\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.test_config_gate() is True
+    assert stanok.check_test_config() is True
 
 
 # --- 3: pyproject.toml in tests/ ------------------------------------------------
@@ -102,7 +102,7 @@ def test_pyproject_in_tests_flagged(tmp_path, monkeypatch):
     repo = _repo_with(tmp_path, "tests/pyproject.toml",
                       "[tool.pytest.ini_options]\naddopts = '--exitfirst'\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.test_config_gate() is True
+    assert stanok.check_test_config() is True
 
 
 # --- 4: clean tests/ -----------------------------------------------------------
@@ -111,7 +111,7 @@ def test_clean_tests_not_flagged(tmp_path, monkeypatch):
     repo = _repo_with(tmp_path, "tests/csv_test.py",
                       "def test_ok():\n    assert True\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.test_config_gate() is False
+    assert stanok.check_test_config() is False
 
 
 # --- 5: full path rc=27 ---------------------------------------------------------
@@ -124,7 +124,7 @@ def test_full_path_rc27(tmp_path):
     (repo / "scripts").mkdir()
     (repo / "scripts" / "run.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     # The conftest MUST be committed so the tree is clean (dirty_tree_gate
-    # passes) and the test_config_gate is what catches it (rc=27, not rc=22).
+    # passes) and the check_test_config is what catches it (rc=27, not rc=22).
     (repo / "tests" / "conftest.py").write_text(
         "def pytest_sessionfinish(session, exitstatus):\n"
         "    session.exitstatus = 0\n", encoding="utf-8")
@@ -160,7 +160,7 @@ def test_py_manifest_conftest_flagged(tmp_path, monkeypatch):
         "def pytest_sessionfinish(session, exitstatus):\n"
         "    session.exitstatus = 0\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.test_config_gate() is True
+    assert stanok.check_test_config() is True
 
 
 # --- 7: js stack not over-blocked (CC-151) -------------------------------------
@@ -171,7 +171,7 @@ def test_js_stack_test_file_clean(tmp_path, monkeypatch):
         tmp_path, "js.toml", JS_MANIFEST,
         "tests/calc.test.js", "const test = require('node:test');\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.test_config_gate() is False
+    assert stanok.check_test_config() is False
 
 
 def test_js_stack_does_not_inherit_py_list(tmp_path, monkeypatch):
@@ -183,7 +183,7 @@ def test_js_stack_does_not_inherit_py_list(tmp_path, monkeypatch):
         "def pytest_sessionfinish(session, exitstatus):\n"
         "    session.exitstatus = 0\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.test_config_gate() is False
+    assert stanok.check_test_config() is False
 
 
 # --- 8: jq stack not over-blocked (CC-151) -------------------------------------
@@ -193,7 +193,7 @@ def test_jq_stack_test_file_clean(tmp_path, monkeypatch):
         tmp_path, "jq.toml", JQ_MANIFEST,
         "tests/data.json", "{}\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.test_config_gate() is False
+    assert stanok.check_test_config() is False
 
 
 # --- 9: manifest is authoritative (custom pattern) (CC-151) -------------------
@@ -205,4 +205,4 @@ def test_custom_manifest_pattern_flagged(tmp_path, monkeypatch):
         tmp_path, "zz.toml", CUSTOM_MANIFEST,
         "tests/custom_verdict.ini", "[v]\n")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.test_config_gate() is True
+    assert stanok.check_test_config() is True

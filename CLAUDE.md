@@ -40,27 +40,26 @@ The ticket is self-contained — everything needed is described in the first mes
 
 ## Project entrypoint: `scripts/run.sh`
 
-This is the ONLY interface the external verifier and you both use to run tests, and it is
-the ONE fixed contract in this project regardless of language:
+This is the ONLY interface the external verifier and you both use to run tests.
+The contract OWNER is the header of `scripts/run.sh`: the subcommands
+(`list`, `test <path>...`, `test --all`, `smoke <path>`), the W12 rc table and the
+STACK REGISTRY format are defined there — the single source. Read the header before
+your first call (TDD step 1 already requires reading `scripts/run.sh`). What follows
+are the rules the script itself does not state:
 
-```
-scripts/run.sh list              # print one test path per line
-scripts/run.sh test <path>...    # run one or more test files; the final rc is
-                                 # the LAST file's result (runner 2/6 remapped to 1)
-scripts/run.sh test --all        # run every registered test file; rc=1 if ANY
-                                 # failed, rc=124 at the first 60 s timeout
-scripts/run.sh smoke <path>      # sanity-load one module; exit 0 = clean
-```
+**`test --all` is mandatory:** the external verifier runs the whole suite with
+`scripts/run.sh test --all` after every turn. An entrypoint that refuses it
+(rc=2) FAILS the run — there is no per-file fallback.
 
 **If `scripts/run.sh` already exists:** use it as-is. Do not rewrite it to make a failing
 test pass — that is the same violation as weakening an assertion in `tests/`.
 
 **If `scripts/run.sh` does not exist yet** (first ticket in a new project, or a ticket that
 explicitly asks you to bootstrap it): write it, appropriate to the language the existing
-code already uses. It must implement exactly the three subcommands above and a STACK
-REGISTRY. The test framework is fixed by that registry — **py** runs `pytest`, **js** runs
-`node --test`, **jq** validates `.json` files (see "Test forms"); you do not pick
-`go test`/`cargo test`/etc.
+code already uses. It must implement the subcommands and the STACK REGISTRY exactly as
+the header of this repo's current `scripts/run.sh` defines them. The test framework is
+fixed by that registry — **py** runs `pytest`, **js** runs `node --test`, **jq** validates
+`.json` files (see "Test forms"); you do not pick `go test`/`cargo test`/etc.
 
 The STACK REGISTRY is derived at RUNTIME by `run.sh` from the per-stack TOML manifests
 in `scripts/stacks/` (one manifest per stack: `ext`, `test_glob`, `name_regex`,
@@ -86,18 +85,9 @@ Do not introduce another framework (`go test`, `cargo test`, ...): the registry 
 
 ## `run.sh` rc table (W12)
 
-run.sh's own codes are disjoint from every runner's codes (pytest 0-5,
-node --test 0/1, jq 0/5):
-
-| rc | meaning |
-|----|---------|
-| 0  | pass |
-| 1  | a test FAILED (runner 2/6 remapped to 1); also: `list` found an unregistered test-like file |
-| 2  | run.sh REFUSED the call (shape/charset/extension/missing/arg count) |
-| 6  | ENV-FAIL: runner unavailable in the environment (not a red test) |
-| 7  | SECURITY: symlink in path, or path escapes tests/ / src/ |
-| 124 | timeout (test 60s, smoke 10s) |
-| 3,4,5 | pytest's own codes, passed through (5 = no tests ran; jq's parse error also exits 5) |
+The single source is the `scripts/run.sh` header: run.sh's own codes are DISJOINT from
+every runner's codes (pytest 0-5, node --test 0/1, jq 0/5) — read the table there.
+The rule that constrains what you may create under `tests/`:
 
 `list` fails closed (rc=1) when `tests/` contains a test-like file (basename
 contains "test", case-insensitive; files directly inside `fixtures/`,

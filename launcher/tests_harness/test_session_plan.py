@@ -4,7 +4,6 @@ Hermetic: parse a sample ticket header, build the plan exactly as
 cmd_run does, and pin the T1 invariants:
   - declared_paths is the single policy list (the former mutable_paths
     duplicate was collapsed into it — always == declared_paths, CC-125)
-  - git_mode == "ro"
   - the contract_lock exemption is generalized to declared_paths:
     a declared protected path is not flagged; a non-declared one is.
 
@@ -50,7 +49,6 @@ def _build_plan(ticket_text):
     declared, edit_paths, _ = stanok.parse_ticket_header(ticket_text)
     return stanok.SessionPlan(
         declared_paths=tuple(declared),
-        git_mode="ro",
         edit_paths=tuple(edit_paths),
     )
 
@@ -67,13 +65,14 @@ _TICKET = (
 def test_plan_fields_from_ticket_header():
     plan = _build_plan(_TICKET)
     assert plan.declared_paths == ("src/mod.py", "tests/mod_test.py", "docs/mod.md")
-    assert plan.git_mode == "ro"
-    # T5/CC-137: exactly three fields — the mount/protected lists are derived
+    # T5/CC-137: exactly two fields — the mount/protected lists are derived
     # (rw_zones gone with CC-135, protected_paths gone with the hook it fed,
     # bootstrap_paths gone with the bootstrap kind itself — CC-154,
     # mutable_paths collapsed into declared_paths — it was always equal).
+    # git_mode dropped as dead (PLAN-HYGIENE 2026-10-08): .git RO is enforced
+    # at the mount layer; no consumer ever read the field.
     assert {f.name for f in dataclasses.fields(stanok.SessionPlan)} == {
-        "declared_paths", "git_mode", "edit_paths"}
+        "declared_paths", "edit_paths"}
 
 
 def test_plan_is_frozen():
@@ -88,7 +87,6 @@ def test_contract_lock_set_is_the_manifest_not_a_plan_field():
     # diff hashes is exactly the set host_ro_paths may bind :ro.
     plan = _build_plan(_TICKET)
     assert not hasattr(plan, "protected_paths")
-    assert not hasattr(stanok, "_pretooluse_lock_hook")
 
 
 def test_contract_lock_exempts_declared_path(repo, monkeypatch):

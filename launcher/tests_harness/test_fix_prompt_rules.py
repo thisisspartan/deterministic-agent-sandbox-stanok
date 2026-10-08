@@ -1,6 +1,6 @@
 """verify_gate rc=124 classification + fix-prompt rule selection.
 
-A hung test (run.sh rc=124) must be tagged TIMEOUT in _run_one_test and
+A hung test (run.sh rc=124) must be tagged TIMEOUT in _run_suite and
 must NOT receive the generic "fix src exclusively" fix-prompt block: that
 wording is a retry-loop DoS (the model iterates on src/, the test hangs
 again, verify_gate fails again with the same prompt).
@@ -22,14 +22,16 @@ from conftest import repo, write
 STUB_HUNG = "#!/usr/bin/env bash\necho stub-hung\nexit 124\n"
 
 
-def test_run_one_test_tags_rc124_as_timeout(repo, monkeypatch):
+def test_run_suite_tags_rc124_as_timeout(repo, monkeypatch):
+    # Re-homed from _run_one_test (removed with the rc=2 per-file fallback,
+    # PLAN-HYGIENE 2026-10-08): the suite call is the only test executor.
     write(repo / "scripts" / "run.sh", STUB_HUNG)
     write(repo / "tests" / "hang.test.js", "stub")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    res = stanok._run_one_test("tests/hang.test.js")
-    assert res is not None
-    assert res[1].startswith("TIMEOUT:")
-    assert "rc=124" in res[1]
+    failures: list[tuple[str, str]] = []
+    stanok._run_suite(failures, ["tests/hang.test.js"])
+    assert any(name == "(suite)" and msg.startswith("TIMEOUT:")
+               and "rc=124" in msg for name, msg in failures), failures
 
 
 def test_fix_prompt_rules_timeout_branch():

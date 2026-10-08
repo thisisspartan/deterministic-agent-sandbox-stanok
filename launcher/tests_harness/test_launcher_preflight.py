@@ -10,11 +10,16 @@ Pins the launch mechanisms in launcher/stanok.py:
      pin (the old regex over run.sh silently returned [] and disabled the
      doctor runner probes)
   5  verify_gate: stub run.sh (test -> rc=6) -> env_fail True, "ENV-FAIL:" message
-  6  _status_fields(16, "FAIL", 1) == ("ENV-FAIL", "FAIL", "ENV-FAIL")
+  6  _status_fields(16, "FAIL", 1) == "ENV-FAIL"
   7  _verifier_hook: rc=6 -> {} + "ENV-FAIL" log; rc=1 -> "RED CONFIRMED" context; rc=0/2 -> {}
   8  preflight_server: env unset -> required derived as n_ctx - REQUIRED_WINDOW_MARGIN
      (incident smoke-cc183-retry1: stale env 128000 vs live n_ctx 125184 -> rc=20);
      explicit env stays a hard requirement (fail-closed when n_ctx < env)
+  9  window single source (PLAN-HYGIENE 2026-10-08): context_rot_threshold
+     chains STANOK_CONTEXT_ROT_TOKENS -> STANOK_REQUIRED_WINDOW -> the value
+     preflight_server derived from live /props -> None (no hardcoded 128000);
+     build_agent_env passes CLAUDE_CODE_AUTO_COMPACT_WINDOW through only when
+     the operator exported it (settings.env applies otherwise)
 
 CC-106: the former test 8 (full path digest mismatch -> process rc=25) is
 gone with the launch-path preflight — the digest check now lives in doctor
@@ -154,7 +159,7 @@ def test_verify_gate_env_fail(tmp_path, monkeypatch):
 # --- 6: _status_fields ---------------------------------------------------------
 
 def test_status_fields_env_fail():
-    assert stanok._status_fields(16, "FAIL", 1) == ("ENV-FAIL", "FAIL", "ENV-FAIL")
+    assert stanok._status_fields(16, "FAIL", 1) == "ENV-FAIL"
 
 
 # --- 7: _verifier_hook rc semantics --------------------------------------------
@@ -284,3 +289,55 @@ def test_preflight_server_skip_env(monkeypatch):
 
     monkeypatch.setattr(stanok, "_fetch_server_props", _boom)
     assert stanok.preflight_server() is True
+
+
+# --- 9: window single source (PLAN-HYGIENE 2026-10-08) ------------------------
+
+def test_rot_threshold_env_rot_tokens_wins(monkeypatch):
+    monkeypatch.setenv("STANOK_CONTEXT_ROT_TOKENS", "99000")
+    assert stanok.context_rot_threshold() == 99000
+
+
+def test_rot_threshold_from_env_required_window(monkeypatch):
+    monkeypatch.delenv("STANOK_CONTEXT_ROT_TOKENS", raising=False)
+    monkeypatch.setenv("STANOK_REQUIRED_WINDOW", "123000")
+    assert stanok.context_rot_threshold() == 98400
+
+
+def test_rot_threshold_from_derived_window(monkeypatch):
+    # preflight_server derives the window from the live /props; the rot
+    # threshold reads the SAME value (_DERIVED_REQUIRED_WINDOW) — no re-read,
+    # no hardcoded default.
+    _clear_window_env(monkeypatch)
+    monkeypatch.delenv("STANOK_CONTEXT_ROT_TOKENS", raising=False)
+    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(125184))
+    assert stanok.preflight_server() is True
+    assert stanok._DERIVED_REQUIRED_WINDOW == 123184
+    assert stanok.context_rot_threshold() == int(123184 * 0.8)
+
+
+def test_rot_threshold_none_when_no_window_known(monkeypatch):
+    # No env, no derived value -> None: the caller skips the WARN instead of
+    # inventing a window (the old `or 128000` default is gone).
+    _clear_window_env(monkeypatch)
+    monkeypatch.delenv("STANOK_CONTEXT_ROT_TOKENS", raising=False)
+    monkeypatch.setattr(stanok, "_DERIVED_REQUIRED_WINDOW", None)
+    assert stanok.context_rot_threshold() is None
+
+
+def test_build_agent_env_omits_auto_compact_when_unset(tmp_path, monkeypatch):
+    # No hardcoded "128000": when the operator did not export the window the
+    # key is ABSENT from the runtime env, so the static settings.env value
+    # (123000) applies — one source, no silent override.
+    monkeypatch.setattr(stanok, "_live_dir", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", raising=False)
+    env = stanok.build_agent_env()
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in env
+
+
+def test_build_agent_env_passes_auto_compact_through(tmp_path, monkeypatch):
+    # P0-launch.sh exports the window derived from settings -> pass-through.
+    monkeypatch.setattr(stanok, "_live_dir", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "123000")
+    env = stanok.build_agent_env()
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "123000"

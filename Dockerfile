@@ -45,11 +45,12 @@ ARG STANOK_GID=10001
 # Bump it deliberately when you upgrade, not by accident on a rebuild.
 ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 
-# Image provenance: setup.sh computes sha256(Dockerfile + scripts/run.sh)
-# and passes it as --build-arg STANOK_DIGEST. The launcher's host-side
-# preflight (stanok.py preflight_image, rc=25) re-computes the same digest
-# at launch and fails closed on a mismatch — an image older than the
-# Dockerfile/STACKS registry becomes a 1-second launch failure instead of
+# Image provenance: setup.sh computes sha256(Dockerfile + scripts/run.sh +
+# scripts/stacks/*.toml, sorted) and passes it as --build-arg STANOK_DIGEST.
+# Doctor re-computes the same digest via the SAME function (stanok.py
+# preflight_image; CC-106: moved off the launch path — the former blocking
+# rc=25 is freed) and fails closed on a mismatch — an image older than the
+# Dockerfile/STACKS registry becomes a 1-second doctor failure instead of
 # a mid-run ENV-FAIL.
 ARG STANOK_DIGEST=
 LABEL stanok.digest="${STANOK_DIGEST}"
@@ -90,9 +91,11 @@ LABEL stanok.digest="${STANOK_DIGEST}"
 #                           Bash; jq is the standard JSON processor). The
 #                           old bash-hook consumer (hooks/verifier.sh) is gone
 #                           (R1 in-process hook), but the tool stays: it is
-#                           part of the generic toolchain, and the run.sh
-#                           preflight line probes it at launch (rc=25 if
-#                           missing) so a silent absence can never recur.
+#                           part of the generic toolchain, and the stack
+#                           manifest's preflight line is probed INSIDE the
+#                           image by doctor's image preflight (preflight_image,
+#                           CC-106 — off the launch path) so a silent absence
+#                           can never recur.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       ca-certificates \
@@ -131,7 +134,8 @@ ENV UV_SYSTEM_PYTHON=1 \
 # Python-stack tickets run their suites with it. Pin deliberately (same rule
 # as the SDK): an unpinned install drifts on every rebuild, and a missing
 # pytest in the image is exactly the ENV-FAIL class that run.sh's rc=6 and
-# the launcher's rc=25 image preflight exist to catch.
+# doctor's image preflight (preflight_image, CC-106 — off the launch path)
+# exist to catch.
 RUN uv pip install --no-binary claude-agent-sdk \
       "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}" \
       "pytest==8.3.3"
