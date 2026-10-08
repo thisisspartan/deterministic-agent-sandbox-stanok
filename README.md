@@ -55,7 +55,7 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 ## Triage and environment notes (verified)
 
 - Triage order on a failed run: `evidence/<label>/summary.json` (`rc`, `verifier`,
-  `failures`/`errors`) -> the rc namespace (`ExitCode` docstring in `launcher/stanok.py`,
+  `failures`/`errors`) -> the rc namespace (`ExitCode` docstring in `launcher/exitcodes.py`,
   gate order in `launcher/cli.py main()`) -> `/tmp/stanok-logs/<label>.launch.log`
   (read it only when `summary.json` is missing — an aborted run).
 - Running as root is refused by a gate (`launcher/gates.py`, exit 1) — use a regular user.
@@ -72,10 +72,11 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 
 ```
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
-launcher/                     — the Runner: stanok.py (hub) + functional
-                                submodules cli/gates/ticket/sandbox/session/
-                                verify/summary/opik + tests_harness/ (the
-                                doctor checks as pytest)
+launcher/                     — the Runner: stanok.py (entry shell) +
+                                functional modules cli/gates/ticket/sandbox/
+                                session/verify/summary/opik/exitcodes/plan/
+                                logs + tests_harness/ (the doctor checks as
+                                pytest)
 hooks/doctor.sh               — thin pytest wrapper
 .claude/settings.stanok.json  — the machine config (allow/deny, native
                                 sandbox + allowedDomains)

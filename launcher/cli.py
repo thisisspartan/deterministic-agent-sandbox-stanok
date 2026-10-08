@@ -4,9 +4,10 @@ argparse, the gate sequence in main(), cmd_run/cmd_status/cmd_wait/cmd_stop,
 the sandbox supervision and the background self-spawn (--follow, CC-140).
 main() builds the Config ONCE (Config.from_env) and threads it explicitly;
 per-run mutable state is a RunState built from cfg.label_paths (C). `import
-stanok` stays only for the logging sink (stanok._stdout_log_f) and the child
-self-spawn path (stanok.__file__) — imported as `launcher.stanok`, the one
-instance every consumer shares (ARCH-REVIEW A).
+stanok` stays only for the child self-spawn path (stanok.__file__) — the
+entry shell is the one file every call site invokes (ARCH-REVIEW A/C). The
+logging sink is the `logs` module global (logs._stdout_log_f), assigned by
+cmd_run.
 """
 
 import argparse
@@ -20,9 +21,11 @@ import signal
 import subprocess
 import sys
 import time
-from launcher import sandbox, stanok
-from launcher.stanok import ExitCode, SessionPlan, log
+from launcher import logs, sandbox, stanok
 from launcher.config import Config, RunState
+from launcher.exitcodes import ExitCode
+from launcher.logs import log
+from launcher.plan import SessionPlan
 from launcher.gates import (
     check_test_config, dirty_tree_gate, hidden_files_gate, preflight_server,
     root_refusal, sandbox_config_gate, validate_label,
@@ -60,9 +63,9 @@ def cmd_run(cfg, args) -> int:
     os.makedirs(evidence_dir, exist_ok=True)
     os.makedirs(live_dir, exist_ok=True)
 
-    # The logging sink is a per-run handle (see the stanok module docstring):
+    # The logging sink is a per-run handle (see the logs module docstring):
     # opened here, assigned to the module global, released at process exit.
-    stanok._stdout_log_f = open(os.path.join(evidence_dir, "launcher.stdout.log"), "a", encoding="utf-8")
+    logs._stdout_log_f = open(os.path.join(evidence_dir, "launcher.stdout.log"), "a", encoding="utf-8")
     run_state = RunState(evidence_dir=evidence_dir, live_dir=live_dir,
                          marker_path=os.path.join(evidence_dir, ".running"))
 
@@ -440,7 +443,7 @@ def main() -> int:
         epilog=(
             "Architecture: stanok/ARCHITECTURE.md (the call chain, the module\n"
             "map, the verdict table). Exit codes: the ExitCode namespace in\n"
-            "launcher/stanok.py."
+            "launcher/exitcodes.py."
         ),
     )
     sub = p.add_subparsers(dest="cmd", required=True)

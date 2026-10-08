@@ -35,7 +35,7 @@ import pytest
 
 from launcher import gates, verify
 from launcher.config import Config
-from launcher.stanok import SessionPlan
+from launcher.plan import SessionPlan
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCH = REPO_ROOT / "launch.sh"
@@ -166,7 +166,7 @@ def _registry_lines():
 
     CC-168: the manifests (scripts/stacks/*.toml, sorted by filename) are
     the single source of truth — parse them with tomllib, the same parser
-    run.sh and launcher/stanok.py use (no generated file to go stale).
+    run.sh and launcher/gates.py use (no generated file to go stale).
     """
     import tomllib
     stacks = REPO_ROOT / "scripts" / "stacks"

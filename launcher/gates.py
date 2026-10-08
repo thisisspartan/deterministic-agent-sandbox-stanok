@@ -18,7 +18,7 @@ import sys
 import urllib.request
 import tomllib
 from launcher import sandbox
-from launcher.stanok import log
+from launcher.logs import log
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 

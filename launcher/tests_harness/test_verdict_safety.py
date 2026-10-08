@@ -33,7 +33,7 @@ from pathlib import Path
 
 from launcher import summary, ticket, verify
 from launcher.config import Config
-from launcher.stanok import SessionPlan
+from launcher.plan import SessionPlan
 
 
 # --- 1: _validate_declared_path ------------------------------------------------

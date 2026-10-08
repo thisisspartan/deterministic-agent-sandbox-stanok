@@ -37,7 +37,7 @@ import pytest
 
 from launcher import gates, session, summary, verify
 from launcher.config import Config, RunState
-from launcher.stanok import SessionPlan
+from launcher.plan import SessionPlan
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

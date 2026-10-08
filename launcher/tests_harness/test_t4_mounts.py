@@ -35,7 +35,7 @@ import pytest
 
 from launcher import sandbox, ticket
 from launcher.config import Config
-from launcher.stanok import SessionPlan
+from launcher.plan import SessionPlan
 
 from conftest import repo, write  # noqa: F401
 

@@ -9,7 +9,8 @@ import os
 import re
 import shutil
 from launcher import sandbox
-from launcher.stanok import ExitCode, log
+from launcher.exitcodes import ExitCode
+from launcher.logs import log
 from launcher.verify import _protected_files
 
 # The ONE kind list for a ticket header (CC-132). `scripts` is a ZONE, not a
