@@ -141,7 +141,7 @@ def test_cli_wires_wait_and_run_follow(tmp_path, monkeypatch):
 def test_follow_not_propagated_to_child_argv():
     cfg = Config()
     args = types.SimpleNamespace(ticket="tickets/T.md", label="lbl",
-                                direct=False, local_retries=cfg.default_retries,
+                                local_retries=cfg.default_retries,
                                 extra=[], follow=True)
     inner = cli._inner_run_argv(cfg, args)
     assert "--follow" not in inner

@@ -31,7 +31,7 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 ## Running
 
 ```bash
-./launch.sh run <ticket.md> <label> [--follow] [--direct] [--local-retries N] [-- extra...]
+./launch.sh run <ticket.md> <label> [--follow] [--local-retries N] [-- extra...]
 # The ticket is resolved against three bases (project root -> machine root -> as given),
 # so the canonical call from the project root is: `./stanok/launch.sh tickets/x.md <label>`.
 # The shim cd's into the machine root (the directory containing launch.sh):
@@ -46,7 +46,6 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
   until the run is terminal and print its status. One `run --follow` call is
   both the launch and the verdict notification the supervisor waits on
   (CC-140/BL-1). Observe a detached launch: `tail -f /tmp/stanok-logs/<label>.launch.log`
-- `--direct` — headless directly, ticket path relative to the repo
 - `--local-retries N` — in-session retry turns on verifier FAIL (default 2)
 - `wait` / `run --follow` exit semantics: `0` on ANY terminal state (done/dead/missing —
   including a completed-but-failed run), `124` at the 45-min cap. The verdict is read

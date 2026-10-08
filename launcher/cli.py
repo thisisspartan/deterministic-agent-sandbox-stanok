@@ -89,8 +89,6 @@ def cmd_run(cfg, args) -> int:
 
     job = {"label": args.label, "ticket": args.ticket}
     log(f"STANOK RUNNER | Repo: {cfg.repo_root} | Label: {args.label}")
-    if args.direct:
-        log("--direct MODE: the ticket path is resolved relative to the repository")
 
     # Ticket-scoped invariant (W2.1): parse the header BEFORE any workspace
     # mutation. Fail-closed: no `impl:`/`test:`/`docs:`/`edit:` line and no
@@ -301,8 +299,6 @@ def cmd_stop(cfg, label: str) -> int:
 def _inner_run_argv(cfg, args) -> list:
     """The container-side / child-side `run` argv (single source)."""
     inner = ["run", args.ticket]
-    if args.direct:
-        inner.append("--direct")
     if args.local_retries != cfg.default_retries:
         inner += ["--local-retries", str(args.local_retries)]
     inner += ["--", args.label, *args.extra]
@@ -416,15 +412,12 @@ def launch_background(cfg, args) -> int:
 # ==================================================================================
 # CLI entry point
 # ==================================================================================
-def _resolve_ticket(cfg, arg: str, direct: bool = False) -> str:
-    if direct:
-        candidates = [os.path.join(cfg.repo_root, arg), os.path.abspath(arg)]
-    else:
-        candidates = [
-            os.path.join(os.path.dirname(cfg.repo_root), arg),  # project root (highest priority)
-            os.path.join(cfg.repo_root, arg),                    # machine root
-            os.path.abspath(arg)                             # as given
-        ]
+def _resolve_ticket(cfg, arg: str) -> str:
+    candidates = [
+        os.path.join(os.path.dirname(cfg.repo_root), arg),  # project root (highest priority)
+        os.path.join(cfg.repo_root, arg),                    # machine root
+        os.path.abspath(arg)                                 # as given
+    ]
     for c in candidates:
         if os.path.isfile(c):
             return c
@@ -464,7 +457,6 @@ def main() -> int:
     r.add_argument("ticket")
     r.add_argument("label")
     r.add_argument("extra", nargs="*", default=[])
-    r.add_argument("--direct", action="store_true")
     r.add_argument("--local-retries", type=int, default=cfg.default_retries)
     # CC-140/BL-1: --follow is the SOLE background flag: a detached
     # self-spawn, then block in cmd_wait until the run is terminal and print
@@ -553,7 +545,7 @@ def main() -> int:
         if os.path.isfile(parent_claude):
             return abort(ExitCode.ROLE_LEAK, f"ERROR: ROLE-LEAK: parent CLAUDE.md above the repo: {parent_claude}")
 
-        args.ticket_path = _resolve_ticket(cfg, args.ticket, direct=args.direct)
+        args.ticket_path = _resolve_ticket(cfg, args.ticket)
         if not os.path.isfile(args.ticket_path):
             return abort(ExitCode.TICKET, f"ERROR: Ticket not found: {args.ticket_path}")
 
