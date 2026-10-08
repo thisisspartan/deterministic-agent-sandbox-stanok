@@ -84,19 +84,22 @@ globals. Acceptance criterion met: the harness is green (235 passed /
 2 skipped) with the old names deleted from the hub — a missed reference
 failed loudly on the first run and was fixed.
 
-## Supply chain: uv.lock + digest inputs (landed 2026-10-08, modernization batch 2)
+## Supply chain: image-requirements.lock + digest inputs (landed 2026-10-08, modernization batch 2)
 
-**Decision (operator):** the image's package set is pinned by `uv.lock` —
-generated with `uv pip compile --python-version 3.11 --python-platform linux
+**Decision (operator):** the image's package set is pinned by
+`image-requirements.lock` — a requirements-format lock (pip-style, NOT uv's
+TOML project lock; the name says what it is) generated with
+`uv pip compile --python-version 3.11 --python-platform linux
 --generate-hashes` from the two direct pins (claude-agent-sdk, pytest); the
 Dockerfile installs `uv pip install --no-binary claude-agent-sdk -r
-/opt/uv.lock` (sdist as before — the wheel bundles a second CLI). The
-`ARG CLAUDE_AGENT_SDK_VERSION` is gone: the lock is the pin. `uv.lock` is a
-digest input: `gates.DIGEST_INPUTS` is the single declared list and setup.sh's
-`cat` line must match it — `test_image_digest_inputs.py` pins the list, the
-order, and that `_image_digest` follows them. The base image is pinned by
-manifest-list digest (`FROM debian:bookworm-slim@sha256:…`, the same W7
-pattern as the uv COPY).
+/opt/image-requirements.lock` (sdist as before — the wheel bundles a second
+CLI). The `ARG CLAUDE_AGENT_SDK_VERSION` is gone: the lock is the pin.
+`image-requirements.lock` is a digest input: `gates.DIGEST_INPUTS` is the
+single declared list and setup.sh's `cat` line is a literal that
+`test_image_digest_inputs.py` pins equal to it — the list, the order, and
+that `_image_digest` follows them. The base image is pinned by manifest-list
+digest (`FROM debian:bookworm-slim@sha256:…`, the same W7 pattern as the uv
+COPY).
 
 ## Where to change what
 
@@ -105,7 +108,7 @@ pattern as the uv COPY).
 - A new test stack -> `scripts/stacks/*.toml` only (run.sh and the
   launcher derive from it at runtime).
 - Editing any digest input (`Dockerfile`, `scripts/run.sh`,
-  `scripts/stacks/*.toml`, `uv.lock` — `gates.DIGEST_INPUTS`) changes the
+  `scripts/stacks/*.toml`, `image-requirements.lock` — `gates.DIGEST_INPUTS`) changes the
   image digest (`stanok.digest` = sha256 over that list) — doctor's
   `test_docker_image_digest_matches` fails until the image is rebuilt
   (CC-106: a stale image is a doctor failure, never a mid-run ENV-FAIL).
