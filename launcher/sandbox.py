@@ -1,7 +1,7 @@
 """Docker sandbox boundary (R2: the former sandbox-run.sh, in Python).
 
 Single source of the `docker run` argv: mounts, env passthrough, resource
-limits, hardening. The caller (stanok.py run_sandboxed) runs the returned
+limits, hardening. The caller (cli.py run_sandboxed) runs the returned
 argv as a supervised child inside a try/finally that guarantees
 `docker stop` + marker cleanup on every exit path (normal, crash, signal) —
 the bash reaper trap's guarantee, now structural.
@@ -15,10 +15,11 @@ import os
 import subprocess
 
 # The default project zones — the ONE literal zone list (CC-132). Two
-# consumers, both in stanok.py: hidden_files_gate (which dirs to scan) and
-# declared_carveout (a bare zone name is undeclarable). It is NOT the rw mount
-# set: since T4 (CC-135) the container's rw carve-outs are derived per ticket
-# from the declared paths (stanok.declared_carveout) and passed to sandbox_argv
+# consumers: gates.hidden_files_gate (which dirs to scan) and
+# ticket.declared_carveout (a bare zone name is undeclarable). It is NOT the
+# rw mount set: since T4 (CC-135) the container's rw carve-outs are derived
+# per ticket from the declared paths (ticket.declared_carveout) and passed to
+# sandbox_argv
 # as `rw_paths`. The zones are merely the dirs hidden_files_gate watches and
 # the names a declared path may not BE.
 #
@@ -27,7 +28,7 @@ import subprocess
 # write is an EROFS refusal, not "not found"). The container writes the verdict
 # (summary.json, launcher.stdout.log, the .running marker) into the rw
 # LOG_DIR/<label>; the HOST publishes it into evidence/<label> after the
-# container exits (stanok._publish_evidence).
+# container exits (summary._publish_evidence).
 WRITABLE_ZONES = ("src", "tests", "docs", "scripts")
 
 
@@ -39,12 +40,12 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     ["/usr/bin/python3", "launcher/stanok.py", "run", ...]).
 
     rw_paths are repo-relative paths (files or dirs) to carve out rw — the
-    derivation is stanok.declared_carveout (T4, CC-135), the host computes them
+    derivation is ticket.declared_carveout (T4, CC-135), the host computes them
     before `docker run`. The default is () = nothing writable: a caller that
     forgets the carve-outs gets a read-only container, not an open one.
 
     ro_paths are the pre-existing contract files (tests/**, scripts/run.sh —
-    stanok.host_ro_paths, T4b/CC-136) re-bound :ro ON TOP of a rw carve-out
+    ticket.host_ro_paths, T4b/CC-136) re-bound :ro ON TOP of a rw carve-out
     DIR: Docker layers a file bind over a dir bind by specificity, so a
     protected file stays immutable while new siblings in that dir stay
     creatable. Emitted after the rw binds (deeper destination wins).
