@@ -11,11 +11,14 @@ lazily, the gates are pure stdlib) and STANOK_NO_SANDBOX=1 (the tests check
 the RUNNER, not the sandbox; the Docker container does not mount the host
 /tmp, so mktemp /tmp/... tickets are invisible inside — rc=13).
 
-Gate order (single source: launcher/cli.py main()):
+Gate order (single source: launcher/cli.py _launch_gates):
   label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->
-  dirty-tree (rc=22) -> lock (rc=21) -> [cmd_run: W2.1 ticket header
+  dirty-tree (rc=22) -> hidden-files (rc=26) -> test-config (rc=27) ->
+  sandbox-config (rc=28) -> lock (rc=21) -> [cmd_run: W2.1 ticket header
   (rc=13: no impl:/test:/docs:/reset:none, or a create-declared path that
   already exists) -> pre-flight /props (rc=20)]
+Precedence is pinned by test_runner_gate_precedence_* (two violations at
+once -> the earlier gate's rc wins).
 
 Skip semantics (valid refusal, not a regression): rc=21 (a machine run is
 in progress — lock held) / rc=22 (dirty tree fires before pre-flight).
@@ -359,6 +362,42 @@ def test_runner_preflight_window(tmp_path, mock_small_server):
     if rc == 22:
         pytest.skip("dirty tree — dirty-tree rc=22 before pre-flight")
     assert rc == 20, f"expected rc=20, got rc={rc}"
+
+
+def test_runner_gate_precedence_roleleak_before_dirty_tree(tmp_path):
+    # Two violations at once: parent CLAUDE.md (rc=24) AND an uncommitted file
+    # (rc=22) -> the earlier gate wins: rc=24. Pins the _launch_gates order
+    # (B3 moved the sequence there; a swap must be caught by a test, not by
+    # the docstring).
+    root = tmp_path / "prec-roleleak"
+    repo = root / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
+    (root / "CLAUDE.md").touch()
+    t = _ticket(tmp_path, "# doctor\n\nplaceholder\n")
+    label = f"doctor-prec-rl-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    rc = _launch(["run", t, label],
+                 {"STANOK_REPO": str(repo),
+                  "STANOK_SERVER_URL": DEAD_SERVER,
+                  "STANOK_NO_SANDBOX": "1"})
+    assert rc == 24, f"expected rc=24 (role-leak before dirty-tree), got rc={rc}"
+
+
+def test_runner_gate_precedence_ticket_before_dirty_tree(tmp_path):
+    # Two violations at once: missing ticket (rc=13) AND a dirty tree (rc=22)
+    # -> the earlier gate wins: rc=13.
+    root = tmp_path / "prec-ticket"
+    repo = root / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
+    label = f"doctor-prec-tk-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    rc = _launch(["run", root / "no-such-ticket.md", label],
+                 {"STANOK_REPO": str(repo),
+                  "STANOK_SERVER_URL": DEAD_SERVER,
+                  "STANOK_NO_SANDBOX": "1"})
+    assert rc == 13, f"expected rc=13 (ticket before dirty-tree), got rc={rc}"
 
 
 def test_runner_role_leak(tmp_path):
