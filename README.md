@@ -190,12 +190,6 @@ src/ tests/ docs/ scripts/    — the machine working directories (the zones the
 - `CLAUDE.supervisor.md` — the supervisor protocol: verdict reading and stop
   conditions.
 
-Architecture reviews (darkcast-only — NOT published in the public skeleton):
-
-- `specs/HANDOFF-ARCH-REVIEW.md` — component map, stack-coupling seams.
-- `specs/SPEC-SESSION-PLAN-2026-09-24.md` — file-policy consumers (SessionPlan).
-- `specs/REVIEW-KISS-CLI-FIRST-2026-09-24.md` — native vs hand-rolled inventory.
-
 ## Commits
 
 The agent does NOT commit: `.git` is mounted read-only inside the container,
