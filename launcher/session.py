@@ -370,6 +370,48 @@ async def _verifier_hook(cfg, hook_input: dict, tool_use_id: "str | None", conte
         return {}
 
 
+def _observability_warnings(job: dict, turn: int, inp: int, live_context: int) -> None:
+    """PREFIX-BREAK + CONTEXT-ROT warnings (diagnostics only — never a verdict).
+
+    PREFIX-BREAK: a KV-prefix break shows up exactly as a spike in the turn's
+    input_tokens (uncached re-send). Only meaningful from turn 2: on turn 1
+    there is no previous turn to break the prefix from, so comparing the first
+    prompt against a constant baseline fired a false WARN on every run (CC-126).
+    """
+    prev_inputs = [t["input_tokens"] for t in job["turn_telemetry"][:-1]]
+    if prev_inputs:
+        median_prev = sorted(prev_inputs)[len(prev_inputs) // 2]
+        if inp > 2 * median_prev:
+            job["turn_telemetry"][-1]["prefix_break"] = True
+            log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} "
+                f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
+
+    rot_threshold = context_rot_threshold()
+    if rot_threshold is not None and live_context > rot_threshold:
+        log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
+            f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
+
+
+def _fix_prompt(failures, turn: int) -> str:
+    """The FAIL fix prompt: <verification_result> XML with the failure blocks
+    and the <contract_lock> rules the machine must respect while fixing."""
+    rules = _fix_prompt_rules(failures)
+    fail_xml_blocks = "\n".join([
+        f'  <failure test="{name}">\n{diff}\n  </failure>'
+        for name, diff in failures
+    ])
+    return (
+        f"<verification_result status=\"FAIL\" turn=\"{turn}\">\n"
+        f"<test_errors count=\"{len(failures)}\">\n"
+        f"{fail_xml_blocks}\n"
+        f"</test_errors>\n"
+        f"<contract_lock>\n"
+        f"{rules}\n"
+        f"</contract_lock>\n"
+        f"</verification_result>"
+    )
+
+
 def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "SessionPlan",
                        result: TurnResult, tests_manifest_before: dict,
                        inp: int, live_context: int) -> tuple[int | None, str]:
@@ -399,23 +441,7 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
     # tests/ or scripts/run.sh?
     _check_contract_lock(cfg, tests_manifest_before, job, turn, plan)
 
-    # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
-    # spike in the turn's input_tokens (uncached re-send). Only
-    # meaningful from turn 2: on turn 1 there is no previous turn to
-    # break the prefix from, so comparing the first prompt against a
-    # constant baseline fired a false WARN on every run (CC-126).
-    prev_inputs = [t["input_tokens"] for t in job["turn_telemetry"][:-1]]
-    if prev_inputs:
-        median_prev = sorted(prev_inputs)[len(prev_inputs) // 2]
-        if inp > 2 * median_prev:
-            job["turn_telemetry"][-1]["prefix_break"] = True
-            log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} "
-                f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
-
-    rot_threshold = context_rot_threshold()
-    if rot_threshold is not None and live_context > rot_threshold:
-        log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
-            f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
+    _observability_warnings(job, turn, inp, live_context)
 
     verify_ok, failures, env_fail = verify_gate(cfg, plan)
 
@@ -461,23 +487,7 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
     job["failures"] = failures
 
     if turn < max_turns:
-        rules = _fix_prompt_rules(failures)
-
-        fail_xml_blocks = "\n".join([
-            f'  <failure test="{name}">\n{diff}\n  </failure>'
-            for name, diff in failures
-        ])
-        next_prompt = (
-            f"<verification_result status=\"FAIL\" turn=\"{turn}\">\n"
-            f"<test_errors count=\"{len(failures)}\">\n"
-            f"{fail_xml_blocks}\n"
-            f"</test_errors>\n"
-            f"<contract_lock>\n"
-            f"{rules}\n"
-            f"</contract_lock>\n"
-            f"</verification_result>"
-        )
-        return None, next_prompt
+        return None, _fix_prompt(failures, turn)
 
     log("Retry limit exhausted (Context Inertia Guard). Finishing.")
     return None, ""
