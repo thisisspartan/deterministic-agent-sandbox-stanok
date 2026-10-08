@@ -124,10 +124,18 @@ def _status_fields(rc: int, verifier: str, turns: int) -> str:
 
 def decide(job: dict) -> str:
     """probe_result with the priority made explicit (red-team review
-    2026-10-08): the session/host override (NO-OP-PASS, LOOP-TRAP,
-    CONTRACT-FAIL) wins; otherwise the derived table. INTEGRITY-FAIL is NOT here — the host sets
-    it after build_summary, in _publish_evidence. test_verdict_table.py
-    pins this priority: any change here must pass it UNCHANGED."""
+    2026-10-08; override-vs-override priority added by the operator review
+    2026-10-09): a non-empty contract_lock_violations list wins over every
+    behavioral override — CONTRACT-FAIL describes the integrity of the verdict
+    (the tree was tampered with), LOOP-TRAP/NO-OP-PASS only the model's
+    behavior; probe_result is ONE key, so without this rule the later write
+    would win by accident. Then the session/host override (NO-OP-PASS,
+    LOOP-TRAP, CONTRACT-FAIL); otherwise the derived table. INTEGRITY-FAIL is
+    NOT here — the host sets it after build_summary, in _publish_evidence.
+    test_verdict_table.py pins this priority: any change here must pass it
+    UNCHANGED (its jobs carry no violations)."""
+    if job.get("contract_lock_violations"):
+        return "CONTRACT-FAIL"
     override = job.get("probe_result")
     if override:
         return override

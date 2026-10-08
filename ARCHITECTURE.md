@@ -111,15 +111,18 @@ CONTRACT-FAIL (spec priority, see above)
 
 `probe_result` values: `CLEAN-FIRST | PASS-AFTER-LOCAL-RETRY | VERIFY-FAIL |
 EARLY-ABORT | NO-OP-PASS | ENV-FAIL | LOOP-TRAP | CONTRACT-FAIL |
-INTEGRITY-FAIL` — derived by `summary.decide` (override first, then the
-table); CONTRACT-FAIL is set by `verify._contract_lock_forced_fail` (an
-override like NO-OP-PASS/LOOP-TRAP, operator review 2026-10-09 — without it
-a contract violation reads as VERIFY-FAIL); pinned by
+INTEGRITY-FAIL` — derived by `summary.decide` (priority, operator review
+2026-10-09: non-empty `contract_lock_violations` wins over every behavioral
+override — verdict integrity beats model behavior, and probe_result is one
+key so the rule must be explicit, not write-order luck; then the override;
+then the table); CONTRACT-FAIL is set by `verify._contract_lock_forced_fail`
+(an override like NO-OP-PASS/LOOP-TRAP — without it a contract violation
+reads as VERIFY-FAIL); pinned by
 `launcher/tests_harness/test_verdict_table.py` (the table, unchanged) and
-`test_contract_fail_probe.py` (the override + the host exemption:
-`_publish_evidence` records an I5 violation but never downgrades
-CONTRACT-FAIL to INTEGRITY-FAIL — spec priority CONTRACT-FAIL > FRESH-FAIL >
-INTEGRITY-FAIL).
+`test_contract_fail_probe.py` (the override, the violations-beat-overrides
+rule in both write orders, and the host exemption: `_publish_evidence`
+records an I5 violation but never downgrades CONTRACT-FAIL to INTEGRITY-FAIL
+— spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL).
 
 ## Module map — the owner of each contract
 

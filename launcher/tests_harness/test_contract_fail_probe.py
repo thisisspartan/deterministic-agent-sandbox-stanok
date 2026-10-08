@@ -13,6 +13,13 @@ decide() table is UNCHANGED, test_verdict_table.py untouched):
      the spec priority is CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL. The
      I5 check still records the violation and keeps the container rc as
      ground truth, but the probe_result label stays CONTRACT-FAIL.
+  3. Override priority (operator review 2026-10-09): probe_result is ONE key,
+     so without an explicit rule the later write wins. decide() states the
+     rule: non-empty contract_lock_violations -> CONTRACT-FAIL, outranking
+     every behavioral override (LOOP-TRAP, NO-OP-PASS) regardless of write
+     order — CONTRACT-FAIL describes verdict integrity, LOOP-TRAP only model
+     behavior. test_verdict_table.py is unaffected (its jobs carry no
+     violations) and passes UNCHANGED.
 
 Tests:
   1  _contract_lock_forced_fail sets probe_result CONTRACT-FAIL
@@ -24,6 +31,12 @@ Tests:
      (violation recorded, rc = container ground truth)
   6  control: a VERIFY-FAIL summary with a violation still becomes
      INTEGRITY-FAIL (the exemption is CONTRACT-FAIL-only)
+  7  priority: contract_lock_violations outrank a LOOP-TRAP override written
+     FIRST (operator review 2026-10-09: integrity of the verdict beats model
+     behavior)
+  8  priority: same when LOOP-TRAP is written SECOND (_loop_trap_verdict
+     overwrites the probe_result key — decide()'s rule, not the write order,
+     decides)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_contract_fail_probe.py -q
 """
@@ -128,3 +141,31 @@ def test_publish_evidence_still_forces_integrity_fail_for_verify_fail(tmp_path):
         Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 2)
     dst = _published(repo, "lbl")
     assert dst["probe_result"] == "INTEGRITY-FAIL"
+
+
+# --- 7-8: override priority — violations beat LOOP-TRAP in BOTH write orders ----
+
+_LOOP = {"tool": "Bash", "hash": "abc", "n": 5}
+
+
+def test_contract_fail_outranks_loop_trap_written_first():
+    # LOOP-TRAP written first (the hook path), violations present.
+    job = {"rc": 1, "verifier": "FAIL", "turns": 1, "probe_result": "LOOP-TRAP",
+           "loop_trap": _LOOP,
+           "contract_lock_violations": ["turn 1: NEW-SYMLINK: src/link"]}
+    assert summary.build_summary(Config(), job, 0)["probe_result"] == "CONTRACT-FAIL"
+
+
+def test_contract_fail_outranks_loop_trap_written_second():
+    # CONTRACT-FAIL set first, then _loop_trap_verdict overwrites the single
+    # probe_result key with LOOP-TRAP — decide()'s rule, not the write order,
+    # decides. The loop_trap detail field is kept alongside the verdict.
+    job = {"rc": 1, "verifier": "FAIL", "turns": 1,
+           "probe_result": "CONTRACT-FAIL",
+           "contract_lock_violations": ["turn 1: MODIFIED: tests/t_test.py"]}
+    assert session._loop_trap_verdict(job, _LOOP) == 1
+    assert job["probe_result"] == "LOOP-TRAP"  # the key was overwritten...
+    s = summary.build_summary(Config(), job, 0)
+    assert s["probe_result"] == "CONTRACT-FAIL"  # ...the verdict is not
+    assert job["loop_trap"] == _LOOP  # the loop detail survives alongside
+    assert s["contract_lock_violations"] == ["turn 1: MODIFIED: tests/t_test.py"]
