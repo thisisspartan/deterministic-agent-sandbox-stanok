@@ -1,19 +1,19 @@
 """summary — the verdict artifacts: summary.json, evidence publishing, rotation.
 
 build_summary/write_summary (the typed contract), _publish_evidence (CC-134,
-I5 integrity check), _rotate_stale_summary, the status-field table. The mutable
-_evidence_dir is read via `stanok.`.
+I5 integrity check), _rotate_stale_summary, the status-field table. Static
+config arrives as the passed-in Config; the per-run evidence dir as the
+passed-in RunState (C).
 """
 
 import json
 import os
 import shutil
 import subprocess
-import stanok
-from stanok import label_paths, log
+from stanok import log
 
 
-def _publish_evidence(label: str, container_rc: int) -> None:
+def _publish_evidence(cfg, label: str, container_rc: int) -> None:
     """Copy the container-written verdict from the rw LOG_DIR/<label> into the
     host-owned evidence/<label> (CC-134).
 
@@ -33,11 +33,11 @@ def _publish_evidence(label: str, container_rc: int) -> None:
     pre-existed and the verifier really passed). That rc=1+PASS combination is
     legitimate, not a forgery, so the "claims PASS" check is skipped for it;
     the rc-field consistency check still applies."""
-    src = os.path.join(stanok.LOG_DIR, label)
+    src = os.path.join(cfg.log_dir, label)
     files = ("summary.json", "launcher.stdout.log")
     if not any(os.path.isfile(os.path.join(src, f)) for f in files):
         return
-    dst = os.path.join(stanok.REPO_ROOT, "evidence", label)
+    dst = os.path.join(cfg.repo_root, "evidence", label)
     os.makedirs(dst, exist_ok=True)
     for name in files:
         s = os.path.join(src, name)
@@ -78,14 +78,14 @@ def _publish_evidence(label: str, container_rc: int) -> None:
             + "; ".join(violations))
 
 
-def _rotate_stale_summary(label: str) -> None:
+def _rotate_stale_summary(cfg, label: str) -> None:
     """Rotate a stale summary.json left by an EARLIER run of the same label
     (a run aborted at a gate after writing its report, or a killed process).
     Without rotation, early_abort's write-if-absent guard would keep the OLD
     report and the supervisor would read a verdict from the previous run.
     Only rotate when no `.running` marker is present: a live run's evidence
     must not be touched."""
-    evidence_dir, _ = label_paths(label)
+    evidence_dir, _ = cfg.label_paths(label)
     marker = os.path.join(evidence_dir, ".running")
     sum_path = os.path.join(evidence_dir, "summary.json")
     if os.path.isfile(sum_path) and not os.path.exists(marker):
@@ -125,7 +125,7 @@ def decide(job: dict) -> str:
                           job.get("turns", 1))
 
 
-def build_summary(job: dict, elapsed_s: int) -> dict:
+def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
     """Single source of the summary.json schema (shared by write_summary
     and early_abort)."""
     turns = job.get("turns", 1)
@@ -147,7 +147,7 @@ def build_summary(job: dict, elapsed_s: int) -> dict:
     # Provenance (W2.6): the exact commit the run started from.
     commit_sha = None
     try:
-        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=stanok.REPO_ROOT,
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cfg.repo_root,
                              capture_output=True, text=True, timeout=10)
         if out.returncode == 0 and out.stdout.strip():
             commit_sha = out.stdout.strip()
@@ -174,8 +174,8 @@ def build_summary(job: dict, elapsed_s: int) -> dict:
     }
 
 
-def write_summary(job: dict, elapsed_s: int) -> None:
+def write_summary(cfg, run_state, job: dict, elapsed_s: int) -> None:
     """Writes the exact summary.json contract expected by the L1 Supervisor."""
-    with open(os.path.join(stanok._evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump(build_summary(job, elapsed_s), f, ensure_ascii=False, indent=2)
+    with open(os.path.join(run_state.evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
+        json.dump(build_summary(cfg, job, elapsed_s), f, ensure_ascii=False, indent=2)
 

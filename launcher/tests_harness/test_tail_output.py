@@ -15,35 +15,38 @@ from pathlib import Path
 LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
-import stanok  # noqa: E402
+import verify  # noqa: E402
+from config import Config  # noqa: E402
+
+CFG = Config()
 
 
 def test_node_modules_line_is_not_filtered():
     raw = ("/repo/node_modules/left-pad/index.js:12:1: Error: boom\n"
            "  at left-pad/index.js:12\n"
            "AssertionError: expected 1\n")
-    out = stanok._tail_output(raw)
+    out = verify._tail_output(CFG, raw)
     assert "node_modules/" in out
     assert out == raw.strip()
 
 
 def test_no_noise_registry_remains():
     # The registry itself is gone — one less policy list to drift.
-    assert not hasattr(stanok, "NOISE_LINE_PATTERNS")
+    assert not hasattr(verify, "NOISE_LINE_PATTERNS")
 
 
 def test_tail_keeps_the_last_max_test_lines():
-    raw = "\n".join(f"line-{i}" for i in range(stanok.MAX_TEST_LINES + 25))
-    out = stanok._tail_output(raw)
+    raw = "\n".join(f"line-{i}" for i in range(CFG.max_test_lines + 25))
+    out = verify._tail_output(CFG, raw)
     lines = out.splitlines()
     assert lines[0] == "... [25 lines skipped above] ..."
-    assert lines[-1] == f"line-{stanok.MAX_TEST_LINES + 24}"
-    # The kept window is exactly MAX_TEST_LINES payload lines.
-    assert len(lines) == stanok.MAX_TEST_LINES + 1
+    assert lines[-1] == f"line-{CFG.max_test_lines + 24}"
+    # The kept window is exactly max_test_lines payload lines.
+    assert len(lines) == CFG.max_test_lines + 1
 
 
 def test_byte_limit_still_truncates():
-    raw = "x" * (stanok.MAX_TEST_BYTES + 500)
-    out = stanok._tail_output(raw)
+    raw = "x" * (CFG.max_test_bytes + 500)
+    out = verify._tail_output(CFG, raw)
     assert out.endswith("... [output truncated at the byte limit] ...")
-    assert len(out.encode("utf-8")) <= stanok.MAX_TEST_BYTES + 64
+    assert len(out.encode("utf-8")) <= CFG.max_test_bytes + 64

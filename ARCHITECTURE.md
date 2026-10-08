@@ -53,7 +53,8 @@ by `summary.decide` (override first, then the table); pinned by
 
 | File | Owns |
 |---|---|
-| `launcher/stanok.py` | hub: constants, mutable run state, `ExitCode` (the rc namespace), `SessionPlan`, PEP 562 facade |
+| `launcher/config.py` | static configuration (`Config`, `from_env`) + per-run mutable state (`RunState`) |
+| `launcher/stanok.py` | the rc namespace (`ExitCode`), `SessionPlan` (the file-policy object), logging |
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
 | `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, server preflight |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
@@ -66,22 +67,22 @@ by `summary.decide` (override first, then the table); pinned by
 | `CLAUDE.md` | the machine role (auto-loaded in the machine session) |
 | `../CLAUDE.supervisor.md` | the supervisor protocol: verdict reading, stop conditions |
 
-## Coupling: hub + facade + mutable globals (current design)
+## Coupling: explicit Config, no facade (C, landed 2026-10-08)
 
-Modules read config and state through the hub (`stanok.REPO_ROOT`,
-`stanok.LOG_DIR`, timeouts — ~50 references in `launcher/`), and the hub
-exposes submodule names lazily via PEP 562 `__getattr__`, so
-`import stanok` stays the single entry point. Tests patch the hub
-(`monkeypatch.setattr(stanok, ...)` — ~105 sites). Consequence: a
-function's dependencies are not visible in its signature, and name
-resolution goes through the facade.
-
-**Decision (operator, 2026-10-08): C accepted** — replace the hub globals
-with an explicit `Config` passed from `cli.main` and remove the facade.
-One pass: the old names are deleted from the hub, so a missed reference
-fails loudly on the first harness run; the acceptance criterion is the
-harness green. Until C lands, the facade is the documented resolution
-path.
+**Decision (operator, 2026-10-08): C accepted and landed.** The hub globals
+(`stanok.REPO_ROOT`, `stanok.LOG_DIR`, timeouts) and the PEP 562 facade are
+gone. Static configuration is `config.Config` (frozen dataclass, `from_env`
+replicates the former hub env logic), built once in `cli.main` and passed
+explicitly to every gate/verify/session/summary function — a function's
+dependencies are visible in its signature. Per-run mutable state is
+`config.RunState` (evidence_dir/live_dir/marker_path), threaded through the
+call chain. The hub keeps only what is genuinely global: the rc namespace
+(`ExitCode`), `SessionPlan`, and the logging sink (a per-run file handle
+opened by `cli.cmd_run`, not configuration). Tests construct
+`Config(repo_root=..., log_dir=...)` directly instead of patching hub
+globals. Acceptance criterion met: the harness is green (235 passed /
+2 skipped) with the old names deleted from the hub — a missed reference
+failed loudly on the first run and was fixed.
 
 ## Where to change what
 

@@ -40,9 +40,14 @@ LAUNCHER_DIR = REPO_ROOT / "launcher"
 
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
-import stanok  # noqa: E402
+import gates  # noqa: E402
+from config import Config  # noqa: E402
 
 FORBIDDEN = ("conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")
+
+
+def _cfg(repo):
+    return Config(repo_root=str(repo))
 
 
 def _repo_with(tmp_path, rel, body):
@@ -78,40 +83,36 @@ def _repo_with_manifest(tmp_path, manifest_name, manifest_body, rel, body):
 
 # --- 1: conftest.py in tests/ -------------------------------------------------
 
-def test_conftest_in_tests_flagged(tmp_path, monkeypatch):
+def test_conftest_in_tests_flagged(tmp_path):
     repo = _repo_with(tmp_path, "tests/conftest.py",
                       "def pytest_sessionfinish(session, exitstatus):\n"
                       "    session.exitstatus = 0\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.check_test_config() is True
+    assert gates.check_test_config(_cfg(repo)) is True
 
 
 # --- 2: nested conftest.py -----------------------------------------------------
 
-def test_nested_conftest_flagged(tmp_path, monkeypatch):
+def test_nested_conftest_flagged(tmp_path):
     repo = _repo_with(tmp_path, "tests/unit/conftest.py",
                       "def pytest_sessionfinish(session, exitstatus):\n"
                       "    session.exitstatus = 0\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.check_test_config() is True
+    assert gates.check_test_config(_cfg(repo)) is True
 
 
 # --- 3: pyproject.toml in tests/ ------------------------------------------------
 
-def test_pyproject_in_tests_flagged(tmp_path, monkeypatch):
+def test_pyproject_in_tests_flagged(tmp_path):
     repo = _repo_with(tmp_path, "tests/pyproject.toml",
                       "[tool.pytest.ini_options]\naddopts = '--exitfirst'\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.check_test_config() is True
+    assert gates.check_test_config(_cfg(repo)) is True
 
 
 # --- 4: clean tests/ -----------------------------------------------------------
 
-def test_clean_tests_not_flagged(tmp_path, monkeypatch):
+def test_clean_tests_not_flagged(tmp_path):
     repo = _repo_with(tmp_path, "tests/csv_test.py",
                       "def test_ok():\n    assert True\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.check_test_config() is False
+    assert gates.check_test_config(_cfg(repo)) is False
 
 
 # --- 5: full path rc=27 ---------------------------------------------------------
@@ -153,28 +154,26 @@ def test_full_path_rc27(tmp_path):
 
 # --- 6: py manifest-driven (CC-151) -------------------------------------------
 
-def test_py_manifest_conftest_flagged(tmp_path, monkeypatch):
+def test_py_manifest_conftest_flagged(tmp_path):
     repo = _repo_with_manifest(
         tmp_path, "py.toml", PY_MANIFEST,
         "tests/conftest.py",
         "def pytest_sessionfinish(session, exitstatus):\n"
         "    session.exitstatus = 0\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.check_test_config() is True
+    assert gates.check_test_config(_cfg(repo)) is True
 
 
 # --- 7: js stack not over-blocked (CC-151) -------------------------------------
 
-def test_js_stack_test_file_clean(tmp_path, monkeypatch):
+def test_js_stack_test_file_clean(tmp_path):
     # js declares no verdict_config -> a js test file is clean.
     repo = _repo_with_manifest(
         tmp_path, "js.toml", JS_MANIFEST,
         "tests/calc.test.js", "const test = require('node:test');\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.check_test_config() is False
+    assert gates.check_test_config(_cfg(repo)) is False
 
 
-def test_js_stack_does_not_inherit_py_list(tmp_path, monkeypatch):
+def test_js_stack_does_not_inherit_py_list(tmp_path):
     # The manifest is authoritative: a js-only repo does NOT inherit py's
     # conftest.py ban (no cross-stack over-blocking).
     repo = _repo_with_manifest(
@@ -182,27 +181,24 @@ def test_js_stack_does_not_inherit_py_list(tmp_path, monkeypatch):
         "tests/conftest.py",
         "def pytest_sessionfinish(session, exitstatus):\n"
         "    session.exitstatus = 0\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.check_test_config() is False
+    assert gates.check_test_config(_cfg(repo)) is False
 
 
 # --- 8: jq stack not over-blocked (CC-151) -------------------------------------
 
-def test_jq_stack_test_file_clean(tmp_path, monkeypatch):
+def test_jq_stack_test_file_clean(tmp_path):
     repo = _repo_with_manifest(
         tmp_path, "jq.toml", JQ_MANIFEST,
         "tests/data.json", "{}\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.check_test_config() is False
+    assert gates.check_test_config(_cfg(repo)) is False
 
 
 # --- 9: manifest is authoritative (custom pattern) (CC-151) -------------------
 
-def test_custom_manifest_pattern_flagged(tmp_path, monkeypatch):
+def test_custom_manifest_pattern_flagged(tmp_path):
     # A manifest declaring a non-py verdict_config pattern is enforced —
     # proves the guard reads the manifest, not a hardcoded py tuple.
     repo = _repo_with_manifest(
         tmp_path, "zz.toml", CUSTOM_MANIFEST,
         "tests/custom_verdict.ini", "[v]\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.check_test_config() is True
+    assert gates.check_test_config(_cfg(repo)) is True

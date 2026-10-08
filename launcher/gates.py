@@ -2,21 +2,24 @@
 
 Label guard, role-leak refusal, dirty-tree, hidden-files, test-config (CC-151),
 sandbox-config, the server/image preflights and the context-window derivation.
-Shared state (REPO_ROOT, LOG_DIR, _DERIVED_REQUIRED_WINDOW and the
-monkeypatched _fetch_server_props/_image_digest/_stack_preflights) is read via
-`stanok.` so tests_harness monkeypatching keeps working.
+The repo root and server URL come from the passed-in Config (C).
+_DERIVED_REQUIRED_WINDOW is a module global (written by preflight_server, read
+by context_rot_threshold); tests_harness monkeypatches this module's functions
+directly — Python resolves module globals at call time, so patching works.
 """
 
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib
 import tomllib
 import sandbox
-import stanok
-from stanok import SERVER_URL, _LABEL_RE, log
+from stanok import log
+
+_LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 # ==================================================================================
@@ -34,11 +37,11 @@ def root_refusal() -> None:
         sys.exit(1)
 
 
-def dirty_tree_gate() -> bool:
+def dirty_tree_gate(cfg) -> bool:
     # Fail-closed: a git error means the tree state is UNKNOWN -> treat as dirty.
     try:
         out = subprocess.run(["git", "status", "--porcelain"],
-                             cwd=stanok.REPO_ROOT, capture_output=True, text=True)
+                             cwd=cfg.repo_root, capture_output=True, text=True)
         if out.returncode != 0:
             log("WARN: git status failed in dirty_tree_gate — fail-closed (treating as dirty)")
             return True
@@ -48,7 +51,7 @@ def dirty_tree_gate() -> bool:
         return True
 
 
-def hidden_files_gate() -> bool:
+def hidden_files_gate(cfg) -> bool:
     # W4 hygiene gate (fail-closed): reject a launch if src/tests/docs/scripts
     # holds, at ANY DEPTH, a hidden file or directory (name starting with '.',
     # except .gitkeep) or a file carrying a 'TEMP:' marker in its first 40
@@ -64,7 +67,7 @@ def hidden_files_gate() -> bool:
     # since it is the same class of leftover and a dot-dir holding only
     # non-hidden files (src/.cache/notes.md) would otherwise still leak.
     for d in sandbox.WRITABLE_ZONES:
-        dirpath = os.path.join(stanok.REPO_ROOT, d)
+        dirpath = os.path.join(cfg.repo_root, d)
         if not os.path.isdir(dirpath):
             continue
         walk_errors: list[OSError] = []
@@ -101,7 +104,7 @@ _LEGACY_VERDICT_CONFIG = ("conftest.py", "pytest.ini", "tox.ini",
                          "setup.cfg", "pyproject.toml")
 
 
-def _stack_manifests() -> tuple[dict[str, dict], bool]:
+def _stack_manifests(cfg) -> tuple[dict[str, dict], bool]:
     """Parse the STACK REGISTRY manifests (scripts/stacks/*.toml, sorted by
     filename) via tomllib — the SINGLE parser for the manifests (run.sh
     derives its STACKS lines with the same tomllib, no codegen). Returns
@@ -109,7 +112,7 @@ def _stack_manifests() -> tuple[dict[str, dict], bool]:
     unparseable TOML, or tomllib unavailable) — callers fail closed on that."""
     if tomllib is None:
         return {}, False
-    stacks_dir = os.path.join(stanok.REPO_ROOT, "scripts", "stacks")
+    stacks_dir = os.path.join(cfg.repo_root, "scripts", "stacks")
     out: dict[str, dict] = {}
     ok = True
     try:
@@ -131,7 +134,7 @@ def _stack_manifests() -> tuple[dict[str, dict], bool]:
     return out, ok
 
 
-def _verdict_config_patterns() -> tuple[str, ...]:
+def _verdict_config_patterns(cfg) -> tuple[str, ...]:
     """CC-151 (stack-agnostic subversion guard): the union of the
     `verdict_config` lists declared by the stack manifests
     (scripts/stacks/*.toml). Each stack declares the config filenames that
@@ -140,7 +143,7 @@ def _verdict_config_patterns() -> tuple[str, ...]:
     does not inherit another stack's list. Fail-closed: if no manifest parses
     (missing dir, unparseable TOML, or tomllib unavailable) fall back to the
     legacy py set so the guard never silently disables."""
-    manifests, ok = _stack_manifests()
+    manifests, ok = _stack_manifests(cfg)
     if not ok:
         return _LEGACY_VERDICT_CONFIG
     patterns: set[str] = set()
@@ -151,7 +154,7 @@ def _verdict_config_patterns() -> tuple[str, ...]:
     return tuple(sorted(patterns))
 
 
-def check_test_config() -> bool:
+def check_test_config(cfg) -> bool:
     # W6 verdict-subversion gate (owner decision A, fail-closed); CC-151 makes
     # it stack-agnostic: the forbidden set is the union of the `verdict_config`
     # lists declared by the stack manifests (scripts/stacks/*.toml), not a
@@ -161,10 +164,10 @@ def check_test_config() -> bool:
     # is writable and contract_lock only hashes files that existed at start,
     # so such a file can appear mid-project; the runner picks up config from
     # every directory on the test file's path, hence the recursive walk.
-    tests_dir = os.path.join(stanok.REPO_ROOT, "tests")
+    tests_dir = os.path.join(cfg.repo_root, "tests")
     if not os.path.isdir(tests_dir):
         return False
-    forbidden = _verdict_config_patterns()
+    forbidden = _verdict_config_patterns(cfg)
     try:
         for dirpath, _dirnames, filenames in os.walk(tests_dir):
             for name in filenames:
@@ -177,7 +180,7 @@ def check_test_config() -> bool:
     return False
 
 
-def sandbox_config_gate() -> list[str]:
+def sandbox_config_gate(cfg) -> list[str]:
     # W7 sandbox-config gate (fail-closed, CC-107): cli.js resolves a relative
     # sandbox.filesystem deny entry against the --settings file's directory
     # (REPO_ROOT/.claude), NOT cwd. A deny entry that resolves to a NON-EXISTENT
@@ -196,7 +199,7 @@ def sandbox_config_gate() -> list[str]:
     # names the key, the raw entry, the resolved path, and the fix
     # (CC-157: the rc=28 abort must be actionable, not abstract).
     problems: list[str] = []
-    settings = os.path.join(stanok.REPO_ROOT, ".claude", "settings.stanok.json")
+    settings = os.path.join(cfg.repo_root, ".claude", "settings.stanok.json")
     if not os.path.isfile(settings):
         return problems
     try:
@@ -231,7 +234,7 @@ REQUIRED_WINDOW_MARGIN = 2000
 # STANOK_REQUIRED_WINDOW is unset. Single source (PLAN-HYGIENE 2026-10-08):
 # context_rot_threshold reads this instead of a hardcoded default — the old
 # `or 128000` silently overrode the real window when the env was unset.
-stanok._DERIVED_REQUIRED_WINDOW: int | None = None
+_DERIVED_REQUIRED_WINDOW: int | None = None
 
 
 def _required_context_window() -> int | None:
@@ -271,27 +274,28 @@ def context_rot_threshold() -> int | None:
             log(f"WARN: STANOK_CONTEXT_ROT_TOKENS={env!r} is not an integer; ignoring")
     window = _required_context_window()
     if window is None:
-        window = stanok._DERIVED_REQUIRED_WINDOW
+        window = _DERIVED_REQUIRED_WINDOW
     if window is None:
         return None
     return int(window * 0.8)
 
 
-def _fetch_server_props() -> dict | None:
-    """GET {SERVER_URL}/props (no proxy, 5 s timeout). None on any failure."""
+def _fetch_server_props(cfg) -> dict | None:
+    """GET {cfg.server_url}/props (no proxy, 5 s timeout). None on any failure."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(urllib.request.Request(f"{SERVER_URL}/props"), timeout=5) as resp:
+        with opener.open(urllib.request.Request(f"{cfg.server_url}/props"), timeout=5) as resp:
             return json.loads(resp.read().decode("utf-8", errors="replace"))
     except Exception as e:
-        log(f"SERVER UNAVAILABLE ({SERVER_URL}: {type(e).__name__}) (rc=20)")
+        log(f"SERVER UNAVAILABLE ({cfg.server_url}: {type(e).__name__}) (rc=20)")
         return None
 
 
-def preflight_server() -> bool:
+def preflight_server(cfg) -> bool:
+    global _DERIVED_REQUIRED_WINDOW
     if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
         return True
-    props = stanok._fetch_server_props()
+    props = _fetch_server_props(cfg)
     if props is None:
         return False
 
@@ -308,7 +312,7 @@ def preflight_server() -> bool:
         if required <= 0:
             log(f"PREFLIGHT: server n_ctx={n_ctx} <= margin {REQUIRED_WINDOW_MARGIN} (fail-closed) (rc=20)")
             return False
-        stanok._DERIVED_REQUIRED_WINDOW = required
+        _DERIVED_REQUIRED_WINDOW = required
         log(f"PREFLIGHT: STANOK_REQUIRED_WINDOW unset — derived required window "
             f"{required} (n_ctx {n_ctx} - margin {REQUIRED_WINDOW_MARGIN})")
     if n_ctx < required:
@@ -318,14 +322,14 @@ def preflight_server() -> bool:
     return True
 
 
-def _stack_preflights() -> list[str]:
+def _stack_preflights(cfg) -> list[str]:
     """The `preflight` command of each stack manifest (scripts/stacks/*.toml,
     sorted by filename) — the cheap per-stack runner-availability probe
     (e.g. `env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest --version`).
     Read via the same tomllib loader as _verdict_config_patterns — NOT a
     regex over run.sh (the pre-CC-148 registry block no longer lives there;
     the old regex silently returned [] and disabled the doctor probe)."""
-    manifests, _ok = _stack_manifests()
+    manifests, _ok = _stack_manifests(cfg)
     preflights = []
     for data in manifests.values():
         pre = data.get("preflight")
@@ -334,7 +338,7 @@ def _stack_preflights() -> list[str]:
     return preflights
 
 
-def _image_digest() -> str:
+def _image_digest(cfg) -> str:
     """sha256 over the image-defining sources: Dockerfile + scripts/run.sh
     + scripts/stacks/*.toml (the STACKS registry, sorted by filename —
     the same explicit order setup.sh uses at build time). setup.sh bakes
@@ -343,9 +347,9 @@ def _image_digest() -> str:
     launch path)."""
     h = hashlib.sha256()
     for rel in ("Dockerfile", "scripts/run.sh"):
-        with open(os.path.join(stanok.REPO_ROOT, rel), "rb") as f:
+        with open(os.path.join(cfg.repo_root, rel), "rb") as f:
             h.update(f.read())
-    stacks_dir = os.path.join(stanok.REPO_ROOT, "scripts", "stacks")
+    stacks_dir = os.path.join(cfg.repo_root, "scripts", "stacks")
     for name in sorted(os.listdir(stacks_dir)):
         if name.endswith(".toml"):
             with open(os.path.join(stacks_dir, name), "rb") as f:
@@ -353,7 +357,7 @@ def _image_digest() -> str:
     return h.hexdigest()
 
 
-def preflight_image(image: str) -> bool:
+def preflight_image(cfg, image: str) -> bool:
     """Host-side image provenance + runner preflight.
     1. The image LABEL stanok.digest must equal sha256(Dockerfile + run.sh
        + scripts/stacks/*.toml) — an image older than the Dockerfile or
@@ -365,7 +369,7 @@ def preflight_image(image: str) -> bool:
     Fail-closed: any docker error, missing label, or failed probe returns
     False."""
     try:
-        want = stanok._image_digest()
+        want = _image_digest(cfg)
     except OSError as e:
         log(f"PREFLIGHT-IMAGE: cannot compute image digest: {e} (doctor image preflight)")
         return False
@@ -386,7 +390,7 @@ def preflight_image(image: str) -> bool:
             f"sha256(Dockerfile+run.sh+stacks) {want!r}; rebuild via ./setup.sh (doctor image preflight)")
         return False
     log(f"PREFLIGHT-IMAGE: digest OK ({want[:12]}…)")
-    for pre in stanok._stack_preflights():
+    for pre in _stack_preflights(cfg):
         try:
             p = subprocess.run(
                 ["docker", "run", "--rm", image, "/bin/sh", "-c", pre],

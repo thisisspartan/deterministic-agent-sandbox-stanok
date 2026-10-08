@@ -19,9 +19,12 @@ LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
 import cli  # noqa: E402
-import stanok  # noqa: E402
+from config import Config  # noqa: E402
 
-SUPERVISOR_PROTOCOL = Path(stanok.REPO_ROOT).parent / "CLAUDE.supervisor.md"
+# from_env() replicates the former hub env logic (STANOK_REPO included), so
+# the protocol path and the timer values resolve exactly as before C.
+CFG = Config.from_env()
+SUPERVISOR_PROTOCOL = Path(CFG.repo_root).parent / "CLAUDE.supervisor.md"
 
 
 def test_wait_cap_is_2700():
@@ -29,7 +32,7 @@ def test_wait_cap_is_2700():
 
 
 def test_machine_worst_case_5400_and_cap_shorter_on_purpose():
-    worst = stanok.TURN_TIMEOUT_S * (1 + stanok.DEFAULT_RETRIES)
+    worst = CFG.turn_timeout_s * (1 + CFG.default_retries)
     assert worst == 5400.0
     # Deliberate kill-switch. Raising the cap = editing the protocol AND
     # this test in the same change — never one without the other.

@@ -22,6 +22,9 @@ mounts, so the two cannot drift):
 The last test is the real `docker run` e2e the audit asked for: a declared
 file is writable while a SIBLING in the same (repo :ro) directory is EROFS,
 and an absent declared path is writable through its parent-dir carve-out.
+
+C (PLAN-HYGIENE 2026-10-08): the rule lives in ticket.py and takes the
+Config explicitly — no hub facade, no monkeypatched REPO_ROOT.
 """
 import dataclasses
 import os
@@ -36,93 +39,99 @@ LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
 import sandbox  # noqa: E402
-import stanok  # noqa: E402
+import ticket  # noqa: E402
+from config import Config  # noqa: E402
+from stanok import SessionPlan  # noqa: E402
 
 from conftest import repo, write  # noqa: E402,F401
 
 
-def _carve(repo_dir, monkeypatch, rel):
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo_dir))
-    return stanok.declared_carveout(rel)
+def _carve(cfg, rel):
+    return ticket.declared_carveout(cfg, rel)
 
 
 # --- the derivation rule --------------------------------------------------------
 
-def test_existing_file_carves_out_itself(repo, monkeypatch):
+def test_existing_file_carves_out_itself(repo):
     write(repo / "src" / "mod.py", "x = 1\n")
-    assert _carve(repo, monkeypatch, "src/mod.py") == "src/mod.py"
+    assert _carve(Config(repo_root=str(repo)), "src/mod.py") == "src/mod.py"
 
 
-def test_existing_dir_carves_out_itself(repo, monkeypatch):
+def test_existing_dir_carves_out_itself(repo):
     (repo / "src" / "pkg").mkdir()
-    assert _carve(repo, monkeypatch, "src/pkg") == "src/pkg"
+    cfg = Config(repo_root=str(repo))
+    assert _carve(cfg, "src/pkg") == "src/pkg"
     # A bare ZONE is the one existing dir that is not declarable (see below).
-    assert _carve(repo, monkeypatch, "tests") is None
+    assert _carve(cfg, "tests") is None
 
 
-def test_absent_path_carves_out_nearest_existing_ancestor(repo, monkeypatch):
-    assert _carve(repo, monkeypatch, "tests/new_test.py") == "tests"
+def test_absent_path_carves_out_nearest_existing_ancestor(repo):
+    cfg = Config(repo_root=str(repo))
+    assert _carve(cfg, "tests/new_test.py") == "tests"
     # Nested: src/pkg/ does not exist yet, so the carve-out is src — the
     # documented residual (Docker cannot bind a missing file source, and a
     # source under a missing dir would be created root-owned on the host).
-    assert _carve(repo, monkeypatch, "src/pkg/mod.py") == "src"
+    assert _carve(cfg, "src/pkg/mod.py") == "src"
 
 
-def test_new_top_level_path_is_undeclarable(repo, monkeypatch):
+def test_new_top_level_path_is_undeclarable(repo):
     # dirname -> "" (the repo root itself, which must stay :ro) -> None.
-    assert _carve(repo, monkeypatch, "newmod.py") is None
-    assert _carve(repo, monkeypatch, "src2/mod.py") is None
+    cfg = Config(repo_root=str(repo))
+    assert _carve(cfg, "newmod.py") is None
+    assert _carve(cfg, "src2/mod.py") is None
 
 
-def test_bare_zone_is_undeclarable(repo, monkeypatch):
+def test_bare_zone_is_undeclarable(repo):
     # Declaring the zone itself would make prepare_workspace quarantine the
     # whole tree, and the mount would be the zone wholesale — not a per-ticket
     # carve-out. A path INSIDE a zone is the declared unit.
+    cfg = Config(repo_root=str(repo))
     for rel in ("src", "tests", "tests/", "docs", "scripts"):
-        assert _carve(repo, monkeypatch, rel) is None, rel
+        assert _carve(cfg, rel) is None, rel
 
 
-def test_traversal_and_symlink_escape_are_undeclarable(repo, monkeypatch, tmp_path):
+def test_traversal_and_symlink_escape_are_undeclarable(repo, tmp_path):
     # NB: the `repo` fixture IS tmp_path — the "outside" dir must live beside
     # it, not inside it.
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
     (repo / "src" / "link").symlink_to(outside)
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    cfg = Config(repo_root=str(repo))
     for rel in ("/etc/passwd", "./src/mod.py", "../x", "src/../tests/x"):
-        assert stanok.declared_carveout(rel) is None, rel
+        assert ticket.declared_carveout(cfg, rel) is None, rel
     # A symlink inside the repo resolving OUTSIDE: Docker resolves the bind
     # source's realpath, so this would smuggle the outside dir in (SEC-01).
-    assert stanok.declared_carveout("src/link") is None
-    assert stanok.declared_carveout("src/link/x.py") is None
+    assert ticket.declared_carveout(cfg, "src/link") is None
+    assert ticket.declared_carveout(cfg, "src/link/x.py") is None
 
 
 # --- the derivation over a declared list ----------------------------------------
 
-def test_host_rw_paths_dedupes_and_only_emits_existing_sources(repo, monkeypatch):
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, edit_paths, _ = stanok.parse_ticket_header(
+def test_host_rw_paths_dedupes_and_only_emits_existing_sources(repo):
+    cfg = Config(repo_root=str(repo))
+    declared, edit_paths, _ = ticket.parse_ticket_header(
+        cfg,
         "test: tests/a_test.py\n"
         "test: tests/b_test.py\n"
         "impl: src/c.py\n"
         "edit: tests/existing_test.py\n"
     )
-    rw = stanok.host_rw_paths(declared)
+    rw = ticket.host_rw_paths(cfg, declared)
     assert rw == ("tests", "src"), rw  # dedupe, ticket order
     for rel in rw:  # a carve-out source MUST exist: Docker would create it
         assert os.path.exists(repo / rel), rel
 
 
-def test_every_declared_path_is_covered_by_a_carve_out(repo, monkeypatch):
+def test_every_declared_path_is_covered_by_a_carve_out(repo):
     # The T4 contract, stated as a property: whatever the ticket declares, the
     # derived mount set makes that exact path writable (itself or its nearest
     # existing ancestor dir) — and nothing else in the repo is.
     write(repo / "docs" / "guide.md", "# g\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    cfg = Config(repo_root=str(repo))
     declared = ["docs/guide.md", "tests/new_test.py", "src/mod.py"]
-    rw = stanok.host_rw_paths(declared)
+    rw = ticket.host_rw_paths(cfg, declared)
     for rel in declared:
-        carve = stanok.declared_carveout(rel)
+        carve = ticket.declared_carveout(cfg, rel)
         assert carve in rw, (rel, rw)
         assert rel == carve or rel.startswith(carve + "/")
     assert "evidence" not in rw and ".git" not in rw
@@ -133,29 +142,29 @@ def test_header_rejects_undeclarable_path():
     # header is refused (rc=13 upstream) instead of launching a container that
     # cannot write what the ticket asked for.
     with pytest.raises(ValueError) as exc:
-        stanok.parse_ticket_header("impl: brand_new_top_level.py\n")
+        ticket.parse_ticket_header(Config(), "impl: brand_new_top_level.py\n")
     assert "brand_new_top_level.py" in str(exc.value)
 
 
 def test_plan_carries_no_mount_field():
     # I1: the mounts are derived, never a second policy list in the plan.
-    fields = {f.name for f in dataclasses.fields(stanok.SessionPlan)}
+    fields = {f.name for f in dataclasses.fields(SessionPlan)}
     assert "rw_zones" not in fields
 
 
 # --- real docker run: per-file rw over a ro directory ---------------------------
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
-def test_declared_file_rw_sibling_erofs(tmp_path, monkeypatch):
+def test_declared_file_rw_sibling_erofs(tmp_path):
     repo_dir = tmp_path / "repo"
     for rel in ("src", "tests", "docs"):
         (repo_dir / rel).mkdir(parents=True)
     (repo_dir / "src" / "mod.py").write_text("x = 1\n", encoding="utf-8")
     log = tmp_path / "logs"
     log.mkdir()
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo_dir))
+    cfg = Config(repo_root=str(repo_dir))
     # `src/mod.py` exists -> file bind; `docs/new.md` is absent -> docs/ bind.
-    rw = stanok.host_rw_paths(["src/mod.py", "docs/new.md"])
+    rw = ticket.host_rw_paths(cfg, ["src/mod.py", "docs/new.md"])
     assert rw == ("src/mod.py", "docs")
 
     cmd = (

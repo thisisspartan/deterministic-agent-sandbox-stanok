@@ -44,29 +44,31 @@ LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
 import sandbox  # noqa: E402
-import stanok  # noqa: E402
+import ticket  # noqa: E402
+import verify  # noqa: E402
+from config import Config  # noqa: E402
+from stanok import SessionPlan  # noqa: E402
 
 from conftest import repo, write  # noqa: E402,F401
 
 
-def _host_repo(tmp_path, monkeypatch, tests=("old_test.py",), runsh=True):
+def _host_repo(tmp_path, tests=("old_test.py",), runsh=True):
     root = tmp_path / "repo"
     for rel in tests:
         write(root / "tests" / rel, "def test_x():\n    assert 1\n")
     if runsh:
         write(root / "scripts" / "run.sh", "#!/usr/bin/env bash\nexit 0\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(root))
-    return root
+    return root, Config(repo_root=str(root))
 
 
 # --- the protected list: one source ---------------------------------------------
 
-def test_protected_files_are_tests_runsh_and_stacks(repo, monkeypatch):
+def test_protected_files_are_tests_runsh_and_stacks(repo):
     write(repo / "tests" / "a_test.py", "def test_a():\n    assert 1\n")
     write(repo / "tests" / "sub" / "b_test.py", "def test_b():\n    assert 1\n")
     write(repo / "tests" / "__pycache__" / "a_test.cpython-313.pyc", "junk")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    protected = stanok._protected_files()
+    cfg = Config(repo_root=str(repo))
+    protected = verify._protected_files(cfg)
     # B1 (PLAN-AUDIT-2026-10-08): the stacks manifests are contract files too
     # (run.sh derives its registry from them) — see test_stacks_protected.py.
     assert set(protected) == {"tests/a_test.py", "tests/sub/b_test.py",
@@ -74,16 +76,15 @@ def test_protected_files_are_tests_runsh_and_stacks(repo, monkeypatch):
                               "scripts/stacks/jq.toml", "scripts/stacks/js.toml",
                               "scripts/stacks/py.toml"}
     # The manifest and the :ro list are the same rule, not two policy lists.
-    assert set(stanok._tests_manifest()) == set(protected)
+    assert set(verify._tests_manifest(cfg)) == set(protected)
 
 
-def test_protected_list_without_a_runsh(repo, monkeypatch):
+def test_protected_list_without_a_runsh(repo):
     # Bootstrap: a missing scripts/run.sh is not protected (it may be created).
     # The stacks manifests are pre-existing infrastructure — protected anyway.
     write(repo / "tests" / "a_test.py", "def test_a():\n    assert 1\n")
     (repo / "scripts" / "run.sh").unlink()
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok._protected_files() == [
+    assert verify._protected_files(Config(repo_root=str(repo))) == [
         "tests/a_test.py",
         "scripts/stacks/jq.toml", "scripts/stacks/js.toml",
         "scripts/stacks/py.toml"]
@@ -91,53 +92,54 @@ def test_protected_list_without_a_runsh(repo, monkeypatch):
 
 # --- host_ro_paths --------------------------------------------------------------
 
-def test_no_bind_when_nothing_is_under_a_carve_out(tmp_path, monkeypatch):
-    _host_repo(tmp_path, monkeypatch)
-    assert stanok.host_ro_paths(("src",)) == ()
+def test_no_bind_when_nothing_is_under_a_carve_out(tmp_path):
+    _, cfg = _host_repo(tmp_path)
+    assert ticket.host_ro_paths(cfg, ("src",)) == ()
 
 
-def test_protected_files_under_a_dir_carve_out_are_bound(tmp_path, monkeypatch):
-    root = _host_repo(tmp_path, monkeypatch, tests=("old_test.py", "also_test.py"))
-    declared, _, _ = stanok.parse_ticket_header("test: tests/new_test.py\n")
-    rw = stanok.host_rw_paths(declared)
+def test_protected_files_under_a_dir_carve_out_are_bound(tmp_path):
+    root, cfg = _host_repo(tmp_path, tests=("old_test.py", "also_test.py"))
+    declared, _, _ = ticket.parse_ticket_header(cfg, "test: tests/new_test.py\n")
+    rw = ticket.host_rw_paths(cfg, declared)
     assert rw == ("tests",)                      # absent path -> its parent dir
-    ro = stanok.host_ro_paths(rw)
+    ro = ticket.host_ro_paths(cfg, rw)
     assert set(ro) == {"tests/old_test.py", "tests/also_test.py"}
     # CC-206: EVERY protected file under a carve-out is :ro-bound,
     # unconditionally — nothing under a rw mount stays writable by accident.
     # (scripts/run.sh is not under one here — the repo :ro mount already
     # covers it.)
-    for rel in stanok._protected_files():
+    for rel in verify._protected_files(cfg):
         if any(rel == c or rel.startswith(c + "/") for c in rw):
             assert rel in ro, rel
 
 
-def test_declared_protected_path_is_still_bound(tmp_path, monkeypatch):
+def test_declared_protected_path_is_still_bound(tmp_path):
     # CC-206: the `if rel in declared_set: continue` loophole is gone. A
     # protected file is bound :ro even when it appears in the declared list —
     # such a ticket is refused by the gate (rc=13) before the container
     # starts, so this call is defense-in-depth: the mount layer never trusts
     # the declaration.
-    _host_repo(tmp_path, monkeypatch, tests=("old_test.py", "other_test.py"))
-    declared, edits, _ = stanok.parse_ticket_header(
+    _, cfg = _host_repo(tmp_path, tests=("old_test.py", "other_test.py"))
+    declared, edits, _ = ticket.parse_ticket_header(
+        cfg,
         "edit: tests/old_test.py\n"
         "test: tests/new_test.py\n"
     )
     assert edits == ["tests/old_test.py"]
-    rw = stanok.host_rw_paths(declared)
-    ro = stanok.host_ro_paths(rw)
+    rw = ticket.host_rw_paths(cfg, declared)
+    ro = ticket.host_ro_paths(cfg, rw)
     assert "tests/old_test.py" in ro
     assert set(ro) == {"tests/old_test.py", "tests/other_test.py"}
 
 
-def test_runsh_is_bound_only_when_scripts_is_carved_out(tmp_path, monkeypatch):
-    _host_repo(tmp_path, monkeypatch)
-    assert "scripts/run.sh" not in stanok.host_ro_paths(("tests",))
+def test_runsh_is_bound_only_when_scripts_is_carved_out(tmp_path):
+    _, cfg = _host_repo(tmp_path)
+    assert "scripts/run.sh" not in ticket.host_ro_paths(cfg, ("tests",))
     # scripts/ becomes a carve-out only via an absent declared path under it.
     declared = ["scripts/new_helper.sh"]
-    rw = stanok.host_rw_paths(declared)
+    rw = ticket.host_rw_paths(cfg, declared)
     assert rw == ("scripts",)
-    assert stanok.host_ro_paths(rw) == ("scripts/run.sh",)
+    assert ticket.host_ro_paths(cfg, rw) == ("scripts/run.sh",)
 
 
 # --- the argv -------------------------------------------------------------------
@@ -169,13 +171,13 @@ def test_sandbox_argv_emits_the_ro_bind_after_the_rw_bind(tmp_path):
 # --- real docker run: the T5 e2e, at the fs layer -------------------------------
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
-def test_pre_existing_test_is_erofs_new_sibling_creatable(tmp_path, monkeypatch):
-    root = _host_repo(tmp_path, monkeypatch, tests=("old_test.py",))
+def test_pre_existing_test_is_erofs_new_sibling_creatable(tmp_path):
+    root, cfg = _host_repo(tmp_path, tests=("old_test.py",))
     log = tmp_path / "logs"
     log.mkdir()
-    declared, _, _ = stanok.parse_ticket_header("test: tests/new_test.py\n")
-    rw = stanok.host_rw_paths(declared)
-    ro = stanok.host_ro_paths(rw)
+    declared, _, _ = ticket.parse_ticket_header(cfg, "test: tests/new_test.py\n")
+    rw = ticket.host_rw_paths(cfg, declared)
+    ro = ticket.host_ro_paths(cfg, rw)
     assert rw == ("tests",) and ro == ("tests/old_test.py",)
 
     cmd = (
@@ -201,7 +203,7 @@ def test_pre_existing_test_is_erofs_new_sibling_creatable(tmp_path, monkeypatch)
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
-def test_hardlink_escape_is_closed_by_the_mount_topology(tmp_path, monkeypatch):
+def test_hardlink_escape_is_closed_by_the_mount_topology(tmp_path):
     """CC-206 (measured 2026-10-07, corrects the REVIEW §4.1 assumption):
     the machine CANNOT create the hardlink escape inside the container.
     `link(2)` does not cross a mount boundary — the protected file lives on
@@ -211,15 +213,16 @@ def test_hardlink_escape_is_closed_by_the_mount_topology(tmp_path, monkeypatch):
     closed too: open() follows it to the :ro mount point -> EROFS.
     Prevention is therefore STRUCTURAL, not a residual to police.
     """
-    root = _host_repo(tmp_path, monkeypatch, tests=("old_test.py",))
+    root, cfg = _host_repo(tmp_path, tests=("old_test.py",))
     (root / "src").mkdir()
     log = tmp_path / "logs"
     log.mkdir()
-    declared, _, _ = stanok.parse_ticket_header(
+    declared, _, _ = ticket.parse_ticket_header(
+        cfg,
         "test: tests/new_test.py\nimpl: src/new.py\n"
     )
-    rw = stanok.host_rw_paths(declared)
-    ro = stanok.host_ro_paths(rw)
+    rw = ticket.host_rw_paths(cfg, declared)
+    ro = ticket.host_ro_paths(cfg, rw)
     assert set(rw) == {"tests", "src"} and ro == ("tests/old_test.py",)
 
     cmd = (
@@ -249,7 +252,7 @@ def test_hardlink_escape_is_closed_by_the_mount_topology(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
-def test_host_hardlink_escapes_ro_bind_contract_lock_detects(tmp_path, monkeypatch):
+def test_host_hardlink_escapes_ro_bind_contract_lock_detects(tmp_path):
     """CC-206 residual, pinned as a fact: the escape exists only for a
     hardlink that PRE-EXISTS on the host (created before the run, outside the
     container) in a writable zone — e.g. `src/hard.py` linked to
@@ -259,17 +262,17 @@ def test_host_hardlink_escapes_ro_bind_contract_lock_detects(tmp_path, monkeypat
     kill the TDD pipeline), so the residual is closed by DETECTION: the
     contract_lock manifest sees the changed digest and fails the run closed.
     """
-    root = _host_repo(tmp_path, monkeypatch, tests=("old_test.py",))
+    root, cfg = _host_repo(tmp_path, tests=("old_test.py",))
     (root / "src").mkdir()
     os.link(str(root / "tests" / "old_test.py"), str(root / "src" / "hard.py"))
     log = tmp_path / "logs"
     log.mkdir()
-    declared, _, _ = stanok.parse_ticket_header("impl: src/new.py\n")
-    rw = stanok.host_rw_paths(declared)
-    ro = stanok.host_ro_paths(rw)
+    declared, _, _ = ticket.parse_ticket_header(cfg, "impl: src/new.py\n")
+    rw = ticket.host_rw_paths(cfg, declared)
+    ro = ticket.host_ro_paths(cfg, rw)
     assert rw == ("src",) and ro == ()  # old_test.py: repo :ro mount covers it
 
-    before = stanok._tests_manifest()
+    before = verify._tests_manifest(cfg)
     assert "tests/old_test.py" in before
 
     cmd = f"(echo x >> '{root}/src/hard.py') 2>/dev/null " \
@@ -291,17 +294,16 @@ def test_host_hardlink_escapes_ro_bind_contract_lock_detects(tmp_path, monkeypat
 
     # Detection echelon: the post-turn manifest diff records the violation and
     # the forced-fail turns it into a failed run (rc=1, verifier FAIL).
-    plan = stanok.SessionPlan(declared_paths=(), edit_paths=())
+    plan = SessionPlan(declared_paths=(), edit_paths=())
     job: dict = {}
-    stanok._check_contract_lock(before, job, 1, plan)
+    verify._check_contract_lock(cfg, before, job, 1, plan)
     assert job["contract_lock_violations"] == ["turn 1: MODIFIED: tests/old_test.py"]
-    assert stanok._contract_lock_forced_fail(job, 1) == 1
+    assert verify._contract_lock_forced_fail(job, 1) == 1
     assert job["verifier"] == "FAIL"
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
-def test_stack_manifest_is_erofs_under_a_scripts_carve_out(repo, tmp_path,
-                                                           monkeypatch):
+def test_stack_manifest_is_erofs_under_a_scripts_carve_out(repo, tmp_path):
     """B1 (PLAN-AUDIT-2026-10-08), the FS echelon: a ticket declaring
     `impl: scripts/probe.sh` makes scripts/ a rw carve-out — the stacks
     manifests under it must be re-bound :ro, so the machine cannot swap
@@ -309,11 +311,11 @@ def test_stack_manifest_is_erofs_under_a_scripts_carve_out(repo, tmp_path,
     test_stacks_protected.py proves detection; this proves prevention).
     The conftest `repo` fixture installs the live run.sh + scripts/stacks
     (CC-168), so this drives the real manifests."""
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, _, _ = stanok.parse_ticket_header("impl: scripts/probe.sh\n")
-    rw = stanok.host_rw_paths(declared)
+    cfg = Config(repo_root=str(repo))
+    declared, _, _ = ticket.parse_ticket_header(cfg, "impl: scripts/probe.sh\n")
+    rw = ticket.host_rw_paths(cfg, declared)
     assert rw == ("scripts",)
-    ro = stanok.host_ro_paths(rw)
+    ro = ticket.host_ro_paths(cfg, rw)
     assert set(ro) == {"scripts/run.sh",
                        "scripts/stacks/jq.toml", "scripts/stacks/js.toml",
                        "scripts/stacks/py.toml"}

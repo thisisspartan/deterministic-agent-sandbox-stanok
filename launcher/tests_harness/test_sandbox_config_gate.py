@@ -36,7 +36,8 @@ LAUNCHER_DIR = REPO_ROOT / "launcher"
 
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
-import stanok  # noqa: E402
+import gates  # noqa: E402
+from config import Config  # noqa: E402
 
 
 def _repo_with_settings(tmp_path, fs):
@@ -55,73 +56,65 @@ def _mk(repo, *dirs):
 
 # --- 1: bare denyWrite entry -> non-existent .claude/hooks (CC-107) --------
 
-def test_bare_denywrite_flagged(tmp_path, monkeypatch):
+def test_bare_denywrite_flagged(tmp_path):
     repo = _repo_with_settings(tmp_path, {"denyWrite": ["hooks"]})
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate()
+    assert gates.sandbox_config_gate(Config(repo_root=str(repo)))
 
 
 # --- 2: "../" denyWrite entry -> existing repo/hooks (the fix) -------------
 
-def test_dotdot_denywrite_ok(tmp_path, monkeypatch):
+def test_dotdot_denywrite_ok(tmp_path):
     repo = _repo_with_settings(tmp_path, {"denyWrite": ["../hooks"]})
     _mk(repo, "hooks")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate() == []
+    assert gates.sandbox_config_gate(Config(repo_root=str(repo))) == []
 
 
 # --- 3: bare denyRead entry -> non-existent .claude/launcher ---------------
 
-def test_bare_denyread_flagged(tmp_path, monkeypatch):
+def test_bare_denyread_flagged(tmp_path):
     repo = _repo_with_settings(tmp_path, {"denyRead": ["launcher"]})
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate()
+    assert gates.sandbox_config_gate(Config(repo_root=str(repo)))
 
 
 # --- 4: all "../" entries point at existing dirs ---------------------------
 
-def test_all_dotdot_entries_ok(tmp_path, monkeypatch):
+def test_all_dotdot_entries_ok(tmp_path):
     fs = {
         "denyWrite": ["../evidence", "../hooks", "../launcher", "../.claude"],
         "denyRead": ["../hooks", "../launcher", "../evidence", "../.claude"],
     }
     repo = _repo_with_settings(tmp_path, fs)
     _mk(repo, "evidence", "hooks", "launcher")  # .claude already exists
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate() == []
+    assert gates.sandbox_config_gate(Config(repo_root=str(repo))) == []
 
 
 # --- 5: no sandbox.filesystem block ----------------------------------------
 
-def test_no_filesystem_block_ok(tmp_path, monkeypatch):
+def test_no_filesystem_block_ok(tmp_path):
     repo = _repo_with_settings(tmp_path, {})
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate() == []
+    assert gates.sandbox_config_gate(Config(repo_root=str(repo))) == []
 
 
 # --- 5b: unsupported forms are rejected, not guessed (no cli.js mirror) ----
 
-def test_tilde_entry_rejected(tmp_path, monkeypatch):
+def test_tilde_entry_rejected(tmp_path):
     repo = _repo_with_settings(tmp_path, {"denyWrite": ["~/.ssh"]})
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate()
+    assert gates.sandbox_config_gate(Config(repo_root=str(repo)))
 
 
-def test_absolute_existing_ok(tmp_path, monkeypatch):
+def test_absolute_existing_ok(tmp_path):
     repo = _repo_with_settings(tmp_path, {"denyWrite": [str(tmp_path / "repo" / ".claude")]})
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.sandbox_config_gate() == []
+    assert gates.sandbox_config_gate(Config(repo_root=str(repo))) == []
 
 
 # --- 7: missing-path problem text is actionable (CC-157) -------------------
 
-def test_missing_path_problem_is_actionable(tmp_path, monkeypatch):
+def test_missing_path_problem_is_actionable(tmp_path):
     # The problem string must name the key, the raw entry, the resolved
     # path, and the mkdir -p fix — so the rc=28 abort tells the operator
     # exactly what to do instead of an abstract "non-existent path".
     repo = _repo_with_settings(tmp_path, {"denyWrite": ["../evidence"]})
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    problems = stanok.sandbox_config_gate()
+    problems = gates.sandbox_config_gate(Config(repo_root=str(repo)))
     assert len(problems) == 1
     p = problems[0]
     assert "denyWrite" in p

@@ -26,7 +26,8 @@ from pathlib import Path
 LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
-import stanok  # noqa: E402
+import session  # noqa: E402
+from config import Config  # noqa: E402
 
 from conftest import repo, write
 
@@ -40,9 +41,9 @@ HANG_JS = (
 
 def test_hook_timeout_includes_partial_output(repo, monkeypatch):
     write(repo / "tests" / "hang.test.js", HANG_JS)
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    monkeypatch.setattr(stanok, "_HOOK_TEST_TIMEOUT_S", 3)
-    result = asyncio.run(stanok._verifier_hook(
+    monkeypatch.setattr(session, "_HOOK_TEST_TIMEOUT_S", 3)
+    result = asyncio.run(session._verifier_hook(
+        Config(repo_root=str(repo)),
         {"tool_input": {"file_path": str(repo / "tests" / "hang.test.js")}},
         "test-hook-id", None,
     ))

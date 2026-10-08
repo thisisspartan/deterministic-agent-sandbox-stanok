@@ -2,33 +2,63 @@
 
 build_agent_env, _execute_turn (returns TurnResult), _post_turn_decision (the
 post-turn verdict pipeline), _verifier_hook (R1), run_continuous_session,
-the CC-207 circuit breaker and the signal handlers. Mutable run state
-(_live_dir, _INTERRUPTED_RC) and the monkeypatched _HOOK_TEST_TIMEOUT_S are
-accessed via `stanok.`.
+the CC-207 circuit breaker and the signal handlers. Static config arrives as
+the passed-in Config; per-run mutable state (live_dir, marker_path,
+interrupted_rc) as the passed-in RunState (C). _HOOK_TEST_TIMEOUT_S is a
+module global — tests_harness patches `session._HOOK_TEST_TIMEOUT_S`.
 """
 
 import asyncio
 import dataclasses
+import functools
 import json
 import os
 import signal
 import time
 import uuid
-import stanok
-from stanok import API_TIMEOUT_MS, CLAUDE_BIN, CURATED_TOOLS, ExitCode, LOCAL_MODEL, SERVER_URL, STANOK_MAX_AGENT_TURNS, TURN_TIMEOUT_S, _write_stream_msg, log
+from stanok import ExitCode, log
 from gates import context_rot_threshold
 from verify import _check_contract_lock, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
+
+
+def _safe_json_default(obj):
+    if dataclasses.is_dataclass(obj):
+        return {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)}
+    if hasattr(obj, "__dict__"):
+        return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+    return str(obj)
+
+
+def _write_stream_msg(file_obj, turn: int, msg) -> None:
+    try:
+        raw = json.dumps(
+            {"turn": turn, "type": type(msg).__name__, "data": msg},
+            default=_safe_json_default,
+            ensure_ascii=False
+        )
+        file_obj.write(raw + "\n")
+        file_obj.flush()
+    except Exception as e:
+        try:
+            file_obj.write(json.dumps({
+                "turn": turn,
+                "type": type(msg).__name__,
+                "serialization_error": str(e)
+            }) + "\n")
+            file_obj.flush()
+        except OSError:
+            pass
 
 
 # ==================================================================================
 # Loop-trap circuit breaker (CC-207)
 # ==================================================================================
-def _loop_trap_path() -> str:
+def _loop_trap_path(run_state) -> str:
     """CC-207: single source of the marker path. The hook writes it (via the
     STANOK_LOOP_TRAP_FILE env handed to the machine process), the launcher
-    reads it. _live_dir (LOG_DIR/<label>) is mounted rw in the container
+    reads it. live_dir (LOG_DIR/<label>) is mounted rw in the container
     (sandbox.py) — the channel needs no new mount."""
-    return os.path.join(stanok._live_dir, "loop-trap.json")
+    return os.path.join(run_state.live_dir, "loop-trap.json")
 
 
 def _read_loop_trap(marker_path: str) -> dict | None:
@@ -62,7 +92,7 @@ def _loop_trap_verdict(job: dict, loop_trap: dict) -> int:
 # ==================================================================================
 # Inference environment (Prefix Invariance)
 # ==================================================================================
-def build_agent_env() -> dict[str, str]:
+def build_agent_env(cfg, run_state) -> dict[str, str]:
     """Runtime-only env for the machine process.
 
     Static machine config lives in `.claude/settings.stanok.json` -> `env`, which
@@ -72,23 +102,23 @@ def build_agent_env() -> dict[str, str]:
     kill the runtime knob. Hence: only derive-from-runtime keys belong here
     (endpoint, model, timeout); everything static belongs in settings.
 
-    No proxy: the machine has no web tools (CURATED_TOOLS) and its only outbound
+    No proxy: the machine has no web tools (cfg.curated_tools) and its only outbound
     is the local API server, which is directly reachable. Native sandbox injects
     its own proxy env into Bash commands when network.allowedDomains is set.
     """
     agent_env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "ANTHROPIC_BASE_URL": SERVER_URL,
-        "ANTHROPIC_MODEL": LOCAL_MODEL,
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": LOCAL_MODEL,
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": LOCAL_MODEL,
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": LOCAL_MODEL,
-        "CLAUDE_CODE_SUBAGENT_MODEL": LOCAL_MODEL,
-        "API_TIMEOUT_MS": API_TIMEOUT_MS,
+        "ANTHROPIC_BASE_URL": cfg.server_url,
+        "ANTHROPIC_MODEL": cfg.model,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": cfg.model,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": cfg.model,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": cfg.model,
+        "CLAUDE_CODE_SUBAGENT_MODEL": cfg.model,
+        "API_TIMEOUT_MS": cfg.api_timeout_ms,
         # CC-207: the loop-guard termination-marker channel. The hook writes
         # it at the 5th consecutive identical call; _execute_turn reads it
         # mid-turn. Derived-from-runtime (per-run dir) -> belongs here.
-        "STANOK_LOOP_TRAP_FILE": _loop_trap_path(),
+        "STANOK_LOOP_TRAP_FILE": _loop_trap_path(run_state),
     }
     # PLAN-HYGIENE 2026-10-08: no hardcoded AUTO_COMPACT default (the old
     # "128000" silently overrode the settings window when the env was unset).
@@ -142,7 +172,8 @@ class TurnResult:
     loop_trap: dict | None
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> TurnResult:
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
+                       run_state) -> TurnResult:
     """Run one turn on the live client; return its TurnResult."""
     from claude_agent_sdk import ResultMessage
 
@@ -152,7 +183,7 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
     writes = 0
     turn_error = ""
     loop_trap = None
-    marker_path = _loop_trap_path()
+    marker_path = _loop_trap_path(run_state)
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
         if not sid and hasattr(msg, "data") and isinstance(msg.data, dict):
@@ -240,7 +271,7 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
 _HOOK_TEST_TIMEOUT_S = 75  # mirrors the old `timeout 75` in verifier.sh
 
 
-async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -> dict:
+async def _verifier_hook(cfg, hook_input: dict, tool_use_id: "str | None", context) -> dict:
     # W8 double-hook diagnosis: log EVERY invocation with its tool_use_id.
     # After a run: grep 'HOOK-CALL' <launcher log> | awk id | sort | uniq -d —
     # duplicate ids = double registration/call; unique ids = the second
@@ -253,20 +284,20 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
         if not fp:
             return {}
         if not fp.startswith("/"):
-            fp = os.path.join(stanok.REPO_ROOT, fp)
+            fp = os.path.join(cfg.repo_root, fp)
         abs_path = os.path.realpath(fp)
-        tests_dir = os.path.join(stanok.REPO_ROOT, "tests")
+        tests_dir = os.path.join(cfg.repo_root, "tests")
         if not abs_path.startswith(tests_dir + os.sep):
             return {}
         if not os.path.isfile(abs_path):
             return {}
-        run_sh = os.path.join(stanok.REPO_ROOT, "scripts", "run.sh")
+        run_sh = os.path.join(cfg.repo_root, "scripts", "run.sh")
         if not os.path.isfile(run_sh):
             return {}
-        rel = os.path.relpath(abs_path, stanok.REPO_ROOT)
+        rel = os.path.relpath(abs_path, cfg.repo_root)
         proc = await asyncio.create_subprocess_exec(
             "bash", run_sh, "test", rel,
-            cwd=stanok.REPO_ROOT,
+            cwd=cfg.repo_root,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -285,7 +316,7 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
                 chunks.append(c)
 
         try:
-            await asyncio.wait_for(_drain(), timeout=stanok._HOOK_TEST_TIMEOUT_S)
+            await asyncio.wait_for(_drain(), timeout=_HOOK_TEST_TIMEOUT_S)
             await proc.wait()  # pipe EOF can arrive before the exit status
             rc = proc.returncode
         except asyncio.TimeoutError:
@@ -338,7 +369,7 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
         return {}
 
 
-def _post_turn_decision(job: dict, turn: int, max_turns: int, plan: "SessionPlan",
+def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "SessionPlan",
                        result: TurnResult, tests_manifest_before: dict,
                        inp: int, live_context: int) -> tuple[int | None, str]:
     """Decide what happens after a completed turn (the verdict pipeline).
@@ -365,7 +396,7 @@ def _post_turn_decision(job: dict, turn: int, max_turns: int, plan: "SessionPlan
 
     # contract_lock (W2.5 + P2): did the turn touch pre-existing
     # tests/ or scripts/run.sh?
-    _check_contract_lock(tests_manifest_before, job, turn, plan)
+    _check_contract_lock(cfg, tests_manifest_before, job, turn, plan)
 
     # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
     # spike in the turn's input_tokens (uncached re-send). Only
@@ -385,7 +416,7 @@ def _post_turn_decision(job: dict, turn: int, max_turns: int, plan: "SessionPlan
         log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
             f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
 
-    verify_ok, failures, env_fail = verify_gate(plan)
+    verify_ok, failures, env_fail = verify_gate(cfg, plan)
 
     if env_fail:
         # ENV-FAIL (run.sh rc=6): the test runner is unavailable
@@ -451,39 +482,41 @@ def _post_turn_decision(job: dict, turn: int, max_turns: int, plan: "SessionPlan
     return None, ""
 
 
-async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, plan: "SessionPlan") -> int:
+async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
+                                max_retries: int, plan: "SessionPlan") -> int:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 
     local_run_id = str(uuid.uuid4())[:8]
-    stream_out_path = os.path.join(stanok._live_dir, f"session-{local_run_id}.jsonl")
+    stream_out_path = os.path.join(run_state.live_dir, f"session-{local_run_id}.jsonl")
 
     options = ClaudeAgentOptions(
-        cli_path=CLAUDE_BIN,
-        cwd=stanok.REPO_ROOT,
+        cli_path=cfg.claude_bin,
+        cwd=cfg.repo_root,
         setting_sources=["project"],
-        settings=f"{stanok.REPO_ROOT}/.claude/settings.stanok.json",
+        settings=f"{cfg.repo_root}/.claude/settings.stanok.json",
         permission_mode="dontAsk",
         # R3: `tools` -> `--tools` restricts the session's tool surface to
-        # exactly CURATED_TOOLS (the CLI's default set is NOT added on top);
+        # exactly cfg.curated_tools (the CLI's default set is NOT added on top);
         # allowed_tools is kept as the permission-allow side of the same set.
-        tools=CURATED_TOOLS,
-        allowed_tools=CURATED_TOOLS,
+        tools=cfg.curated_tools,
+        allowed_tools=cfg.curated_tools,
         hooks={
             # R1: in-process PostToolUse verifier (replaces hooks/verifier.sh).
             # timeout > _HOOK_TEST_TIMEOUT_S so the hook's own 75 s test timeout
             # is the deterministic verdict, not the SDK's hook timeout.
             "PostToolUse": [
-                HookMatcher(matcher="Write|Edit", hooks=[_verifier_hook], timeout=90)
+                HookMatcher(matcher="Write|Edit",
+                            hooks=[functools.partial(_verifier_hook, cfg)], timeout=90)
             ]
         },
-        max_turns=STANOK_MAX_AGENT_TURNS,
-        model=LOCAL_MODEL,
-        env=build_agent_env(),
+        max_turns=cfg.max_agent_turns,
+        model=cfg.model,
+        env=build_agent_env(cfg, run_state),
     )
 
     max_turns = 1 + max_retries
     current_prompt = ticket_prompt
-    log(f"SESSION START (run_id: {local_run_id}) | Turn limit: {max_turns} | model={LOCAL_MODEL}")
+    log(f"SESSION START (run_id: {local_run_id}) | Turn limit: {max_turns} | model={cfg.model}")
 
     total_tokens = {
         "input_tokens": 0,
@@ -498,7 +531,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
     # pre-existing test file modified/deleted during the run is a violation in
     # summary.json (the :ro bind makes the modification impossible; the diff
     # still catches a deletion, i.e. a write to the parent dir).
-    tests_manifest_before = _tests_manifest()
+    tests_manifest_before = _tests_manifest(cfg)
 
     with open(stream_out_path, "a", encoding="utf-8") as stream_f:
         async with ClaudeSDKClient(options=options) as client:
@@ -507,13 +540,13 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
                 t0 = time.time()
                 turn_task = asyncio.create_task(
-                    _execute_turn(client, current_prompt, turn, stream_f, job)
+                    _execute_turn(client, current_prompt, turn, stream_f, job, run_state)
                 )
 
                 try:
-                    result = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
+                    result = await asyncio.wait_for(asyncio.shield(turn_task), timeout=cfg.turn_timeout_s)
                 except asyncio.TimeoutError:
-                    log(f"TIMEOUT: turn {turn} exceeded {TURN_TIMEOUT_S:.0f}s (silent stall) -> interrupt")
+                    log(f"TIMEOUT: turn {turn} exceeded {cfg.turn_timeout_s:.0f}s (silent stall) -> interrupt")
                     try:
                         await client.interrupt()
                     except Exception as e:
@@ -527,7 +560,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                         turn_task.cancel()
                     await asyncio.gather(turn_task, return_exceptions=True)
 
-                    job["error"] = f"TURN-TIMEOUT ({TURN_TIMEOUT_S:.0f}s)"
+                    job["error"] = f"TURN-TIMEOUT ({cfg.turn_timeout_s:.0f}s)"
                     job["verifier"] = "FAIL"
                     job["turns"] = turn
                     return 1
@@ -605,7 +638,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 # fix prompt) is _post_turn_decision — see its docstring for
                 # the order contract.
                 rc, next_prompt = _post_turn_decision(
-                    job, turn, max_turns, plan, result, tests_manifest_before,
+                    cfg, job, turn, max_turns, plan, result, tests_manifest_before,
                     inp, live_context)
                 if rc is not None:
                     return rc
@@ -619,9 +652,9 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 # ==================================================================================
 # Processes, signals, and artifacts
 # ==================================================================================
-def _install_signal_handlers() -> None:
+def _install_signal_handlers(run_state) -> None:
     def handler(signum, _frame):
-        stanok._INTERRUPTED_RC = 128 + signum
+        run_state.interrupted_rc = 128 + signum
         log(f"\nSIGNAL {signum}: Run interrupted. Stopping child processes...")
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)

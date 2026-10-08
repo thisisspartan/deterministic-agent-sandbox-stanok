@@ -1,6 +1,6 @@
 """W4 — hidden_files_gate (hermetic).
 
-Pins the W4 hygiene gate in launcher/stanok.py: a launch is rejected (rc=26)
+Pins the W4 hygiene gate in launcher/gates.py: a launch is rejected (rc=26)
 when src/tests/docs/scripts holds, at any depth, a hidden file or directory
 (name starting with '.', except .gitkeep) or a file carrying a 'TEMP:' marker
 in its first 40 lines. Such leftovers from past runs leak into the machine's
@@ -33,7 +33,8 @@ LAUNCHER_DIR = REPO_ROOT / "launcher"
 
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
-import stanok  # noqa: E402
+import gates  # noqa: E402
+from config import Config  # noqa: E402
 
 
 # --- 1: hidden .x.js found ----------------------------------------------------
@@ -42,8 +43,7 @@ def test_hidden_dotfile_found(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "src" / ".x.js").write_text("// hidden leftover\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.hidden_files_gate() is True
+    assert gates.hidden_files_gate(Config(repo_root=str(repo))) is True
 
 
 # --- 2: only .gitkeep -> clean ------------------------------------------------
@@ -53,8 +53,7 @@ def test_only_gitkeep_clean(tmp_path, monkeypatch):
     for d in ("src", "tests", "docs", "scripts"):
         (repo / d).mkdir(parents=True)
         (repo / d / ".gitkeep").write_text("")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.hidden_files_gate() is False
+    assert gates.hidden_files_gate(Config(repo_root=str(repo))) is False
 
 
 # --- 3: TEMP: marker on first line --------------------------------------------
@@ -63,8 +62,7 @@ def test_temp_marker_first_line(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "scratch.js").write_text("TEMP: delete after use\nconsole.log(1)\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.hidden_files_gate() is True
+    assert gates.hidden_files_gate(Config(repo_root=str(repo))) is True
 
 
 # --- 5-7: CC-139, recursion ---------------------------------------------------
@@ -75,8 +73,7 @@ def test_nested_hidden_file_found(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / "src" / "pkg").mkdir(parents=True)
     (repo / "src" / "pkg" / ".secret").write_text("hidden nested leftover\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.hidden_files_gate() is True
+    assert gates.hidden_files_gate(Config(repo_root=str(repo))) is True
 
 
 def test_hidden_directory_found(tmp_path, monkeypatch):
@@ -85,16 +82,14 @@ def test_hidden_directory_found(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / "src" / ".cache").mkdir(parents=True)
     (repo / "src" / ".cache" / "notes.md").write_text("leaked note\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.hidden_files_gate() is True
+    assert gates.hidden_files_gate(Config(repo_root=str(repo))) is True
 
 
 def test_nested_temp_marker_found(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / "tests" / "deep").mkdir(parents=True)
     (repo / "tests" / "deep" / "scratch.py").write_text("TEMP: delete after use\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    assert stanok.hidden_files_gate() is True
+    assert gates.hidden_files_gate(Config(repo_root=str(repo))) is True
 
 
 # --- 4 + 8: full path rc=26 ----------------------------------------------------

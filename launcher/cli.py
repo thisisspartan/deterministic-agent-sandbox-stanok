@@ -2,6 +2,10 @@
 
 argparse, the gate sequence in main(), cmd_run/cmd_status/cmd_wait/cmd_stop,
 the sandbox supervision and the background self-spawn (--follow, CC-140).
+main() builds the Config ONCE (Config.from_env) and threads it explicitly;
+per-run mutable state is a RunState built from cfg.label_paths (C). `import
+stanok` stays only for the logging sink (stanok._stdout_log_f) and the child
+self-spawn path (stanok.__file__).
 """
 
 import argparse
@@ -17,7 +21,8 @@ import sys
 import time
 import sandbox
 import stanok
-from stanok import DEFAULT_RETRIES, ExitCode, SERVER_URL, SessionPlan, label_paths, log
+from stanok import ExitCode, SessionPlan, log
+from config import Config, RunState
 from gates import check_test_config, dirty_tree_gate, hidden_files_gate, preflight_server, root_refusal, sandbox_config_gate, validate_label
 from opik import _opik_trace_count
 from session import _install_signal_handlers, run_continuous_session
@@ -38,19 +43,22 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def cmd_run(args) -> int:
+def cmd_run(cfg, args) -> int:
     try:
         if os.getpgid(0) != os.getpid():
             os.setpgid(0, 0)
     except OSError:
         pass
 
-    stanok._evidence_dir, stanok._live_dir = label_paths(args.label)
-    os.makedirs(stanok._evidence_dir, exist_ok=True)
-    os.makedirs(stanok._live_dir, exist_ok=True)
+    evidence_dir, live_dir = cfg.label_paths(args.label)
+    os.makedirs(evidence_dir, exist_ok=True)
+    os.makedirs(live_dir, exist_ok=True)
 
-    stanok._stdout_log_f = open(os.path.join(stanok._evidence_dir, "launcher.stdout.log"), "a", encoding="utf-8")
-    stanok._marker_path = os.path.join(stanok._evidence_dir, ".running")
+    # The logging sink is a per-run handle (see the stanok module docstring):
+    # opened here, assigned to the module global, released at process exit.
+    stanok._stdout_log_f = open(os.path.join(evidence_dir, "launcher.stdout.log"), "a", encoding="utf-8")
+    run_state = RunState(evidence_dir=evidence_dir, live_dir=live_dir,
+                         marker_path=os.path.join(evidence_dir, ".running"))
 
     start_ts = int(time.time())
     recorded_pid = os.getpid()
@@ -59,22 +67,22 @@ def cmd_run(args) -> int:
     # launch_background) with ITS pid — inside the container os.getpid() is
     # not visible from the host. If the marker already exists, preserve its
     # start_ts/pid; only a fresh in-process run (no-sandbox) writes its own.
-    if os.path.exists(stanok._marker_path):
+    if os.path.exists(run_state.marker_path):
         try:
-            parts = open(stanok._marker_path, "r", encoding="utf-8").read().split()
+            parts = open(run_state.marker_path, "r", encoding="utf-8").read().split()
             if len(parts) >= 2:
                 start_ts = int(parts[0])
                 recorded_pid = int(parts[1])
         except (ValueError, OSError):
             pass
 
-    with open(stanok._marker_path, "w", encoding="utf-8") as f:
+    with open(run_state.marker_path, "w", encoding="utf-8") as f:
         f.write(f"{start_ts} {recorded_pid}\n")
 
-    _install_signal_handlers()
+    _install_signal_handlers(run_state)
 
     job = {"label": args.label, "ticket": args.ticket}
-    log(f"STANOK RUNNER | Repo: {stanok.REPO_ROOT} | Label: {args.label}")
+    log(f"STANOK RUNNER | Repo: {cfg.repo_root} | Label: {args.label}")
     if args.direct:
         log("--direct MODE: the ticket path is resolved relative to the repository")
 
@@ -87,19 +95,19 @@ def cmd_run(args) -> int:
     try:
         with open(args.ticket_path, encoding="utf-8") as f:
             ticket_prompt = f.read().strip()
-        declared_paths, edit_paths, reset_none = parse_ticket_header(ticket_prompt)
+        declared_paths, edit_paths, reset_none = parse_ticket_header(cfg, ticket_prompt)
         # CC-133: the create/edit split is derived from the filesystem, not
         # trusted from the header (ValueError -> rc=13 below).
-        assert_create_paths_are_new(declared_paths, edit_paths)
+        assert_create_paths_are_new(cfg, declared_paths, edit_paths)
         # CC-206: `edit:` on a protected file is an unsatisfiable contract
         # (CC-204-retry3) — refuse it here, before any workspace mutation.
-        assert_edit_paths_are_not_protected(edit_paths)
+        assert_edit_paths_are_not_protected(cfg, edit_paths)
     except (OSError, ValueError) as e:
         job["rc"] = int(ExitCode.TICKET)
         job["error"] = f"ticket parse error: {e}"
-        write_summary(job, int(time.time()) - start_ts)
-        if os.path.exists(stanok._marker_path):
-            try: os.remove(stanok._marker_path)
+        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+        if os.path.exists(run_state.marker_path):
+            try: os.remove(run_state.marker_path)
             except OSError: pass
         return int(ExitCode.TICKET)
 
@@ -108,9 +116,9 @@ def cmd_run(args) -> int:
         job["error"] = ("ticket declares no `impl:`/`test:`/`docs:`/`edit:` "
                         "line and no `reset: none` — the ticket-scoped invariant "
                         "cannot be enforced (fail-closed)")
-        write_summary(job, int(time.time()) - start_ts)
-        if os.path.exists(stanok._marker_path):
-            try: os.remove(stanok._marker_path)
+        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+        if os.path.exists(run_state.marker_path):
+            try: os.remove(run_state.marker_path)
             except OSError: pass
         return int(ExitCode.TICKET)
     if declared_paths:
@@ -124,29 +132,29 @@ def cmd_run(args) -> int:
         edit_paths=tuple(edit_paths),
     )
 
-    if not preflight_server():
+    if not preflight_server(cfg):
         job["rc"] = int(ExitCode.SERVER)
-        job["error"] = f"Server unavailable ({SERVER_URL})"
-        write_summary(job, int(time.time()) - start_ts)
-        if os.path.exists(stanok._marker_path):
-            try: os.remove(stanok._marker_path)
+        job["error"] = f"Server unavailable ({cfg.server_url})"
+        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+        if os.path.exists(run_state.marker_path):
+            try: os.remove(run_state.marker_path)
             except OSError: pass
         return int(ExitCode.SERVER)
 
-    if prepare_workspace(plan) != 0:
+    if prepare_workspace(cfg, run_state, plan) != 0:
         job["rc"] = int(ExitCode.WORKSPACE)
         job["error"] = "workspace prep error"
-        write_summary(job, int(time.time()) - start_ts)
-        if os.path.exists(stanok._marker_path):
-            try: os.remove(stanok._marker_path)
+        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+        if os.path.exists(run_state.marker_path):
+            try: os.remove(run_state.marker_path)
             except OSError: pass
         return int(ExitCode.WORKSPACE)
 
     rc = 1
     try:
-        rc = asyncio.run(run_continuous_session(job, ticket_prompt, args.local_retries, plan))
+        rc = asyncio.run(run_continuous_session(cfg, run_state, job, ticket_prompt, args.local_retries, plan))
     except KeyboardInterrupt:
-        rc = stanok._INTERRUPTED_RC or 130
+        rc = run_state.interrupted_rc or 130
     except Exception as e:
         log(f"FATAL EXCEPTION: {e}")
         job["error"] = str(e)
@@ -165,10 +173,10 @@ def cmd_run(args) -> int:
         else:
             job["opik_traces"] = opik_after
             log(f"OPIK: project trace count after run = {opik_after}")
-        write_summary(job, int(time.time()) - start_ts)
-        if os.path.exists(stanok._marker_path):
+        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+        if os.path.exists(run_state.marker_path):
             try:
-                os.remove(stanok._marker_path)
+                os.remove(run_state.marker_path)
             except OSError:
                 pass
 
@@ -179,14 +187,14 @@ def cmd_run(args) -> int:
 # ==================================================================================
 # Control utilities (status, stop)
 # ==================================================================================
-def _status_dict(label: str) -> dict:
+def _status_dict(cfg, label: str) -> dict:
     """The status JSON `status` prints — single source, also used by `wait`.
 
     Precedence: a live `.running` marker (running/dead) over a summary.json
     (done) over missing. `run_sandboxed` publishes the verdict BEFORE removing
     the marker, so the marker's disappearance implies a readable summary.
     """
-    evidence_dir, _ = label_paths(label)
+    evidence_dir, _ = cfg.label_paths(label)
     marker = os.path.join(evidence_dir, ".running")
     summary = os.path.join(evidence_dir, "summary.json")
 
@@ -219,8 +227,8 @@ def _status_dict(label: str) -> dict:
     return {"state": "missing"}
 
 
-def cmd_status(label: str) -> int:
-    print(json.dumps(_status_dict(label)))
+def cmd_status(cfg, label: str) -> int:
+    print(json.dumps(_status_dict(cfg, label)))
     return 0
 
 
@@ -228,7 +236,7 @@ WAIT_POLL_S = 5
 WAIT_TIMEOUT_S = 2700  # 45 min — the cap §3 of CLAUDE.supervisor.md names
 
 
-def cmd_wait(label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:
+def cmd_wait(cfg, label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:
     """Block until the run reaches a terminal state, print its final status.
 
     This is the ONE primitive behind `run --follow` and the standalone
@@ -246,7 +254,7 @@ def cmd_wait(label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:
     """
     deadline = time.monotonic() + timeout_s
     while True:
-        st = _status_dict(label)
+        st = _status_dict(cfg, label)
         if st.get("state") != "running":
             print(json.dumps(st))
             return 0
@@ -256,8 +264,8 @@ def cmd_wait(label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:
         time.sleep(WAIT_POLL_S)
 
 
-def cmd_stop(label: str) -> int:
-    evidence_dir, _ = label_paths(label)
+def cmd_stop(cfg, label: str) -> int:
+    evidence_dir, _ = cfg.label_paths(label)
     marker = os.path.join(evidence_dir, ".running")
     if not os.path.exists(marker):
         log(f"Run {label} is not started")
@@ -284,18 +292,18 @@ def cmd_stop(label: str) -> int:
 # ==================================================================================
 # Launch orchestration (R2: the former launch.sh + sandbox-run.sh, in Python)
 # ==================================================================================
-def _inner_run_argv(args) -> list:
+def _inner_run_argv(cfg, args) -> list:
     """The container-side / child-side `run` argv (single source)."""
     inner = ["run", args.ticket]
     if args.direct:
         inner.append("--direct")
-    if args.local_retries != DEFAULT_RETRIES:
+    if args.local_retries != cfg.default_retries:
         inner += ["--local-retries", str(args.local_retries)]
     inner += ["--", args.label, *args.extra]
     return inner
 
 
-def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
+def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
     """Host-side sync run: supervise the Docker container (replaces
     sandbox-run.sh). The marker carries THIS process's pid — cmd_stop's
     killpg lands here, and the try/finally stops the container and removes
@@ -305,10 +313,12 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
     from the same ticket text the container will parse); ro_paths are the
     protected files re-bound :ro over a carve-out dir (T4b/CC-136). The base
     repo mount is always :ro (CC-154)."""
-    evidence_dir, _ = label_paths(args.label)
+    evidence_dir, live_dir = cfg.label_paths(args.label)
     os.makedirs(evidence_dir, exist_ok=True)
 
-    marker = os.path.join(evidence_dir, ".running")
+    run_state = RunState(evidence_dir=evidence_dir, live_dir=live_dir,
+                         marker_path=os.path.join(evidence_dir, ".running"))
+    marker = run_state.marker_path
     with open(marker, "w", encoding="utf-8") as f:
         f.write(f"{int(time.time())} {os.getpid()}\n")
 
@@ -321,15 +331,15 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
     except OSError:
         pass
 
-    _install_signal_handlers()
-    image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
+    _install_signal_handlers(run_state)
+    image = cfg.docker_image
     # The container runs the IMAGE's system python (the SDK is baked in);
     # the host venv python is only for the host-side gates.
     # T4 (CC-135): the rw carve-outs come from the ticket's declared paths,
     # derived by main() with the same rule the container-side validation uses.
     name, argv = sandbox.sandbox_argv(
-        stanok.REPO_ROOT, stanok.LOG_DIR, image,
-        ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(args),
+        cfg.repo_root, cfg.log_dir, image,
+        ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(cfg, args),
         rw_paths=rw_paths, ro_paths=ro_paths)
     log(f"SANDBOX: docker container {name}")
     rc = 1  # bound before the try: a Popen failure must not NameError the finally
@@ -337,14 +347,14 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
         proc = subprocess.Popen(argv, start_new_session=True)
         rc = proc.wait()
     except KeyboardInterrupt:
-        rc = stanok._INTERRUPTED_RC or 130
+        rc = run_state.interrupted_rc or 130
     finally:
         sandbox.docker_stop(name)
         # CC-134: the container wrote the verdict into LOG_DIR (evidence/ is
         # read-only there); publish it to the host-owned evidence/<label> now
         # that the container is gone. BEFORE the marker removal, so the
         # supervisor never sees "not running" with the summary still missing.
-        _publish_evidence(args.label, rc)
+        _publish_evidence(cfg, args.label, rc)
         try:
             os.remove(marker)
         except OSError:
@@ -352,7 +362,7 @@ def run_sandboxed(args, rw_paths: tuple, ro_paths: tuple) -> int:
     return rc
 
 
-def launch_background(args) -> int:
+def launch_background(cfg, args) -> int:
     """Background run (replaces launch.sh's nohup branch): a detached
     self-spawn executes the sync path — the child writes the marker with its
     own pid and supervises the container (or runs in-process under
@@ -365,13 +375,13 @@ def launch_background(args) -> int:
     `--follow` (CC-140): after the marker is confirmed, block in `cmd_wait`
     until the run is terminal and print its final status — so ONE background
     Bash call carries both the launch and the verdict notification."""
-    log_path = os.path.join(stanok.LOG_DIR, f"{args.label}.launch.log")
-    evidence_dir, _ = label_paths(args.label)
+    log_path = os.path.join(cfg.log_dir, f"{args.label}.launch.log")
+    evidence_dir, _ = cfg.label_paths(args.label)
     marker = os.path.join(evidence_dir, ".running")
-    child_argv = [sys.executable, os.path.abspath(stanok.__file__)] + _inner_run_argv(args)
+    child_argv = [sys.executable, os.path.abspath(stanok.__file__)] + _inner_run_argv(cfg, args)
     with open(log_path, "a", encoding="utf-8") as lf:
         child = subprocess.Popen(child_argv, stdout=lf, stderr=subprocess.STDOUT,
-                                 start_new_session=True, cwd=stanok.REPO_ROOT)
+                                 start_new_session=True, cwd=cfg.repo_root)
     summary = os.path.join(evidence_dir, "summary.json")
     deadline = time.monotonic() + 60
     while not os.path.exists(marker):
@@ -384,7 +394,7 @@ def launch_background(args) -> int:
             if os.path.exists(summary):
                 log(f"Background child (PID {child.pid}) exited "
                     f"rc={child.returncode} with a summary (fast abort)")
-                return cmd_wait(args.label)
+                return cmd_wait(cfg, args.label)
             log(f"ERROR: background child (PID {child.pid}) exited "
                 f"rc={child.returncode} before writing the .running marker")
             return int(ExitCode.CHILD_DIED)
@@ -394,19 +404,19 @@ def launch_background(args) -> int:
             return int(ExitCode.CHILD_DIED)
         time.sleep(0.2)
     log(f"Machine launched in the background (PID {child.pid}). Log: {log_path}")
-    return cmd_wait(args.label)
+    return cmd_wait(cfg, args.label)
 
 
 # ==================================================================================
 # CLI entry point
 # ==================================================================================
-def _resolve_ticket(arg: str, direct: bool = False) -> str:
+def _resolve_ticket(cfg, arg: str, direct: bool = False) -> str:
     if direct:
-        candidates = [os.path.join(stanok.REPO_ROOT, arg), os.path.abspath(arg)]
+        candidates = [os.path.join(cfg.repo_root, arg), os.path.abspath(arg)]
     else:
         candidates = [
-            os.path.join(os.path.dirname(stanok.REPO_ROOT), arg),  # project root (highest priority)
-            os.path.join(stanok.REPO_ROOT, arg),                    # machine root
+            os.path.join(os.path.dirname(cfg.repo_root), arg),  # project root (highest priority)
+            os.path.join(cfg.repo_root, arg),                    # machine root
             os.path.abspath(arg)                             # as given
         ]
     for c in candidates:
@@ -417,6 +427,7 @@ def _resolve_ticket(arg: str, direct: bool = False) -> str:
 
 def main() -> int:
     root_refusal()
+    cfg = Config.from_env()
 
     p = argparse.ArgumentParser(prog="stanok", description="Stanok Runner")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -430,7 +441,7 @@ def main() -> int:
     r.add_argument("label")
     r.add_argument("extra", nargs="*", default=[])
     r.add_argument("--direct", action="store_true")
-    r.add_argument("--local-retries", type=int, default=DEFAULT_RETRIES)
+    r.add_argument("--local-retries", type=int, default=cfg.default_retries)
     # CC-140/BL-1: --follow is the SOLE background flag: a detached
     # self-spawn, then block in cmd_wait until the run is terminal and print
     # its final status — so ONE background Bash call carries both the launch
@@ -451,14 +462,14 @@ def main() -> int:
     args = p.parse_args()
 
     if args.cmd == "status":
-        return cmd_status(args.label)
+        return cmd_status(cfg, args.label)
     if args.cmd == "wait":
-        return cmd_wait(args.label, args.timeout)
+        return cmd_wait(cfg, args.label, args.timeout)
     if args.cmd == "stop":
-        return cmd_stop(args.label)
+        return cmd_stop(cfg, args.label)
 
     if args.cmd == "run":
-        evidence_dir, _ = label_paths(args.label)
+        evidence_dir, _ = cfg.label_paths(args.label)
         marker = os.path.join(evidence_dir, ".running")
 
         def abort(code: ExitCode, err_msg: str) -> int:
@@ -492,7 +503,7 @@ def main() -> int:
                     "error": err_msg,
                 }
                 with open(sum_path, "w", encoding="utf-8") as f:
-                    json.dump(build_summary(job, 0), f, ensure_ascii=False, indent=2)
+                    json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
             return int(code)
 
         if validate_label(args.label):
@@ -501,37 +512,37 @@ def main() -> int:
         # A stale summary.json from an earlier run of this label must not
         # survive: abort writes only when the file is absent, so the
         # supervisor could otherwise read a verdict from the previous run.
-        _rotate_stale_summary(args.label)
+        _rotate_stale_summary(cfg, args.label)
 
         # ROLE-LEAK (rc=24): a parent CLAUDE.md above the repo would be auto-loaded
         # into the machine session (cwd = REPO_ROOT) -> role leak. Fail-closed before
         # reset/lock/preflight, no side effects.
-        parent_claude = os.path.join(os.path.dirname(stanok.REPO_ROOT), "CLAUDE.md")
+        parent_claude = os.path.join(os.path.dirname(cfg.repo_root), "CLAUDE.md")
         if os.path.isfile(parent_claude):
             return abort(ExitCode.ROLE_LEAK, f"ERROR: ROLE-LEAK: parent CLAUDE.md above the repo: {parent_claude}")
 
-        args.ticket_path = _resolve_ticket(args.ticket, direct=args.direct)
+        args.ticket_path = _resolve_ticket(cfg, args.ticket, direct=args.direct)
         if not os.path.isfile(args.ticket_path):
             return abort(ExitCode.TICKET, f"ERROR: Ticket not found: {args.ticket_path}")
 
-        if dirty_tree_gate():
+        if dirty_tree_gate(cfg):
             return abort(ExitCode.DIRTY_TREE, "ERROR: the machine repo contains uncommitted changes (rc=22)")
 
         # W4 hygiene gate (rc=26): hidden/TEMP leftovers in src/tests/docs/scripts
         # leak into the machine's context and slip past dirty_tree_gate.
-        if hidden_files_gate():
+        if hidden_files_gate(cfg):
             return abort(ExitCode.HIDDEN_FILES, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
 
         # W6 verdict-subversion gate (rc=27): pytest config files under tests/
         # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
-        if check_test_config():
+        if check_test_config(cfg):
             return abort(ExitCode.TEST_CONFIG, "ERROR: pytest config files in tests/ (rc=27)")
 
         # W7 sandbox-config gate (rc=28): a sandbox.filesystem deny entry that
         # resolves (against the settings dir, per cli.js) to a non-existent
         # path makes bwrap EROFS-kill every Bash call in the session (CC-107).
         # The abort message carries the offending entries + fix (CC-157).
-        sandbox_problems = sandbox_config_gate()
+        sandbox_problems = sandbox_config_gate(cfg)
         if sandbox_problems:
             return abort(
                 ExitCode.SANDBOX_CONFIG, "ERROR: sandbox.filesystem deny entry invalid (rc=28): "
@@ -547,18 +558,18 @@ def main() -> int:
             # --follow is the sole background form: a detached launch that
             # blocks until terminal (a foreground follow would exceed the
             # Bash tool's 10-min cap on a 45-min run).
-            return launch_background(args)
+            return launch_background(cfg, args)
 
         if in_container or no_sandbox:
             # In-process session (container-side Runner, or host no-sandbox):
             # the lock serializes runs of this repo.
-            lock_path = os.path.join(stanok.LOG_DIR, f"stanok-{hashlib.md5(stanok.REPO_ROOT.encode()).hexdigest()[:12]}.lock")
+            lock_path = os.path.join(cfg.log_dir, f"stanok-{hashlib.md5(cfg.repo_root.encode()).hexdigest()[:12]}.lock")
             lf = open(lock_path, "w")
             try:
                 fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 return abort(ExitCode.LOCK, f"LOCK: the repo is already busy with another run ({lock_path})")
-            return cmd_run(args)
+            return cmd_run(cfg, args)
 
         # Host sync: supervise the Docker container (launcher/sandbox.py).
         # The container-side Runner re-runs the gates and takes the lock.
@@ -575,15 +586,15 @@ def main() -> int:
         # CC-133) is rc=13 here, before any container starts.
         try:
             with open(args.ticket_path, encoding="utf-8") as f:
-                declared, edit_paths, _ = parse_ticket_header(f.read())
-            assert_create_paths_are_new(declared, edit_paths)
+                declared, edit_paths, _ = parse_ticket_header(cfg, f.read())
+            assert_create_paths_are_new(cfg, declared, edit_paths)
             # CC-206: same gate as cmd_run — the host must not start a
             # container for a ticket that edits a protected file.
-            assert_edit_paths_are_not_protected(edit_paths)
+            assert_edit_paths_are_not_protected(cfg, edit_paths)
         except (OSError, ValueError) as e:
             return abort(ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
-        rw_paths = host_rw_paths(declared)
-        ro_paths = host_ro_paths(rw_paths)
-        return run_sandboxed(args, rw_paths, ro_paths)
+        rw_paths = host_rw_paths(cfg, declared)
+        ro_paths = host_ro_paths(cfg, rw_paths)
+        return run_sandboxed(cfg, args, rw_paths, ro_paths)
 
     return 0

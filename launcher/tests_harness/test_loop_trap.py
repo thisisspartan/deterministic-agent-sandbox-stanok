@@ -20,7 +20,7 @@ from pathlib import Path
 LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
-import stanok  # noqa: E402
+import session  # noqa: E402
 
 
 MARKER = {"tool": "Read", "hash": "a" * 64, "n": 5, "ts": "2026-10-07T12:00:00"}
@@ -29,32 +29,32 @@ MARKER = {"tool": "Read", "hash": "a" * 64, "n": 5, "ts": "2026-10-07T12:00:00"}
 # --- _read_loop_trap ---------------------------------------------------------------
 
 def test_read_loop_trap_missing(tmp_path):
-    assert stanok._read_loop_trap(tmp_path / "nope.json") is None
+    assert session._read_loop_trap(tmp_path / "nope.json") is None
 
 
 def test_read_loop_trap_unreadable(tmp_path):
     p = tmp_path / "loop-trap.json"
     p.write_text("not json", encoding="utf-8")
-    assert stanok._read_loop_trap(p) is None
+    assert session._read_loop_trap(p) is None
 
 
 def test_read_loop_trap_directory_is_none(tmp_path):
     p = tmp_path / "loop-trap.json"
     p.mkdir()
-    assert stanok._read_loop_trap(p) is None
+    assert session._read_loop_trap(p) is None
 
 
 def test_read_loop_trap_valid(tmp_path):
     p = tmp_path / "loop-trap.json"
     p.write_text(json.dumps(MARKER), encoding="utf-8")
-    assert stanok._read_loop_trap(p) == MARKER
+    assert session._read_loop_trap(p) == MARKER
 
 
 # --- _loop_trap_verdict ------------------------------------------------------------
 
 def test_loop_trap_verdict_sets_defect_fields():
     job: dict = {}
-    rc = stanok._loop_trap_verdict(job, MARKER)
+    rc = session._loop_trap_verdict(job, MARKER)
     assert rc == 1
     assert job["probe_result"] == "LOOP-TRAP"
     assert job["loop_trap"] == MARKER
