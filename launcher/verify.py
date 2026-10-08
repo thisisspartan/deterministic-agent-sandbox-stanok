@@ -1,21 +1,20 @@
 """verify — the external verifier: run.sh invocation, output tail, contract_lock.
 
 verify_gate / _run_suite / _tail_output (raw tail, CC-138), the protected-file
-manifest and the contract_lock second echelon (W2.5/P2). MAX_TEST_LINES/BYTES
-come from the hub.
+manifest and the contract_lock second echelon (W2.5/P2). The tail limits and
+repo root come from the passed-in Config (C).
 """
 
 import hashlib
 import os
 import subprocess
-import stanok
-from stanok import MAX_TEST_BYTES, MAX_TEST_LINES, log
+from stanok import log
 
 
 # ==================================================================================
 # Compression of verifier errors (_tail_output: raw last-N tail)
 # ==================================================================================
-def _tail_output(raw_text: str) -> str:
+def _tail_output(cfg, raw_text: str) -> str:
     """Compress verifier output for the fix prompt: keep the LAST lines (a test
     failure is reported at the tail).
 
@@ -27,18 +26,18 @@ def _tail_output(raw_text: str) -> str:
     """
     lines = raw_text.strip().splitlines()
 
-    if len(lines) > MAX_TEST_LINES:
-        start = len(lines) - MAX_TEST_LINES
+    if len(lines) > cfg.max_test_lines:
+        start = len(lines) - cfg.max_test_lines
         lines = [f"... [{start} lines skipped above] ..."] + lines[start:]
     res = "\n".join(lines)
 
     b_res = res.encode("utf-8")
-    if len(b_res) > MAX_TEST_BYTES:
-        res = b_res[:MAX_TEST_BYTES].decode("utf-8", errors="ignore") + "\n... [output truncated at the byte limit] ..."
+    if len(b_res) > cfg.max_test_bytes:
+        res = b_res[:cfg.max_test_bytes].decode("utf-8", errors="ignore") + "\n... [output truncated at the byte limit] ..."
     return res
 
 
-def _run_suite(failures: list[tuple[str, str]], tests: list[str]) -> None:
+def _run_suite(cfg, failures: list[tuple[str, str]], tests: list[str]) -> None:
     """D4 (CC-149): run the whole suite in ONE `test --all` call. The suite
     runs every list-discovered file sequentially with per-file timeouts and
     `=== <file> ===` headers; rc maps:
@@ -57,7 +56,7 @@ def _run_suite(failures: list[tuple[str, str]], tests: list[str]) -> None:
     """
     try:
         sp = subprocess.run(["bash", "scripts/run.sh", "test", "--all"],
-                            cwd=stanok.REPO_ROOT, capture_output=True, text=True,
+                            cwd=cfg.repo_root, capture_output=True, text=True,
                             timeout=len(tests) * 60 + 60)
     except subprocess.TimeoutExpired:
         failures.append(("(suite)",
@@ -71,20 +70,20 @@ def _run_suite(failures: list[tuple[str, str]], tests: list[str]) -> None:
     if rc == 0:
         return
     if rc == 6:
-        failures.append(("(suite)", "ENV-FAIL: " + _tail_output(raw)))
+        failures.append(("(suite)", "ENV-FAIL: " + _tail_output(cfg, raw)))
         return
     if rc == 124:
         failures.append(("(suite)",
                          "TIMEOUT: suite hit the per-file 60 s timeout "
-                         "(rc=124) — " + _tail_output(raw)))
+                         "(rc=124) — " + _tail_output(cfg, raw)))
         return
     # rc == 1 (a test failed / unclaimed file), rc == 2 (run.sh refused
     # `test --all` — strict contract) or any other non-zero rc:
     # surface the suite output so the fix prompt can localize the failure.
-    failures.append(("(suite)", _tail_output(raw)))
+    failures.append(("(suite)", _tail_output(cfg, raw)))
 
 
-def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]:
+def verify_gate(cfg, plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]:
     """Verdict = positive contract on the ticket's declared paths (W2.3)
     + every test the project's runner declares (D3).
 
@@ -102,12 +101,12 @@ def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]
     # Positive contract: every artifact the ticket declares must exist.
     # Closes the hole where a model that skipped docs/<m>.md still passed.
     for rel in plan.declared_paths:
-        if not os.path.exists(os.path.join(stanok.REPO_ROOT, rel)):
+        if not os.path.exists(os.path.join(cfg.repo_root, rel)):
             failures.append((rel, f"MISSING: declared by the ticket but not created: {rel}"))
 
     try:
         lp = subprocess.run(["bash", "scripts/run.sh", "list"],
-                            cwd=stanok.REPO_ROOT, capture_output=True, text=True, timeout=30)
+                            cwd=cfg.repo_root, capture_output=True, text=True, timeout=30)
     except Exception as e:
         return (False, [("(no tests)", f"run.sh list failed: {e}")], False)
     tests = [ln.strip() for ln in (lp.stdout or "").splitlines() if ln.strip()]
@@ -116,7 +115,7 @@ def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]
             # `list` failed and printed no tests (no tests/ dir, or only
             # unclaimed files): the reason is on stderr — surface it instead
             # of the generic "no tests" message.
-            failures.append(("(list)", _tail_output(lp.stderr)))
+            failures.append(("(list)", _tail_output(cfg, lp.stderr)))
             return (False, failures, False)
         if failures:
             return (False, failures, False)
@@ -126,9 +125,9 @@ def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]
         # still printing the claimed tests on stdout. The unrun test must not
         # pass the gate silently: record the listing failure, then still run
         # the claimed tests (their failures add signal to the fix prompt).
-        failures.append(("(list)", _tail_output(lp.stderr)))
+        failures.append(("(list)", _tail_output(cfg, lp.stderr)))
 
-    _run_suite(failures, tests)
+    _run_suite(cfg, failures, tests)
     failures.sort(key=lambda x: x[0])
     env_fail = any(msg.startswith("ENV-FAIL:") for _, msg in failures)
     return (len(failures) == 0, failures, env_fail)
@@ -169,7 +168,7 @@ def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
     )
 
 
-def _protected_files() -> list[str]:
+def _protected_files(cfg) -> list[str]:
     """The pre-existing contract files — the ONE source for "protected"
     (CC-136): tests/**, scripts/run.sh and scripts/stacks/*.toml. Both the
     contract_lock manifest and the host's :ro bind list (host_ro_paths) read
@@ -181,42 +180,42 @@ def _protected_files() -> list[str]:
     routine `rm -rf __pycache__` (or their regeneration) a false
     DELETED/MODIFIED violation (w12-verify)."""
     protected: list[str] = []
-    tests_dir = os.path.join(stanok.REPO_ROOT, "tests")
+    tests_dir = os.path.join(cfg.repo_root, "tests")
     if os.path.isdir(tests_dir):
         for root, dirs, files in os.walk(tests_dir):
             dirs[:] = [d for d in dirs if d != "__pycache__"]
             for name in files:
-                protected.append(os.path.relpath(os.path.join(root, name), stanok.REPO_ROOT))
-    if os.path.isfile(os.path.join(stanok.REPO_ROOT, "scripts", "run.sh")):
+                protected.append(os.path.relpath(os.path.join(root, name), cfg.repo_root))
+    if os.path.isfile(os.path.join(cfg.repo_root, "scripts", "run.sh")):
         protected.append("scripts/run.sh")
     # B1 (PLAN-AUDIT-2026-10-08): run.sh derives its STACKS registry
     # (test_runner, test_glob, verdict_config) from these manifests at every
     # invocation, and scripts/ is a machine RW zone whenever a ticket declares
     # a path under it. A manifest left writable lets the machine swap
     # test_runner for `true` and get a PASS with no test ever run.
-    stacks_dir = os.path.join(stanok.REPO_ROOT, "scripts", "stacks")
+    stacks_dir = os.path.join(cfg.repo_root, "scripts", "stacks")
     if os.path.isdir(stacks_dir):
         for name in sorted(os.listdir(stacks_dir)):
             if name.endswith(".toml"):
                 protected.append(os.path.relpath(
-                    os.path.join(stacks_dir, name), stanok.REPO_ROOT))
+                    os.path.join(stacks_dir, name), cfg.repo_root))
     return protected
 
 
-def _tests_manifest() -> dict[str, str]:
+def _tests_manifest(cfg) -> dict[str, str]:
     """Snapshot {rel_path: sha256} of the protected files (contract_lock,
     W2.5 + P2) — see _protected_files for which files and why."""
     manifest: dict[str, str] = {}
-    for rel in _protected_files():
+    for rel in _protected_files(cfg):
         try:
-            with open(os.path.join(stanok.REPO_ROOT, rel), "rb") as f:
+            with open(os.path.join(cfg.repo_root, rel), "rb") as f:
                 manifest[rel] = hashlib.sha256(f.read()).hexdigest()
         except OSError:
             manifest[rel] = "unreadable"
     return manifest
 
 
-def _check_contract_lock(before: dict[str, str], job: dict, turn: int,
+def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
                          plan: "SessionPlan") -> None:
     """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
     that was MODIFIED or DELETED is a contract_lock violation (replaces the
@@ -225,7 +224,7 @@ def _check_contract_lock(before: dict[str, str], job: dict, turn: int,
     behavior-identical to the old scripts/run.sh exemption, since the
     manifest is snapshotted AFTER quarantine and a declared path is
     therefore never in the manifest)."""
-    after = _tests_manifest()
+    after = _tests_manifest(cfg)
     violations = []
     for rel, digest in before.items():
         if rel in plan.declared_paths:

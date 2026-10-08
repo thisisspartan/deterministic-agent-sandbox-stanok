@@ -1,33 +1,64 @@
 """session — the continuous Claude session: turns, watchdog, verifier hook, loop-trap.
 
-build_agent_env, _execute_turn, _verifier_hook (R1), run_continuous_session,
-the CC-207 circuit breaker and the signal handlers. Mutable run state
-(_live_dir, _INTERRUPTED_RC) and the monkeypatched _HOOK_TEST_TIMEOUT_S are
-accessed via `stanok.`.
+build_agent_env, _execute_turn (returns TurnResult), _post_turn_decision (the
+post-turn verdict pipeline), _verifier_hook (R1), run_continuous_session,
+the CC-207 circuit breaker and the signal handlers. Static config arrives as
+the passed-in Config; per-run mutable state (live_dir, marker_path,
+interrupted_rc) as the passed-in RunState (C). _HOOK_TEST_TIMEOUT_S is a
+module global — tests_harness patches `session._HOOK_TEST_TIMEOUT_S`.
 """
 
 import asyncio
 import dataclasses
+import functools
 import json
 import os
 import signal
 import time
 import uuid
-import stanok
-from stanok import API_TIMEOUT_MS, CLAUDE_BIN, CURATED_TOOLS, ExitCode, LOCAL_MODEL, SERVER_URL, STANOK_MAX_AGENT_TURNS, TURN_TIMEOUT_S, _write_stream_msg, log
+from stanok import ExitCode, log
 from gates import context_rot_threshold
 from verify import _check_contract_lock, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
+
+
+def _safe_json_default(obj):
+    if dataclasses.is_dataclass(obj):
+        return {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)}
+    if hasattr(obj, "__dict__"):
+        return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+    return str(obj)
+
+
+def _write_stream_msg(file_obj, turn: int, msg) -> None:
+    try:
+        raw = json.dumps(
+            {"turn": turn, "type": type(msg).__name__, "data": msg},
+            default=_safe_json_default,
+            ensure_ascii=False
+        )
+        file_obj.write(raw + "\n")
+        file_obj.flush()
+    except Exception as e:
+        try:
+            file_obj.write(json.dumps({
+                "turn": turn,
+                "type": type(msg).__name__,
+                "serialization_error": str(e)
+            }) + "\n")
+            file_obj.flush()
+        except OSError:
+            pass
 
 
 # ==================================================================================
 # Loop-trap circuit breaker (CC-207)
 # ==================================================================================
-def _loop_trap_path() -> str:
+def _loop_trap_path(run_state) -> str:
     """CC-207: single source of the marker path. The hook writes it (via the
     STANOK_LOOP_TRAP_FILE env handed to the machine process), the launcher
-    reads it. _live_dir (LOG_DIR/<label>) is mounted rw in the container
+    reads it. live_dir (LOG_DIR/<label>) is mounted rw in the container
     (sandbox.py) — the channel needs no new mount."""
-    return os.path.join(stanok._live_dir, "loop-trap.json")
+    return os.path.join(run_state.live_dir, "loop-trap.json")
 
 
 def _read_loop_trap(marker_path: str) -> dict | None:
@@ -61,7 +92,7 @@ def _loop_trap_verdict(job: dict, loop_trap: dict) -> int:
 # ==================================================================================
 # Inference environment (Prefix Invariance)
 # ==================================================================================
-def build_agent_env() -> dict[str, str]:
+def build_agent_env(cfg, run_state) -> dict[str, str]:
     """Runtime-only env for the machine process.
 
     Static machine config lives in `.claude/settings.stanok.json` -> `env`, which
@@ -71,23 +102,23 @@ def build_agent_env() -> dict[str, str]:
     kill the runtime knob. Hence: only derive-from-runtime keys belong here
     (endpoint, model, timeout); everything static belongs in settings.
 
-    No proxy: the machine has no web tools (CURATED_TOOLS) and its only outbound
+    No proxy: the machine has no web tools (cfg.curated_tools) and its only outbound
     is the local API server, which is directly reachable. Native sandbox injects
     its own proxy env into Bash commands when network.allowedDomains is set.
     """
     agent_env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "ANTHROPIC_BASE_URL": SERVER_URL,
-        "ANTHROPIC_MODEL": LOCAL_MODEL,
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": LOCAL_MODEL,
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": LOCAL_MODEL,
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": LOCAL_MODEL,
-        "CLAUDE_CODE_SUBAGENT_MODEL": LOCAL_MODEL,
-        "API_TIMEOUT_MS": API_TIMEOUT_MS,
+        "ANTHROPIC_BASE_URL": cfg.server_url,
+        "ANTHROPIC_MODEL": cfg.model,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": cfg.model,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": cfg.model,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": cfg.model,
+        "CLAUDE_CODE_SUBAGENT_MODEL": cfg.model,
+        "API_TIMEOUT_MS": cfg.api_timeout_ms,
         # CC-207: the loop-guard termination-marker channel. The hook writes
         # it at the 5th consecutive identical call; _execute_turn reads it
         # mid-turn. Derived-from-runtime (per-run dir) -> belongs here.
-        "STANOK_LOOP_TRAP_FILE": _loop_trap_path(),
+        "STANOK_LOOP_TRAP_FILE": _loop_trap_path(run_state),
     }
     # PLAN-HYGIENE 2026-10-08: no hardcoded AUTO_COMPACT default (the old
     # "128000" silently overrode the settings window when the env was unset).
@@ -117,21 +148,33 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> tuple[dict, dict, int, str, dict | None]:
-    """Returns (turn_total, live_window, writes, turn_error, loop_trap).
+@dataclasses.dataclass
+class TurnResult:
+    """The typed outcome of one agent turn (what _execute_turn returns).
 
-    turn_total  — ResultMessage.usage: cumulative across the turn's API calls
+    usage       — ResultMessage.usage: cumulative across the turn's API calls
                   (for session totals).
     live_window — the last AssistantMessage.usage: the prompt size actually sent
                   on the final API call (the true context window, for CONTEXT-ROT).
     writes      — count of Write/Edit tool_use blocks in the turn (NO-OP assert,
                   W2.4; immune to test side effects, unlike a file manifest).
-    turn_error  — "" on a clean turn; otherwise the API/max-turns error string
+    error       — "" on a clean turn; otherwise the API/max-turns error string
                   (CLI_MAX_TURNS_EXCEEDED or the ResultMessage error detail).
     loop_trap   — CC-207: the loop-guard termination marker read mid-turn
                   (the hook denied the 5th consecutive identical call), or
                   None if the breaker did not trip.
     """
+
+    usage: dict
+    live_window: dict
+    writes: int
+    error: str
+    loop_trap: dict | None
+
+
+async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
+                       run_state) -> TurnResult:
+    """Run one turn on the live client; return its TurnResult."""
     from claude_agent_sdk import ResultMessage
 
     await client.query(prompt)
@@ -140,7 +183,7 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
     writes = 0
     turn_error = ""
     loop_trap = None
-    marker_path = _loop_trap_path()
+    marker_path = _loop_trap_path(run_state)
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
         if not sid and hasattr(msg, "data") and isinstance(msg.data, dict):
@@ -191,7 +234,13 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
             loop_trap = _read_loop_trap(marker_path)
             if loop_trap is not None:
                 break
-    return (turn_total or live_window), live_window, writes, turn_error, loop_trap
+    return TurnResult(
+        usage=turn_total or live_window,
+        live_window=live_window,
+        writes=writes,
+        error=turn_error,
+        loop_trap=loop_trap,
+    )
 
 
 # contract_lock (T5, CC-137): the PreToolUse deny hook is GONE. Its job — a
@@ -222,7 +271,7 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict) -> 
 _HOOK_TEST_TIMEOUT_S = 75  # mirrors the old `timeout 75` in verifier.sh
 
 
-async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -> dict:
+async def _verifier_hook(cfg, hook_input: dict, tool_use_id: "str | None", context) -> dict:
     # W8 double-hook diagnosis: log EVERY invocation with its tool_use_id.
     # After a run: grep 'HOOK-CALL' <launcher log> | awk id | sort | uniq -d —
     # duplicate ids = double registration/call; unique ids = the second
@@ -235,20 +284,20 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
         if not fp:
             return {}
         if not fp.startswith("/"):
-            fp = os.path.join(stanok.REPO_ROOT, fp)
+            fp = os.path.join(cfg.repo_root, fp)
         abs_path = os.path.realpath(fp)
-        tests_dir = os.path.join(stanok.REPO_ROOT, "tests")
+        tests_dir = os.path.join(cfg.repo_root, "tests")
         if not abs_path.startswith(tests_dir + os.sep):
             return {}
         if not os.path.isfile(abs_path):
             return {}
-        run_sh = os.path.join(stanok.REPO_ROOT, "scripts", "run.sh")
+        run_sh = os.path.join(cfg.repo_root, "scripts", "run.sh")
         if not os.path.isfile(run_sh):
             return {}
-        rel = os.path.relpath(abs_path, stanok.REPO_ROOT)
+        rel = os.path.relpath(abs_path, cfg.repo_root)
         proc = await asyncio.create_subprocess_exec(
             "bash", run_sh, "test", rel,
-            cwd=stanok.REPO_ROOT,
+            cwd=cfg.repo_root,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -267,7 +316,7 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
                 chunks.append(c)
 
         try:
-            await asyncio.wait_for(_drain(), timeout=stanok._HOOK_TEST_TIMEOUT_S)
+            await asyncio.wait_for(_drain(), timeout=_HOOK_TEST_TIMEOUT_S)
             await proc.wait()  # pipe EOF can arrive before the exit status
             rc = proc.returncode
         except asyncio.TimeoutError:
@@ -320,39 +369,154 @@ async def _verifier_hook(hook_input: dict, tool_use_id: "str | None", context) -
         return {}
 
 
-async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int, plan: "SessionPlan") -> int:
+def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "SessionPlan",
+                       result: TurnResult, tests_manifest_before: dict,
+                       inp: int, live_context: int) -> tuple[int | None, str]:
+    """Decide what happens after a completed turn (the verdict pipeline).
+
+    Returns (rc, next_prompt): rc is not None -> the run ends with that exit
+    code; rc is None -> continue the loop with next_prompt ("" on retry
+    exhaustion). The order below is the verdict contract (do not reorder):
+    dead-session stop -> contract_lock diff -> observability warnings ->
+    verify_gate -> ENV-FAIL stop -> contract_lock forced FAIL ->
+    NO-OP/PASS verdict -> FAIL fix prompt.
+    """
+    # A turn that ended with an SDK API error (e.g. "API Error: terminated" —
+    # the model server dropped the connection) leaves the session dead:
+    # subsequent fix prompts return a stale 0-token result instantly and waste
+    # the remaining turns. Stop the run now with a clear error; the supervisor
+    # relaunches.
+    if result.error:
+        log(f"TURN {turn} ended with API error: {result.error!r} — "
+            f"session dead, stopping (no fix prompt)")
+        job["error"] = f"TURN-{turn} API ERROR: {result.error}"
+        job["verifier"] = "FAIL"
+        job["turns"] = turn
+        return 1, ""
+
+    # contract_lock (W2.5 + P2): did the turn touch pre-existing
+    # tests/ or scripts/run.sh?
+    _check_contract_lock(cfg, tests_manifest_before, job, turn, plan)
+
+    # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
+    # spike in the turn's input_tokens (uncached re-send). Only
+    # meaningful from turn 2: on turn 1 there is no previous turn to
+    # break the prefix from, so comparing the first prompt against a
+    # constant baseline fired a false WARN on every run (CC-126).
+    prev_inputs = [t["input_tokens"] for t in job["turn_telemetry"][:-1]]
+    if prev_inputs:
+        median_prev = sorted(prev_inputs)[len(prev_inputs) // 2]
+        if inp > 2 * median_prev:
+            job["turn_telemetry"][-1]["prefix_break"] = True
+            log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} "
+                f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
+
+    rot_threshold = context_rot_threshold()
+    if rot_threshold is not None and live_context > rot_threshold:
+        log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
+            f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
+
+    verify_ok, failures, env_fail = verify_gate(cfg, plan)
+
+    if env_fail:
+        # ENV-FAIL (run.sh rc=6): the test runner is unavailable
+        # in the image — an environment defect, not a code
+        # defect. The model cannot fix the image from src/; a
+        # fix prompt here is what burned turn 2 on CC-081. Stop
+        # fail-closed before the next turn (run-level rc=16).
+        log("ENV-FAIL: test runner unavailable (run.sh rc=6) — "
+            "no fix prompt, stopping (fail-closed)")
+        job["verifier"] = "FAIL"
+        job["error"] = "ENV-FAIL: test runner unavailable (run.sh rc=6)"
+        job["failures"] = failures
+        job["turns"] = turn
+        return int(ExitCode.ENV_FAIL), ""
+
+    # Fail-closed on contract_lock (W2.5 + P2): a PASS computed
+    # against tampered tests is not a PASS. Checked after env_fail
+    # (an unavailable runner is an infrastructure defect, rc=16,
+    # and takes precedence over a ticket defect).
+    forced = _contract_lock_forced_fail(job, turn)
+    if forced is not None:
+        return forced, ""
+
+    if verify_ok:
+        # NO-OP assert (W2.4): a turn-1 pass with zero Write/Edit
+        # tool_use means the machine did no work — the artifacts
+        # pre-existed. rc=1 (defect); no new rc code is introduced.
+        if turn == 1 and result.writes == 0:
+            log("NO-OP-PASS: verifier passed on turn 1 with zero "
+                "Write/Edit calls — the machine did no work")
+            job["verifier"] = "PASS"
+            job["probe_result"] = "NO-OP-PASS"
+            job["turns"] = turn
+            return 1, ""
+        log("VERIFIER: PASS — All tests passed successfully!")
+        job["verifier"] = "PASS"
+        job["turns"] = turn
+        return 0, ""
+
+    log(f"VERIFIER: FAIL — Failed tests: {len(failures)}")
+    job["failures"] = failures
+
+    if turn < max_turns:
+        rules = _fix_prompt_rules(failures)
+
+        fail_xml_blocks = "\n".join([
+            f'  <failure test="{name}">\n{diff}\n  </failure>'
+            for name, diff in failures
+        ])
+        next_prompt = (
+            f"<verification_result status=\"FAIL\" turn=\"{turn}\">\n"
+            f"<test_errors count=\"{len(failures)}\">\n"
+            f"{fail_xml_blocks}\n"
+            f"</test_errors>\n"
+            f"<contract_lock>\n"
+            f"{rules}\n"
+            f"</contract_lock>\n"
+            f"</verification_result>"
+        )
+        return None, next_prompt
+
+    log("Retry limit exhausted (Context Inertia Guard). Finishing.")
+    return None, ""
+
+
+async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
+                                max_retries: int, plan: "SessionPlan") -> int:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 
     local_run_id = str(uuid.uuid4())[:8]
-    stream_out_path = os.path.join(stanok._live_dir, f"session-{local_run_id}.jsonl")
+    stream_out_path = os.path.join(run_state.live_dir, f"session-{local_run_id}.jsonl")
 
     options = ClaudeAgentOptions(
-        cli_path=CLAUDE_BIN,
-        cwd=stanok.REPO_ROOT,
+        cli_path=cfg.claude_bin,
+        cwd=cfg.repo_root,
         setting_sources=["project"],
-        settings=f"{stanok.REPO_ROOT}/.claude/settings.stanok.json",
+        settings=f"{cfg.repo_root}/.claude/settings.stanok.json",
         permission_mode="dontAsk",
         # R3: `tools` -> `--tools` restricts the session's tool surface to
-        # exactly CURATED_TOOLS (the CLI's default set is NOT added on top);
+        # exactly cfg.curated_tools (the CLI's default set is NOT added on top);
         # allowed_tools is kept as the permission-allow side of the same set.
-        tools=CURATED_TOOLS,
-        allowed_tools=CURATED_TOOLS,
+        tools=cfg.curated_tools,
+        allowed_tools=cfg.curated_tools,
         hooks={
             # R1: in-process PostToolUse verifier (replaces hooks/verifier.sh).
             # timeout > _HOOK_TEST_TIMEOUT_S so the hook's own 75 s test timeout
             # is the deterministic verdict, not the SDK's hook timeout.
             "PostToolUse": [
-                HookMatcher(matcher="Write|Edit", hooks=[_verifier_hook], timeout=90)
+                HookMatcher(matcher="Write|Edit",
+                            hooks=[functools.partial(_verifier_hook, cfg)], timeout=90)
             ]
         },
-        max_turns=STANOK_MAX_AGENT_TURNS,
-        model=LOCAL_MODEL,
-        env=build_agent_env(),
+        max_turns=cfg.max_agent_turns,
+        model=cfg.model,
+        env=build_agent_env(cfg, run_state),
     )
 
     max_turns = 1 + max_retries
     current_prompt = ticket_prompt
-    log(f"SESSION START (run_id: {local_run_id}) | Turn limit: {max_turns} | model={LOCAL_MODEL}")
+    log(f"SESSION START (run_id: {local_run_id}) | Turn limit: {max_turns} | model={cfg.model}")
 
     total_tokens = {
         "input_tokens": 0,
@@ -367,7 +531,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
     # pre-existing test file modified/deleted during the run is a violation in
     # summary.json (the :ro bind makes the modification impossible; the diff
     # still catches a deletion, i.e. a write to the parent dir).
-    tests_manifest_before = _tests_manifest()
+    tests_manifest_before = _tests_manifest(cfg)
 
     with open(stream_out_path, "a", encoding="utf-8") as stream_f:
         async with ClaudeSDKClient(options=options) as client:
@@ -376,13 +540,13 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 
                 t0 = time.time()
                 turn_task = asyncio.create_task(
-                    _execute_turn(client, current_prompt, turn, stream_f, job)
+                    _execute_turn(client, current_prompt, turn, stream_f, job, run_state)
                 )
 
                 try:
-                    turn_usage, live_window, turn_writes, turn_error, loop_trap = await asyncio.wait_for(asyncio.shield(turn_task), timeout=TURN_TIMEOUT_S)
+                    result = await asyncio.wait_for(asyncio.shield(turn_task), timeout=cfg.turn_timeout_s)
                 except asyncio.TimeoutError:
-                    log(f"TIMEOUT: turn {turn} exceeded {TURN_TIMEOUT_S:.0f}s (silent stall) -> interrupt")
+                    log(f"TIMEOUT: turn {turn} exceeded {cfg.turn_timeout_s:.0f}s (silent stall) -> interrupt")
                     try:
                         await client.interrupt()
                     except Exception as e:
@@ -396,7 +560,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                         turn_task.cancel()
                     await asyncio.gather(turn_task, return_exceptions=True)
 
-                    job["error"] = f"TURN-TIMEOUT ({TURN_TIMEOUT_S:.0f}s)"
+                    job["error"] = f"TURN-TIMEOUT ({cfg.turn_timeout_s:.0f}s)"
                     job["verifier"] = "FAIL"
                     job["turns"] = turn
                     return 1
@@ -407,23 +571,23 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 # a retry re-enters the same loop (the marker is cumulative
                 # for the session). Interrupt the session best-effort, then
                 # fail closed with probe_result "LOOP-TRAP".
-                if loop_trap:
-                    log(f"LOOP-TRAP (turn {turn}): {loop_trap.get('tool')!r} "
-                        f"repeated {loop_trap.get('n')}x consecutively — "
+                if result.loop_trap:
+                    log(f"LOOP-TRAP (turn {turn}): {result.loop_trap.get('tool')!r} "
+                        f"repeated {result.loop_trap.get('n')}x consecutively — "
                         "circuit breaker tripped, interrupting the session")
                     try:
                         await client.interrupt()
                     except Exception as e:
                         log(f"WARN: client.interrupt() finished with an error: {e}")
                     job["turns"] = turn
-                    return _loop_trap_verdict(job, loop_trap)
+                    return _loop_trap_verdict(job, result.loop_trap)
 
                 elapsed_turn = time.time() - t0
 
-                inp = turn_usage.get("input_tokens", 0)
-                out = turn_usage.get("output_tokens", 0)
-                c_read = turn_usage.get("cache_read_input_tokens", 0)
-                c_create = turn_usage.get("cache_creation_input_tokens", 0)
+                inp = result.usage.get("input_tokens", 0)
+                out = result.usage.get("output_tokens", 0)
+                c_read = result.usage.get("cache_read_input_tokens", 0)
+                c_create = result.usage.get("cache_creation_input_tokens", 0)
 
                 total_tokens["input_tokens"] += inp
                 total_tokens["output_tokens"] += out
@@ -447,9 +611,9 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                 # Live window = prompt size on the LAST API call (not the turn's
                 # cumulative usage) — the real context the model had to attend to.
                 live_context = (
-                    live_window.get("input_tokens", 0)
-                    + live_window.get("cache_read_input_tokens", 0)
-                    + live_window.get("cache_creation_input_tokens", 0)
+                    result.live_window.get("input_tokens", 0)
+                    + result.live_window.get("cache_read_input_tokens", 0)
+                    + result.live_window.get("cache_creation_input_tokens", 0)
                 ) or turn_input_context
 
                 log(f"Turn {turn} finished in {elapsed_turn:.1f}s | "
@@ -466,106 +630,19 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                     "cache_creation_input_tokens": c_create,
                     "live_context_tokens": live_context,
                     "turn_hit_rate": round(turn_hit_rate, 1),
-                    "writes": turn_writes,
+                    "writes": result.writes,
                 })
 
-                # A turn that ended with an SDK API error (e.g. "API Error:
-                # terminated" — the model server dropped the connection) leaves
-                # the session dead: subsequent fix prompts return a stale
-                # 0-token result instantly and waste the remaining turns. Stop
-                # the run now with a clear error; the supervisor relaunches.
-                if turn_error:
-                    log(f"TURN {turn} ended with API error: {turn_error!r} — "
-                        f"session dead, stopping (no fix prompt)")
-                    job["error"] = f"TURN-{turn} API ERROR: {turn_error}"
-                    job["verifier"] = "FAIL"
-                    job["turns"] = turn
-                    return 1
-
-                # contract_lock (W2.5 + P2): did the turn touch pre-existing
-                # tests/ or scripts/run.sh?
-                _check_contract_lock(tests_manifest_before, job, turn, plan)
-
-                # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
-                # spike in the turn's input_tokens (uncached re-send). Only
-                # meaningful from turn 2: on turn 1 there is no previous turn to
-                # break the prefix from, so comparing the first prompt against a
-                # constant baseline fired a false WARN on every run (CC-126).
-                prev_inputs = [t["input_tokens"] for t in job["turn_telemetry"][:-1]]
-                if prev_inputs:
-                    median_prev = sorted(prev_inputs)[len(prev_inputs) // 2]
-                    if inp > 2 * median_prev:
-                        job["turn_telemetry"][-1]["prefix_break"] = True
-                        log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} "
-                            f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
-
-                rot_threshold = context_rot_threshold()
-                if rot_threshold is not None and live_context > rot_threshold:
-                    log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
-                        f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
-
-                verify_ok, failures, env_fail = verify_gate(plan)
-
-                if env_fail:
-                    # ENV-FAIL (run.sh rc=6): the test runner is unavailable
-                    # in the image — an environment defect, not a code
-                    # defect. The model cannot fix the image from src/; a
-                    # fix prompt here is what burned turn 2 on CC-081. Stop
-                    # fail-closed before the next turn (run-level rc=16).
-                    log("ENV-FAIL: test runner unavailable (run.sh rc=6) — "
-                        "no fix prompt, stopping (fail-closed)")
-                    job["verifier"] = "FAIL"
-                    job["error"] = "ENV-FAIL: test runner unavailable (run.sh rc=6)"
-                    job["failures"] = failures
-                    job["turns"] = turn
-                    return int(ExitCode.ENV_FAIL)
-
-                # Fail-closed on contract_lock (W2.5 + P2): a PASS computed
-                # against tampered tests is not a PASS. Checked after env_fail
-                # (an unavailable runner is an infrastructure defect, rc=16,
-                # and takes precedence over a ticket defect).
-                forced = _contract_lock_forced_fail(job, turn)
-                if forced is not None:
-                    return forced
-
-                if verify_ok:
-                    # NO-OP assert (W2.4): a turn-1 pass with zero Write/Edit
-                    # tool_use means the machine did no work — the artifacts
-                    # pre-existed. rc=1 (defect); no new rc code is introduced.
-                    if turn == 1 and turn_writes == 0:
-                        log("NO-OP-PASS: verifier passed on turn 1 with zero "
-                            "Write/Edit calls — the machine did no work")
-                        job["verifier"] = "PASS"
-                        job["probe_result"] = "NO-OP-PASS"
-                        job["turns"] = turn
-                        return 1
-                    log("VERIFIER: PASS — All tests passed successfully!")
-                    job["verifier"] = "PASS"
-                    job["turns"] = turn
-                    return 0
-
-                log(f"VERIFIER: FAIL — Failed tests: {len(failures)}")
-                job["failures"] = failures
-
-                if turn < max_turns:
-                    rules = _fix_prompt_rules(failures)
-
-                    fail_xml_blocks = "\n".join([
-                        f'  <failure test="{name}">\n{diff}\n  </failure>'
-                        for name, diff in failures
-                    ])
-                    current_prompt = (
-                        f"<verification_result status=\"FAIL\" turn=\"{turn}\">\n"
-                        f"<test_errors count=\"{len(failures)}\">\n"
-                        f"{fail_xml_blocks}\n"
-                        f"</test_errors>\n"
-                        f"<contract_lock>\n"
-                        f"{rules}\n"
-                        f"</contract_lock>\n"
-                        f"</verification_result>"
-                    )
-                else:
-                    log("Retry limit exhausted (Context Inertia Guard). Finishing.")
+                # The verdict pipeline (dead-session stop, contract_lock,
+                # observability warnings, verify_gate, NO-OP/PASS/FAIL verdict,
+                # fix prompt) is _post_turn_decision — see its docstring for
+                # the order contract.
+                rc, next_prompt = _post_turn_decision(
+                    cfg, job, turn, max_turns, plan, result, tests_manifest_before,
+                    inp, live_context)
+                if rc is not None:
+                    return rc
+                current_prompt = next_prompt
 
     job["verifier"] = "FAIL"
     job["turns"] = max_turns
@@ -575,9 +652,9 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
 # ==================================================================================
 # Processes, signals, and artifacts
 # ==================================================================================
-def _install_signal_handlers() -> None:
+def _install_signal_handlers(run_state) -> None:
     def handler(signum, _frame):
-        stanok._INTERRUPTED_RC = 128 + signum
+        run_state.interrupted_rc = 128 + signum
         log(f"\nSIGNAL {signum}: Run interrupted. Stopping child processes...")
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)

@@ -6,7 +6,6 @@ One best-effort HTTP sample after the verdict; never polled during a run.
 import json
 import os
 import urllib
-import stanok
 
 
 

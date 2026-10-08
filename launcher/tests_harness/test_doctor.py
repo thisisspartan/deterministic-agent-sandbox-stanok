@@ -109,9 +109,10 @@ def test_docker_image_digest_matches():
     # (former blocking rc=25) to doctor. Import and call the SAME
     # preflight_image the launcher uses — no second shell implementation.
     sys.path.insert(0, str(REPO_ROOT / "launcher"))
-    import stanok
+    import gates
+    from config import Config
     image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
-    assert stanok.preflight_image(image), \
+    assert gates.preflight_image(Config(), image), \
         "image preflight failed: digest mismatch or runner unavailable"
 
 
@@ -121,23 +122,26 @@ def test_contract_lock_runsh():
     # Unit-level: snapshot the manifest, modify run.sh, expect a violation;
     # with declared_paths=("scripts/run.sh",) — no violation.
     sys.path.insert(0, str(REPO_ROOT / "launcher"))
-    import stanok
+    import verify
+    from config import Config
+    from stanok import SessionPlan
+    cfg = Config()
     runsh = REPO_ROOT / "scripts" / "run.sh"
     assert runsh.is_file()
     orig = runsh.read_text(encoding="utf-8")
-    before = stanok._tests_manifest()
+    before = verify._tests_manifest(cfg)
     assert "scripts/run.sh" in before
     try:
         runsh.write_text(orig + "# contract-lock probe\n", encoding="utf-8")
         job = {}
-        plan = stanok.SessionPlan(declared_paths=())
-        stanok._check_contract_lock(before, job, 1, plan)
+        plan = SessionPlan(declared_paths=())
+        verify._check_contract_lock(cfg, before, job, 1, plan)
         assert any("scripts/run.sh" in v
                    for v in job.get("contract_lock_violations", [])), \
             f"undeclared run.sh modification not flagged: {job}"
         job2 = {}
-        plan2 = stanok.SessionPlan(declared_paths=("scripts/run.sh",))
-        stanok._check_contract_lock(before, job2, 1, plan2)
+        plan2 = SessionPlan(declared_paths=("scripts/run.sh",))
+        verify._check_contract_lock(cfg, before, job2, 1, plan2)
         assert not job2.get("contract_lock_violations"), \
             f"declared run.sh modification wrongly flagged: {job2}"
     finally:
@@ -148,13 +152,14 @@ def test_manifest_skips_pycache():
     # w12-verify: .pyc cache artifacts must not enter the contract_lock
     # manifest — a routine `rm -rf __pycache__` is not a DELETED violation.
     sys.path.insert(0, str(REPO_ROOT / "launcher"))
-    import stanok
+    import verify
+    from config import Config
     pycache = REPO_ROOT / "tests" / "__pycache__"
     pycache.mkdir(exist_ok=True)
     probe = pycache / "probe_test.cpython-311.pyc"
     probe.write_bytes(b"probe")
     try:
-        manifest = stanok._tests_manifest()
+        manifest = verify._tests_manifest(Config())
         assert not any("__pycache__" in k for k in manifest), \
             f"__pycache__ leaked into the manifest: " \
             f"{sorted(k for k in manifest if '__pycache__' in k)}"

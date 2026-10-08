@@ -1,6 +1,7 @@
 """W2 — launcher preflight safety net (hermetic, fake `docker` on PATH).
 
-Pins the launch mechanisms in launcher/stanok.py:
+Pins the launch mechanisms in launcher/gates.py, launcher/verify.py,
+launcher/session.py, launcher/summary.py:
   1  preflight_image: digest mismatch (inspect -> deadbeef) -> False, log "digest mismatch"
   2  preflight_image: image not found (inspect rc!=0) -> False
   3  preflight_image: digest OK but runner probe fails (run rc=1) -> False, log probe name
@@ -38,10 +39,15 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER_DIR = REPO_ROOT / "launcher"
 
-# Import the launcher module (pure stdlib + sandbox; the SDK is imported lazily).
+# Import the launcher modules (pure stdlib + sandbox; the SDK is imported lazily).
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
-import stanok  # noqa: E402
+import gates  # noqa: E402
+import session  # noqa: E402
+import summary  # noqa: E402
+import verify  # noqa: E402
+from config import Config, RunState  # noqa: E402
+from stanok import SessionPlan  # noqa: E402
 
 
 def _make_fake_docker(base: Path) -> Path:
@@ -78,43 +84,44 @@ def fake_docker(tmp_path, monkeypatch):
 # --- 1-4: preflight_image ------------------------------------------------------
 
 def test_preflight_digest_mismatch(fake_docker, monkeypatch, capsys):
-    monkeypatch.setattr(stanok, "_image_digest", lambda: "wantdigest")
-    monkeypatch.setattr(stanok, "_stack_preflights", lambda: [])
+    monkeypatch.setattr(gates, "_image_digest", lambda cfg: "wantdigest")
+    monkeypatch.setattr(gates, "_stack_preflights", lambda cfg: [])
     monkeypatch.setenv("FAKE_DOCKER_INSPECT_OUT", "deadbeef")
     monkeypatch.setenv("FAKE_DOCKER_INSPECT_RC", "0")
-    assert stanok.preflight_image("stanok-machine:latest") is False
+    assert gates.preflight_image(Config(), "stanok-machine:latest") is False
     assert "digest mismatch" in capsys.readouterr().out
 
 
 def test_preflight_image_not_found(fake_docker, monkeypatch, capsys):
-    monkeypatch.setattr(stanok, "_image_digest", lambda: "wantdigest")
-    monkeypatch.setattr(stanok, "_stack_preflights", lambda: [])
+    monkeypatch.setattr(gates, "_image_digest", lambda cfg: "wantdigest")
+    monkeypatch.setattr(gates, "_stack_preflights", lambda cfg: [])
     monkeypatch.setenv("FAKE_DOCKER_INSPECT_RC", "1")
     monkeypatch.delenv("FAKE_DOCKER_INSPECT_OUT", raising=False)
-    assert stanok.preflight_image("stanok-machine:latest") is False
+    assert gates.preflight_image(Config(), "stanok-machine:latest") is False
     assert "not found" in capsys.readouterr().out
 
 
 def test_preflight_runner_probe_fails(fake_docker, monkeypatch, capsys):
     probe = "uv run --no-project pytest --version"
-    monkeypatch.setattr(stanok, "_image_digest", lambda: "wantdigest")
-    monkeypatch.setattr(stanok, "_stack_preflights", lambda: [probe])
+    monkeypatch.setattr(gates, "_image_digest", lambda cfg: "wantdigest")
+    monkeypatch.setattr(gates, "_stack_preflights", lambda cfg: [probe])
     monkeypatch.setenv("FAKE_DOCKER_INSPECT_OUT", "wantdigest")
     monkeypatch.setenv("FAKE_DOCKER_INSPECT_RC", "0")
     monkeypatch.setenv("FAKE_DOCKER_RUN_RC", "1")
-    assert stanok.preflight_image("stanok-machine:latest") is False
+    assert gates.preflight_image(Config(), "stanok-machine:latest") is False
     out = capsys.readouterr().out
     assert "runner unavailable in image" in out
     assert probe in out
 
 
 def test_preflight_all_good(fake_docker, monkeypatch, capsys):
-    monkeypatch.setattr(stanok, "_image_digest", lambda: "wantdigest")
-    monkeypatch.setattr(stanok, "_stack_preflights", lambda: ["uv run --no-project pytest --version"])
+    monkeypatch.setattr(gates, "_image_digest", lambda cfg: "wantdigest")
+    monkeypatch.setattr(gates, "_stack_preflights",
+                        lambda cfg: ["uv run --no-project pytest --version"])
     monkeypatch.setenv("FAKE_DOCKER_INSPECT_OUT", "wantdigest")
     monkeypatch.setenv("FAKE_DOCKER_INSPECT_RC", "0")
     monkeypatch.setenv("FAKE_DOCKER_RUN_RC", "0")
-    assert stanok.preflight_image("stanok-machine:latest") is True
+    assert gates.preflight_image(Config(), "stanok-machine:latest") is True
     assert "all stack runners available" in capsys.readouterr().out
 
 
@@ -132,13 +139,13 @@ def test_stack_preflights_reads_live_manifests():
         if name.endswith(".toml"):
             with open(stacks / name, "rb") as f:
                 expected.append(tomllib.load(f)["preflight"])
-    assert stanok._stack_preflights() == expected
+    assert gates._stack_preflights(Config()) == expected
     assert expected, "no preflights derived from the live manifests"
 
 
 # --- 5: verify_gate env_fail ---------------------------------------------------
 
-def test_verify_gate_env_fail(tmp_path, monkeypatch):
+def test_verify_gate_env_fail(tmp_path):
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     (repo / "tests").mkdir()
@@ -148,9 +155,8 @@ def test_verify_gate_env_fail(tmp_path, monkeypatch):
         'if [[ "$1" == "test" ]]; then exit 6; fi\n'
         "exit 0\n",
     )
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    plan = stanok.SessionPlan(declared_paths=())
-    ok, failures, env_fail = stanok.verify_gate(plan)
+    plan = SessionPlan(declared_paths=())
+    ok, failures, env_fail = verify.verify_gate(Config(repo_root=str(repo)), plan)
     assert ok is False
     assert env_fail is True
     assert any(msg.startswith("ENV-FAIL:") for _, msg in failures)
@@ -159,7 +165,7 @@ def test_verify_gate_env_fail(tmp_path, monkeypatch):
 # --- 6: _status_fields ---------------------------------------------------------
 
 def test_status_fields_env_fail():
-    assert stanok._status_fields(16, "FAIL", 1) == "ENV-FAIL"
+    assert summary._status_fields(16, "FAIL", 1) == "ENV-FAIL"
 
 
 # --- 7: _verifier_hook rc semantics --------------------------------------------
@@ -177,19 +183,19 @@ def _verifier_repo(base: Path, name: str, test_rc: int) -> Path:
     return repo
 
 
-def test_verifier_hook_rc_semantics(tmp_path, monkeypatch, capsys):
+def test_verifier_hook_rc_semantics(tmp_path, capsys):
     # rc=6 -> {} + ENV-FAIL log (no RED)
     repo6 = _verifier_repo(tmp_path, "repo6", 6)
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo6))
-    res = asyncio.run(stanok._verifier_hook(
+    res = asyncio.run(session._verifier_hook(
+        Config(repo_root=str(repo6)),
         {"tool_input": {"file_path": str(repo6 / "tests" / "t_test.py")}}, "toolu_1", None))
     assert res == {}
     assert "ENV-FAIL" in capsys.readouterr().out
 
     # rc=1 -> RED CONFIRMED context + log
     repo1 = _verifier_repo(tmp_path, "repo1", 1)
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo1))
-    res = asyncio.run(stanok._verifier_hook(
+    res = asyncio.run(session._verifier_hook(
+        Config(repo_root=str(repo1)),
         {"tool_input": {"file_path": str(repo1 / "tests" / "t_test.py")}}, "toolu_1", None))
     assert "RED CONFIRMED" in res["hookSpecificOutput"]["additionalContext"]
     assert "RED CONFIRMED" in capsys.readouterr().out
@@ -197,23 +203,23 @@ def test_verifier_hook_rc_semantics(tmp_path, monkeypatch, capsys):
     # rc=0 / rc=2 -> {} (silent)
     for rc in (0, 2):
         repok = _verifier_repo(tmp_path, f"repok{rc}", rc)
-        monkeypatch.setattr(stanok, "REPO_ROOT", str(repok))
-        res = asyncio.run(stanok._verifier_hook(
+        res = asyncio.run(session._verifier_hook(
+            Config(repo_root=str(repok)),
             {"tool_input": {"file_path": str(repok / "tests" / "t_test.py")}}, "toolu_1", None))
         assert res == {}
 
 
-def test_verifier_hook_call_logged(tmp_path, monkeypatch, capsys):
+def test_verifier_hook_call_logged(tmp_path, capsys):
     # W8 double-hook diagnosis: EVERY invocation logs HOOK-CALL id=<tool_use_id>
     # at entry — including early-return paths (file outside tests/).
     repo = _verifier_repo(tmp_path, "repolog", 1)
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    asyncio.run(stanok._verifier_hook(
-        {"tool_input": {"file_path": str(repo / "tests" / "t_test.py")}}, "toolu_42", None))
+    cfg = Config(repo_root=str(repo))
+    asyncio.run(session._verifier_hook(
+        cfg, {"tool_input": {"file_path": str(repo / "tests" / "t_test.py")}}, "toolu_42", None))
     assert "HOOK-CALL id=toolu_42" in capsys.readouterr().out
     # early-return path (file outside tests/) still logs the call
-    res = asyncio.run(stanok._verifier_hook(
-        {"tool_input": {"file_path": str(repo / "src" / "x.js")}}, "toolu_43", None))
+    res = asyncio.run(session._verifier_hook(
+        cfg, {"tool_input": {"file_path": str(repo / "src" / "x.js")}}, "toolu_43", None))
     assert res == {}
     assert "HOOK-CALL id=toolu_43" in capsys.readouterr().out
 
@@ -233,8 +239,8 @@ def _clear_window_env(monkeypatch):
 
 def test_preflight_server_derives_window_when_env_unset(monkeypatch, capsys):
     _clear_window_env(monkeypatch)
-    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(125184))
-    assert stanok.preflight_server() is True
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: _props(125184))
+    assert gates.preflight_server(Config()) is True
     out = capsys.readouterr().out
     assert "derived required window 123184" in out
     assert "n_ctx 125184 - margin 2000" in out
@@ -242,16 +248,16 @@ def test_preflight_server_derives_window_when_env_unset(monkeypatch, capsys):
 
 def test_preflight_server_derived_window_fails_on_tiny_n_ctx(monkeypatch, capsys):
     _clear_window_env(monkeypatch)
-    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(1000))
-    assert stanok.preflight_server() is False
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: _props(1000))
+    assert gates.preflight_server(Config()) is False
     assert "fail-closed" in capsys.readouterr().out
 
 
 def test_preflight_server_env_window_ok(monkeypatch, capsys):
     _clear_window_env(monkeypatch)
     monkeypatch.setenv("STANOK_REQUIRED_WINDOW", "123000")
-    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(125184))
-    assert stanok.preflight_server() is True
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: _props(125184))
+    assert gates.preflight_server(Config()) is True
     assert ">= required window 123000" in capsys.readouterr().out
 
 
@@ -260,8 +266,8 @@ def test_preflight_server_stale_env_window_fails(monkeypatch, capsys):
     # requirement — stale 128000 vs live n_ctx 125184 must fail-closed.
     _clear_window_env(monkeypatch)
     monkeypatch.setenv("STANOK_REQUIRED_WINDOW", "128000")
-    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(125184))
-    assert stanok.preflight_server() is False
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: _props(125184))
+    assert gates.preflight_server(Config()) is False
     assert "n_ctx=125184 < required window 128000" in capsys.readouterr().out
 
 
@@ -269,14 +275,14 @@ def test_preflight_server_unavailable(monkeypatch):
     # The "SERVER UNAVAILABLE" log is emitted inside the real
     # _fetch_server_props; the None contract here is what preflight sees.
     _clear_window_env(monkeypatch)
-    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: None)
-    assert stanok.preflight_server() is False
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: None)
+    assert gates.preflight_server(Config()) is False
 
 
 def test_preflight_server_unparseable_n_ctx(monkeypatch, capsys):
     _clear_window_env(monkeypatch)
-    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(None))
-    assert stanok.preflight_server() is False
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: _props(None))
+    assert gates.preflight_server(Config()) is False
     assert "unparseable n_ctx" in capsys.readouterr().out
 
 
@@ -284,24 +290,24 @@ def test_preflight_server_skip_env(monkeypatch):
     _clear_window_env(monkeypatch)
     monkeypatch.setenv("STANOK_SKIP_SERVER_CHECK", "1")
 
-    def _boom():
+    def _boom(cfg):
         raise AssertionError("must not fetch props when the check is skipped")
 
-    monkeypatch.setattr(stanok, "_fetch_server_props", _boom)
-    assert stanok.preflight_server() is True
+    monkeypatch.setattr(gates, "_fetch_server_props", _boom)
+    assert gates.preflight_server(Config()) is True
 
 
 # --- 9: window single source (PLAN-HYGIENE 2026-10-08) ------------------------
 
 def test_rot_threshold_env_rot_tokens_wins(monkeypatch):
     monkeypatch.setenv("STANOK_CONTEXT_ROT_TOKENS", "99000")
-    assert stanok.context_rot_threshold() == 99000
+    assert gates.context_rot_threshold() == 99000
 
 
 def test_rot_threshold_from_env_required_window(monkeypatch):
     monkeypatch.delenv("STANOK_CONTEXT_ROT_TOKENS", raising=False)
     monkeypatch.setenv("STANOK_REQUIRED_WINDOW", "123000")
-    assert stanok.context_rot_threshold() == 98400
+    assert gates.context_rot_threshold() == 98400
 
 
 def test_rot_threshold_from_derived_window(monkeypatch):
@@ -310,10 +316,10 @@ def test_rot_threshold_from_derived_window(monkeypatch):
     # no hardcoded default.
     _clear_window_env(monkeypatch)
     monkeypatch.delenv("STANOK_CONTEXT_ROT_TOKENS", raising=False)
-    monkeypatch.setattr(stanok, "_fetch_server_props", lambda: _props(125184))
-    assert stanok.preflight_server() is True
-    assert stanok._DERIVED_REQUIRED_WINDOW == 123184
-    assert stanok.context_rot_threshold() == int(123184 * 0.8)
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: _props(125184))
+    assert gates.preflight_server(Config()) is True
+    assert gates._DERIVED_REQUIRED_WINDOW == 123184
+    assert gates.context_rot_threshold() == int(123184 * 0.8)
 
 
 def test_rot_threshold_none_when_no_window_known(monkeypatch):
@@ -321,23 +327,26 @@ def test_rot_threshold_none_when_no_window_known(monkeypatch):
     # inventing a window (the old `or 128000` default is gone).
     _clear_window_env(monkeypatch)
     monkeypatch.delenv("STANOK_CONTEXT_ROT_TOKENS", raising=False)
-    monkeypatch.setattr(stanok, "_DERIVED_REQUIRED_WINDOW", None)
-    assert stanok.context_rot_threshold() is None
+    monkeypatch.setattr(gates, "_DERIVED_REQUIRED_WINDOW", None)
+    assert gates.context_rot_threshold() is None
+
+
+def _run_state(tmp_path) -> RunState:
+    return RunState(evidence_dir=str(tmp_path), live_dir=str(tmp_path),
+                    marker_path=str(tmp_path / ".running"))
 
 
 def test_build_agent_env_omits_auto_compact_when_unset(tmp_path, monkeypatch):
     # No hardcoded "128000": when the operator did not export the window the
     # key is ABSENT from the runtime env, so the static settings.env value
     # (123000) applies — one source, no silent override.
-    monkeypatch.setattr(stanok, "_live_dir", str(tmp_path))
     monkeypatch.delenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", raising=False)
-    env = stanok.build_agent_env()
+    env = session.build_agent_env(Config(), _run_state(tmp_path))
     assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in env
 
 
 def test_build_agent_env_passes_auto_compact_through(tmp_path, monkeypatch):
     # P0-launch.sh exports the window derived from settings -> pass-through.
-    monkeypatch.setattr(stanok, "_live_dir", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "123000")
-    env = stanok.build_agent_env()
+    env = session.build_agent_env(Config(), _run_state(tmp_path))
     assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "123000"

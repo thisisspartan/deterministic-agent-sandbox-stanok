@@ -1,19 +1,26 @@
 """ticket — the ticket header contract and workspace preparation.
 
 parse_ticket_header / create-edit assertions (CC-133, CC-206), the mount
-carve-out derivation (T4/CC-135) and prepare_workspace. Shared state
-(REPO_ROOT, _live_dir) is read via `stanok.`.
+carve-out derivation (T4/CC-135) and prepare_workspace. The repo root comes
+from the passed-in Config; the quarantine dir from the passed-in RunState (C).
 """
 
 import os
+import re
 import shutil
 import sandbox
-import stanok
-from stanok import ExitCode, _FILE_LINE_RE, _RESET_NONE_RE, log
+from stanok import ExitCode, log
 from verify import _protected_files
 
+# The ONE kind list for a ticket header (CC-132). `scripts` is a ZONE, not a
+# kind: a path under scripts/ is declared with impl:/test:/docs:/edit: like
+# any other path. `scripts: x.sh` is therefore not a declaration — it ends
+# the header (this is the fix for the old docstring that advertised it).
+_FILE_LINE_RE = re.compile(r"^(impl|test|docs|edit):\s*([A-Za-z0-9_./-]+)\s*$")
+_RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
 
-def declared_carveout(rel: str) -> str | None:
+
+def declared_carveout(cfg, rel: str) -> str | None:
     """The rw-mount carve-out a declared path implies, or None if the path is
     undeclarable (T4, CC-135 — one rule for the gate AND the mounts).
 
@@ -40,7 +47,7 @@ def declared_carveout(rel: str) -> str | None:
         return None
     if rel.rstrip("/") in sandbox.WRITABLE_ZONES:
         return None
-    root = os.path.realpath(stanok.REPO_ROOT)
+    root = os.path.realpath(cfg.repo_root)
     if not os.path.realpath(os.path.join(root, rel)).startswith(root + os.sep):
         return None
     if os.path.exists(os.path.join(root, rel)):
@@ -53,13 +60,13 @@ def declared_carveout(rel: str) -> str | None:
     return None
 
 
-def _validate_declared_path(rel: str) -> bool:
+def _validate_declared_path(cfg, rel: str) -> bool:
     """parse_ticket_header's gate: a path is declarable exactly when the
     filesystem can back its rw carve-out (declared_carveout)."""
-    return declared_carveout(rel) is not None
+    return declared_carveout(cfg, rel) is not None
 
 
-def host_ro_paths(rw_paths: tuple) -> tuple[str, ...]:
+def host_ro_paths(cfg, rw_paths: tuple) -> tuple[str, ...]:
     """The pre-existing contract files to re-bind `:ro` ON TOP of a rw carve-out
     (T4b, CC-136).
 
@@ -81,7 +88,7 @@ def host_ro_paths(rw_paths: tuple) -> tuple[str, ...]:
     protected path before the container starts; the mount layer does not trust
     the declaration either way."""
     ro: list[str] = []
-    for rel in _protected_files():
+    for rel in _protected_files(cfg):
         if not any(rel == carve or rel.startswith(carve + "/")
                    for carve in rw_paths):
             continue
@@ -89,19 +96,19 @@ def host_ro_paths(rw_paths: tuple) -> tuple[str, ...]:
     return tuple(ro)
 
 
-def host_rw_paths(declared: list[str]) -> tuple[str, ...]:
+def host_rw_paths(cfg, declared: list[str]) -> tuple[str, ...]:
     """The deduped rw carve-outs for a declared-path list — what the HOST
     passes to sandbox_argv before `docker run` (T4). The declared paths were
     validated by parse_ticket_header, so every carve-out is non-None here."""
     carveouts: list[str] = []
     for rel in declared:
-        carve = declared_carveout(rel)
+        carve = declared_carveout(cfg, rel)
         if carve is not None and carve not in carveouts:
             carveouts.append(carve)
     return tuple(carveouts)
 
 
-def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
+def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bool]:
     """Ticket-scoped invariant (W2.1): the header is the leading block of
     literal `impl: <path>` / `test: <path>` / `docs: <path>` / `edit: <path>`
     lines plus an optional `reset: none` escape hatch for extension tickets.
@@ -136,7 +143,7 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
     declared: list[str] = []
     edit_paths: list[str] = []
     for kind, rel in entries:
-        if not _validate_declared_path(rel):
+        if not _validate_declared_path(cfg, rel):
             raise ValueError(
                 f"invalid declared path {rel!r}: must be relative, contain no "
                 f"'..', resolve inside the repo (no symlink out), and either "
@@ -150,7 +157,7 @@ def parse_ticket_header(ticket_text: str) -> tuple[list[str], list[str], bool]:
     return declared, edit_paths, reset_none
 
 
-def assert_create_paths_are_new(declared: list[str], edit_paths: list[str]) -> None:
+def assert_create_paths_are_new(cfg, declared: list[str], edit_paths: list[str]) -> None:
     """CC-133: create-vs-edit is a header CLAIM that nothing used to verify.
 
     A path declared as a create (`impl:`/`test:`/`docs:`) that ALREADY EXISTS
@@ -168,11 +175,11 @@ def assert_create_paths_are_new(declared: list[str], edit_paths: list[str]) -> N
     a first ticket in a new project may legitimately declare
     `edit: scripts/run.sh` before run.sh exists."""
     skip = set(edit_paths)
-    protected = set(_protected_files())
+    protected = set(_protected_files(cfg))
     for rel in declared:
         if rel in skip:
             continue
-        if os.path.exists(os.path.join(stanok.REPO_ROOT, rel)):
+        if os.path.exists(os.path.join(cfg.repo_root, rel)):
             if rel in protected:
                 # CC-206: `edit: <rel>` would now hit the new gate — do not
                 # suggest it as the fix for a PROTECTED stale path.
@@ -189,7 +196,7 @@ def assert_create_paths_are_new(declared: list[str], edit_paths: list[str]) -> N
             )
 
 
-def assert_edit_paths_are_not_protected(edit_paths: list[str]) -> None:
+def assert_edit_paths_are_not_protected(cfg, edit_paths: list[str]) -> None:
     """CC-206: `edit:` on a protected file is a ticket defect (rc=13),
     refused BEFORE any container start.
 
@@ -206,7 +213,7 @@ def assert_edit_paths_are_not_protected(edit_paths: list[str]) -> None:
     CC-154); `edit:` on a non-protected path (e.g. `src/mod.py`) is the
     normal case and stays legal. Fail-closed: ValueError -> rc=13 upstream,
     before SessionPlan/preflight_server/sandbox_argv."""
-    protected = set(_protected_files())
+    protected = set(_protected_files(cfg))
     for rel in edit_paths:
         if rel in protected:
             raise ValueError(
@@ -216,7 +223,7 @@ def assert_edit_paths_are_not_protected(edit_paths: list[str]) -> None:
             )
 
 
-def prepare_workspace(plan: "SessionPlan") -> int:
+def prepare_workspace(cfg, run_state, plan: "SessionPlan") -> int:
     # SEC-01: .git is read-only inside the container — NO git writes here.
     # The cleanliness gate is dirty_tree_gate() (single source, called by main()
     # rc=22). This function only prepares the writable workspace.
@@ -240,16 +247,16 @@ def prepare_workspace(plan: "SessionPlan") -> int:
         for rel in plan.declared_paths:
             if rel in plan.edit_paths:
                 continue
-            src_path = os.path.join(stanok.REPO_ROOT, rel)
+            src_path = os.path.join(cfg.repo_root, rel)
             if not os.path.exists(src_path):
                 continue
-            dest = os.path.join(stanok._live_dir, "pre-existing", rel)
+            dest = os.path.join(run_state.live_dir, "pre-existing", rel)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             shutil.move(src_path, dest)
             quarantined.append(rel)
         if quarantined:
             log(f"QUARANTINE: {len(quarantined)} pre-existing declared path(s) "
-                f"moved to {stanok._live_dir}/pre-existing/: {quarantined}")
+                f"moved to {run_state.live_dir}/pre-existing/: {quarantined}")
         return 0
     except OSError as e:
         log(f"ERROR: repo prep failed: {e}")

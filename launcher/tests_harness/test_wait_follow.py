@@ -17,6 +17,9 @@ Pinned here (hermetic — no Docker, no model):
   6  the CLI wires `wait` and accepts `run ... --follow` (the sole background flag)
   7  `--follow` does NOT leak into the detached child's argv (a plain sync run)
 
+C (PLAN-HYGIENE 2026-10-08): cmd_wait/cmd_status/_status_dict/_inner_run_argv
+live in cli.py and take the Config explicitly — no hub facade.
+
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_wait_follow.py -q
 """
 import json
@@ -30,20 +33,19 @@ LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
-import stanok  # noqa: E402
+import cli  # noqa: E402
+from config import Config  # noqa: E402
 
 
-def _host_paths(tmp_path, monkeypatch, label="run1"):
+def _host_cfg(tmp_path, monkeypatch, label="run1"):
     repo = tmp_path / "repo"
     repo.mkdir()
     log = tmp_path / "logs"
     log.mkdir()
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    monkeypatch.setattr(stanok, "LOG_DIR", str(log))
     monkeypatch.delenv("STANOK_IN_CONTAINER", raising=False)
     evidence = repo / "evidence" / label
     evidence.mkdir(parents=True)
-    return evidence
+    return Config(repo_root=str(repo), log_dir=str(log)), evidence
 
 
 def _run_json(capsys):
@@ -53,13 +55,13 @@ def _run_json(capsys):
 # --- 1: a finished run -> done -----------------------------------------------
 
 def test_wait_done_prints_summary_fields(tmp_path, monkeypatch, capsys):
-    evidence = _host_paths(tmp_path, monkeypatch)
+    cfg, evidence = _host_cfg(tmp_path, monkeypatch)
     (evidence / "summary.json").write_text(json.dumps({
         "rc": 0, "verifier": "PASS", "probe_result": "CLEAN-FIRST",
         "turns": 1, "session_id": "s1", "cache_hit_rate": "96.4%",
         "elapsed_s": 126, "errors": [],
     }), encoding="utf-8")
-    assert stanok.cmd_wait("run1", timeout_s=0) == 0
+    assert cli.cmd_wait(cfg, "run1", timeout_s=0) == 0
     st = _run_json(capsys)
     assert st["state"] == "done" and st["rc"] == 0 and st["verifier"] == "PASS"
     assert st["probe_result"] == "CLEAN-FIRST"
@@ -68,11 +70,11 @@ def test_wait_done_prints_summary_fields(tmp_path, monkeypatch, capsys):
 # --- 2: a dead marker -> dead ------------------------------------------------
 
 def test_wait_dead_marker(tmp_path, monkeypatch, capsys):
-    evidence = _host_paths(tmp_path, monkeypatch)
+    cfg, evidence = _host_cfg(tmp_path, monkeypatch)
     child = subprocess.Popen(["true"])
     child.wait()  # reaped -> its pid is no longer alive
     (evidence / ".running").write_text(f"1700000000 {child.pid}\n", encoding="utf-8")
-    assert stanok.cmd_wait("run1", timeout_s=0) == 0
+    assert cli.cmd_wait(cfg, "run1", timeout_s=0) == 0
     st = _run_json(capsys)
     assert st["state"] == "dead" and st["pid"] == child.pid
 
@@ -80,11 +82,11 @@ def test_wait_dead_marker(tmp_path, monkeypatch, capsys):
 # --- 3: a live run -> timeout cap --------------------------------------------
 
 def test_wait_timeout_on_live_run(tmp_path, monkeypatch, capsys):
-    evidence = _host_paths(tmp_path, monkeypatch)
+    cfg, evidence = _host_cfg(tmp_path, monkeypatch)
     # Our own pid is alive: the state stays `running`, so timeout_s=0 must cap
     # immediately rather than sleep.
     (evidence / ".running").write_text(f"1700000000 {os.getpid()}\n", encoding="utf-8")
-    assert stanok.cmd_wait("run1", timeout_s=0) == 124
+    assert cli.cmd_wait(cfg, "run1", timeout_s=0) == 124
     st = _run_json(capsys)
     assert st["state"] == "timeout"
 
@@ -92,23 +94,23 @@ def test_wait_timeout_on_live_run(tmp_path, monkeypatch, capsys):
 # --- 4: unknown label -> missing ---------------------------------------------
 
 def test_wait_missing_label(tmp_path, monkeypatch, capsys):
-    _host_paths(tmp_path, monkeypatch)
-    assert stanok.cmd_wait("run1", timeout_s=0) == 0
+    cfg, _ = _host_cfg(tmp_path, monkeypatch)
+    assert cli.cmd_wait(cfg, "run1", timeout_s=0) == 0
     assert _run_json(capsys)["state"] == "missing"
 
 
 # --- 5: status and wait share one source -------------------------------------
 
 def test_status_and_wait_agree(tmp_path, monkeypatch, capsys):
-    evidence = _host_paths(tmp_path, monkeypatch)
+    cfg, evidence = _host_cfg(tmp_path, monkeypatch)
     (evidence / "summary.json").write_text(json.dumps({"rc": 1, "verifier": "FAIL"}),
                                            encoding="utf-8")
-    assert stanok.cmd_status("run1") == 0
+    assert cli.cmd_status(cfg, "run1") == 0
     status = _run_json(capsys)
-    assert stanok.cmd_wait("run1", timeout_s=0) == 0
+    assert cli.cmd_wait(cfg, "run1", timeout_s=0) == 0
     wait = _run_json(capsys)
     assert status == wait
-    assert stanok._status_dict("run1") == status  # the shared source
+    assert cli._status_dict(cfg, "run1") == status  # the shared source
 
 
 # --- 6: CLI wiring -----------------------------------------------------------
@@ -137,9 +139,10 @@ def test_cli_wires_wait_and_run_follow(tmp_path, monkeypatch):
 # --- 7: --follow is a parent-only concern ------------------------------------
 
 def test_follow_not_propagated_to_child_argv():
+    cfg = Config()
     args = types.SimpleNamespace(ticket="tickets/T.md", label="lbl",
-                                 direct=False, local_retries=stanok.DEFAULT_RETRIES,
-                                 extra=[], follow=True)
-    inner = stanok._inner_run_argv(args)
+                                direct=False, local_retries=cfg.default_retries,
+                                extra=[], follow=True)
+    inner = cli._inner_run_argv(cfg, args)
     assert "--follow" not in inner
     assert inner[-1] == "lbl"

@@ -26,6 +26,10 @@ CC-135 (T4) removes the `rw_zones` field: the container's rw carve-outs are
 derived from the declared paths (declared_carveout / host_rw_paths) instead of
 being a second policy list in the plan — pinned in test_t4_mounts.py.
 
+C (PLAN-HYGIENE 2026-10-08): the hub facade is gone — the functions live in
+ticket/verify/gates and take the Config explicitly; the quarantine dir comes
+from the passed-in RunState.
+
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_session_plan.py -q
 """
 import dataclasses
@@ -37,20 +41,31 @@ import pytest
 LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
+import gates  # noqa: E402
+import sandbox  # noqa: E402
 import stanok  # noqa: E402
+import ticket  # noqa: E402
+import verify  # noqa: E402
+from config import Config, RunState  # noqa: E402
 
 from conftest import repo, write
 
 
-def _build_plan(ticket_text):
+def _build_plan(cfg, ticket_text):
     """Mirror cmd_run's T1 construction: parse the header, then build the
     plan (the plan carries no mount/protected lists — T4/CC-135 derives the
     rw mounts, T4b/CC-136 the :ro binds)."""
-    declared, edit_paths, _ = stanok.parse_ticket_header(ticket_text)
+    declared, edit_paths, _ = ticket.parse_ticket_header(cfg, ticket_text)
     return stanok.SessionPlan(
         declared_paths=tuple(declared),
         edit_paths=tuple(edit_paths),
     )
+
+
+def _run_state(tmp_path) -> RunState:
+    return RunState(evidence_dir=str(tmp_path / "evidence"),
+                    live_dir=str(tmp_path / "live"),
+                    marker_path=str(tmp_path / ".running"))
 
 
 _TICKET = (
@@ -63,7 +78,9 @@ _TICKET = (
 
 
 def test_plan_fields_from_ticket_header():
-    plan = _build_plan(_TICKET)
+    # Header-only parse: Config() (the real repo) — src/tests/docs exist,
+    # so the declared paths validate against the filesystem.
+    plan = _build_plan(Config(), _TICKET)
     assert plan.declared_paths == ("src/mod.py", "tests/mod_test.py", "docs/mod.md")
     # T5/CC-137: exactly two fields — the mount/protected lists are derived
     # (rw_zones gone with CC-135, protected_paths gone with the hook it fed,
@@ -76,7 +93,7 @@ def test_plan_fields_from_ticket_header():
 
 
 def test_plan_is_frozen():
-    plan = _build_plan(_TICKET)
+    plan = _build_plan(Config(), _TICKET)
     with pytest.raises(dataclasses.FrozenInstanceError):
         plan.declared_paths = ()
 
@@ -85,30 +102,30 @@ def test_contract_lock_set_is_the_manifest_not_a_plan_field():
     # T5/CC-137: "protected" is the manifest itself (one source, CC-136's
     # _protected_files); it is not copied into the plan. The set the post-turn
     # diff hashes is exactly the set host_ro_paths may bind :ro.
-    plan = _build_plan(_TICKET)
+    plan = _build_plan(Config(), _TICKET)
     assert not hasattr(plan, "protected_paths")
 
 
-def test_contract_lock_exempts_declared_path(repo, monkeypatch):
+def test_contract_lock_exempts_declared_path(repo):
     # Generalized run.sh exemption: a declared protected path is not
     # flagged even when modified; a non-declared protected path is.
     write(repo / "tests" / "x_test.py", "def test_x():\n    assert 1\n")
     (repo / "docs").mkdir()  # CC-135: a declared path needs an existing carve-out
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    before = stanok._tests_manifest()
+    cfg = Config(repo_root=str(repo))
+    before = verify._tests_manifest(cfg)
     runsh = repo / "scripts" / "run.sh"
     orig = runsh.read_text(encoding="utf-8")
     try:
         runsh.write_text(orig + "# probe\n", encoding="utf-8")
         job = {}
-        plan = _build_plan(_TICKET)
-        stanok._check_contract_lock(before, job, 1, plan)
+        plan = _build_plan(cfg, _TICKET)
+        verify._check_contract_lock(cfg, before, job, 1, plan)
         assert any("scripts/run.sh" in v
                    for v in job.get("contract_lock_violations", [])), \
             f"non-declared run.sh modification not flagged: {job}"
         job2 = {}
         plan2 = dataclasses.replace(plan, declared_paths=("scripts/run.sh",))
-        stanok._check_contract_lock(before, job2, 1, plan2)
+        verify._check_contract_lock(cfg, before, job2, 1, plan2)
         assert not job2.get("contract_lock_violations"), \
             f"declared run.sh modification wrongly flagged: {job2}"
     finally:
@@ -126,23 +143,25 @@ _EDIT_TICKET = (
 def test_edit_path_parsed_and_still_declared():
     # CC-125: `edit:` is declared like any path (union) but also reported
     # separately so prepare_workspace can skip it.
-    declared, edit_paths, reset_none = stanok.parse_ticket_header(_EDIT_TICKET)
+    declared, edit_paths, reset_none = ticket.parse_ticket_header(Config(), _EDIT_TICKET)
     assert declared == ["tests/new_test.py", "tests/existing_test.py"]
     assert edit_paths == ["tests/existing_test.py"]
     assert reset_none is False
-    plan = _build_plan(_EDIT_TICKET)
+    plan = _build_plan(Config(), _EDIT_TICKET)
     assert plan.edit_paths == ("tests/existing_test.py",)
 
 
-def test_prepare_workspace_quarantines_create_not_edit(repo, monkeypatch, tmp_path):
+def test_prepare_workspace_quarantines_create_not_edit(repo, tmp_path):
     write(repo / "tests" / "new_test.py", "stale create artifact\n")
     write(repo / "tests" / "existing_test.py", "modify me in place\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
+    cfg = Config(repo_root=str(repo))
     live = tmp_path / "live"
     live.mkdir()
-    monkeypatch.setattr(stanok, "_live_dir", str(live))
+    run_state = RunState(evidence_dir=str(tmp_path / "evidence"),
+                         live_dir=str(live),
+                         marker_path=str(tmp_path / ".running"))
 
-    assert stanok.prepare_workspace(_build_plan(_EDIT_TICKET)) == 0
+    assert ticket.prepare_workspace(cfg, run_state, _build_plan(cfg, _EDIT_TICKET)) == 0
 
     # The create-declared path is moved aside (proves it is built from scratch).
     assert not (repo / "tests" / "new_test.py").exists()
@@ -159,8 +178,8 @@ def test_zones_have_one_source():
     # DEFAULT_RW_ZONES alias is gone — CC-134). It is the *declaration*
     # allow-list, not the mount set: T4/CC-135 derives the mounts per ticket
     # (declared_carveout), so the plan carries no zone field at all.
-    assert not hasattr(stanok.sandbox, "DEFAULT_RW_ZONES")
-    assert stanok.sandbox.WRITABLE_ZONES == ("src", "tests", "docs", "scripts")
+    assert not hasattr(sandbox, "DEFAULT_RW_ZONES")
+    assert sandbox.WRITABLE_ZONES == ("src", "tests", "docs", "scripts")
     fields = {f.name for f in dataclasses.fields(stanok.SessionPlan)}
     assert "rw_zones" not in fields
 
@@ -173,20 +192,21 @@ def test_zone_consumers_read_the_constant(tmp_path, monkeypatch):
     # nothing manufactures them any more.
     repo_dir = tmp_path / "repo"
     (repo_dir / "src").mkdir(parents=True)
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo_dir))
-    monkeypatch.setattr(stanok.sandbox, "WRITABLE_ZONES", ("src", "zoneA"))
+    cfg = Config(repo_root=str(repo_dir))
+    monkeypatch.setattr(sandbox, "WRITABLE_ZONES", ("src", "zoneA"))
 
-    assert stanok.prepare_workspace(_build_plan("")) == 0
+    assert ticket.prepare_workspace(cfg, _run_state(tmp_path), _build_plan(cfg, "")) == 0
     assert not (repo_dir / "zoneA").exists()      # no manufactured zone dir
-    assert stanok.declared_carveout("zoneA") is None       # a bare zone
-    assert stanok.declared_carveout("zoneA/x.py") is None  # absent, no ancestor
+    assert ticket.declared_carveout(cfg, "zoneA") is None       # a bare zone
+    assert ticket.declared_carveout(cfg, "zoneA/x.py") is None  # absent, no ancestor
 
     write(repo_dir / "zoneA" / ".secret", "")
-    assert stanok.hidden_files_gate() is True     # zoneA is scanned now
+    assert gates.hidden_files_gate(cfg) is True     # zoneA is scanned now
 
 
 def test_header_kinds_are_impl_test_docs_edit():
-    declared, edit_paths, reset_none = stanok.parse_ticket_header(
+    declared, edit_paths, reset_none = ticket.parse_ticket_header(
+        Config(),
         "impl: src/a.py\n"
         "test: tests/a_test.py\n"
         "docs: docs/a.md\n"
@@ -201,7 +221,8 @@ def test_header_kinds_are_impl_test_docs_edit():
 def test_scripts_is_a_zone_not_a_kind():
     # `scripts:` is not a declaration line: it ends the header, so the impl:
     # line after it is never reached. The old docstring advertised it.
-    declared, edit_paths, _ = stanok.parse_ticket_header(
+    declared, edit_paths, _ = ticket.parse_ticket_header(
+        Config(),
         "scripts: x.sh\nimpl: src/a.py\n"
     )
     assert declared == []
@@ -215,7 +236,8 @@ def test_bootstrap_is_not_a_kind():
     # is now not a declaration (it ends the header), so the ticket is rejected
     # as "no declaration" (rc=13) instead of silently carving out a top-level
     # file.
-    declared, edit_paths, _ = stanok.parse_ticket_header(
+    declared, edit_paths, _ = ticket.parse_ticket_header(
+        Config(),
         "bootstrap: pyproject.toml\n"
     )
     assert declared == []
@@ -227,43 +249,45 @@ def test_bootstrap_is_not_a_kind():
 
 # --- CC-133: create-vs-edit derived from the filesystem -------------------------
 
-def test_stale_create_path_is_a_defect(repo, monkeypatch):
+def test_stale_create_path_is_a_defect(repo):
     # The CC-119 fire16 retry1 header: `tests/fire_color16_test.py` already
     # existed but was declared as a create -> quarantine moved it aside, the
     # hook denied recreating it, the turn stalled. Now it is rc=13 up front.
     write(repo / "tests" / "fire_color16_test.py", "def test_x():\n    assert 1\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, edit_paths, _ = stanok.parse_ticket_header(
+    cfg = Config(repo_root=str(repo))
+    declared, edit_paths, _ = ticket.parse_ticket_header(
+        cfg,
         "test: tests/fire_fire16_test.py\n"
         "test: tests/fire_color16_test.py\n"
     )
     with pytest.raises(ValueError) as exc:
-        stanok.assert_create_paths_are_new(declared, edit_paths)
+        ticket.assert_create_paths_are_new(cfg, declared, edit_paths)
     assert "tests/fire_color16_test.py" in str(exc.value)
     assert "edit: tests/fire_color16_test.py" in str(exc.value)
 
 
-def test_create_paths_that_are_new_pass(repo, monkeypatch):
+def test_create_paths_that_are_new_pass(repo):
     # CC-206: the edit here moved from tests/ to src/ — `edit:` on a
     # pre-existing protected test is now refused by
     # assert_edit_paths_are_not_protected (a separate gate); this test keeps
     # pinning ONLY the CC-133 create-vs-edit direction.
     write(repo / "src" / "old.py", "x = 1\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, edit_paths, _ = stanok.parse_ticket_header(
+    cfg = Config(repo_root=str(repo))
+    declared, edit_paths, _ = ticket.parse_ticket_header(
+        cfg,
         "test: tests/new_test.py\n"
         "edit: src/old.py\n"
         "impl: src/new.py\n"
     )
-    stanok.assert_create_paths_are_new(declared, edit_paths)  # no raise
+    ticket.assert_create_paths_are_new(cfg, declared, edit_paths)  # no raise
 
 
-def test_edit_path_that_is_absent_is_not_a_defect(repo, monkeypatch):
+def test_edit_path_that_is_absent_is_not_a_defect(repo):
     # Deliberately unchecked direction: `edit:` on a missing path is not
     # destructive (a first ticket in a new project may declare it before the
     # file exists).
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    stanok.assert_create_paths_are_new(["src/new.py"], ["scripts/run.sh"])
+    cfg = Config(repo_root=str(repo))
+    ticket.assert_create_paths_are_new(cfg, ["src/new.py"], ["scripts/run.sh"])
 
 
 # --- CC-206: `edit:` on a protected file is a ticket defect (rc=13) -----------
@@ -273,55 +297,54 @@ def test_edit_path_that_is_absent_is_not_a_defect(repo, monkeypatch):
 # the isolation probe failed, the model deadlocked on the contradiction. The
 # gate refuses that ticket BEFORE any container start.
 
-def test_edit_on_existing_test_is_a_defect(repo, monkeypatch):
+def test_edit_on_existing_test_is_a_defect(repo):
     write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    _, edit_paths, _ = stanok.parse_ticket_header(
+    cfg = Config(repo_root=str(repo))
+    _, edit_paths, _ = ticket.parse_ticket_header(
+        cfg,
         "edit: tests/old_test.py\n"
         "test: tests/new_test.py\n"
     )
     with pytest.raises(ValueError) as exc:
-        stanok.assert_edit_paths_are_not_protected(edit_paths)
+        ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)
     assert "tests/old_test.py" in str(exc.value)
 
 
-def test_edit_on_existing_runsh_is_a_defect(repo, monkeypatch):
+def test_edit_on_existing_runsh_is_a_defect(repo):
     # scripts/run.sh exists (the repo fixture installs the live one) -> it is
     # protected -> the machine may not edit it in place.
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    _, edit_paths, _ = stanok.parse_ticket_header("edit: scripts/run.sh\n")
+    cfg = Config(repo_root=str(repo))
+    _, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
     with pytest.raises(ValueError) as exc:
-        stanok.assert_edit_paths_are_not_protected(edit_paths)
+        ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)
     assert "scripts/run.sh" in str(exc.value)
 
 
-def test_edit_on_absent_runsh_is_legal_bootstrap(repo, monkeypatch):
+def test_edit_on_absent_runsh_is_legal_bootstrap(repo):
     # The bootstrap direction stays legal: an ABSENT scripts/run.sh is not in
     # _protected_files(), so `edit: scripts/run.sh` is not refused (the
     # machine may create it).
     (repo / "scripts" / "run.sh").unlink()
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    _, edit_paths, _ = stanok.parse_ticket_header("edit: scripts/run.sh\n")
-    stanok.assert_edit_paths_are_not_protected(edit_paths)  # no raise
+    cfg = Config(repo_root=str(repo))
+    _, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
+    ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)  # no raise
 
 
-def test_edit_on_existing_src_file_is_legal(repo, monkeypatch):
+def test_edit_on_existing_src_file_is_legal(repo):
     # src/ is not protected: an in-place edit of implementation code is the
     # normal case and must stay legal.
     write(repo / "src" / "mod.py", "x = 1\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    _, edit_paths, _ = stanok.parse_ticket_header("edit: src/mod.py\n")
-    stanok.assert_edit_paths_are_not_protected(edit_paths)  # no raise
+    cfg = Config(repo_root=str(repo))
+    _, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: src/mod.py\n")
+    ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)  # no raise
 
 
-def test_cmd_run_gate_order_rejects_before_any_workspace_mutation(repo, monkeypatch):
+def test_cmd_run_gate_order_rejects_before_any_workspace_mutation(repo):
     # The gate is wired into cmd_run's existing validation try-block: a ticket
     # with `edit: tests/...` returns rc=13 without touching the workspace.
     write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    declared, edit_paths, _ = stanok.parse_ticket_header(
-        "edit: tests/old_test.py\n"
-    )
-    stanok.assert_create_paths_are_new(declared, edit_paths)  # CC-133: no raise
+    cfg = Config(repo_root=str(repo))
+    declared, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: tests/old_test.py\n")
+    ticket.assert_create_paths_are_new(cfg, declared, edit_paths)  # CC-133: no raise
     with pytest.raises(ValueError):
-        stanok.assert_edit_paths_are_not_protected(edit_paths)
+        ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)

@@ -6,11 +6,11 @@ in-container Runner shared a writable verdict dir with the host. Now:
   - `sandbox.WRITABLE_ZONES` = the 4 project zones (no "evidence");
     evidence/ is visible read-only through the repo :ro mount, so a write
     from inside the container is an EROFS denial, not a missing path.
-  - `label_paths()` resolves BOTH dirs into the rw LOG_DIR/<label> when
+  - `Config.label_paths()` resolves BOTH dirs into the rw log_dir/<label> when
     STANOK_IN_CONTAINER=1, so every in-container writer (summary.json,
     launcher.stdout.log, the .running marker) lands somewhere writable.
-  - `_publish_evidence()` copies the verdict into evidence/<label> on the
-    HOST, after the container exits.
+  - `summary._publish_evidence()` copies the verdict into evidence/<label> on
+    the HOST, after the container exits.
 
 CC-135 (T4) landed after this file: `sandbox_argv` no longer mounts the zones
 rw wholesale — the caller passes per-ticket `rw_paths` and the default is
@@ -31,17 +31,16 @@ LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
 import sandbox  # noqa: E402
-import stanok  # noqa: E402
+import summary  # noqa: E402
+from config import Config  # noqa: E402
 
 
-def _host_paths(tmp_path, monkeypatch, label="cc134"):
+def _host_paths(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     log = tmp_path / "logs"
     log.mkdir()
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
-    monkeypatch.setattr(stanok, "LOG_DIR", str(log))
-    return repo, log
+    return repo, log, Config(repo_root=str(repo), log_dir=str(log))
 
 
 def test_evidence_is_not_a_writable_zone():
@@ -77,27 +76,27 @@ def test_sandbox_argv_mounts_evidence_read_only(tmp_path):
 
 
 def test_label_paths_container_writes_into_log_dir(tmp_path, monkeypatch):
-    repo, log = _host_paths(tmp_path, monkeypatch)
+    repo, log, cfg = _host_paths(tmp_path)
     monkeypatch.delenv("STANOK_IN_CONTAINER", raising=False)
-    evidence, live = stanok.label_paths("run1")
+    evidence, live = cfg.label_paths("run1")
     assert evidence == str(repo / "evidence" / "run1")
     assert live == str(log / "run1")
 
     monkeypatch.setenv("STANOK_IN_CONTAINER", "1")
-    evidence, live = stanok.label_paths("run1")
+    evidence, live = cfg.label_paths("run1")
     assert evidence == str(log / "run1")
     assert live == str(log / "run1")
 
 
-def test_publish_evidence_copies_the_verdict(tmp_path, monkeypatch):
-    repo, log = _host_paths(tmp_path, monkeypatch)
+def test_publish_evidence_copies_the_verdict(tmp_path):
+    repo, log, cfg = _host_paths(tmp_path)
     container_dir = log / "run1"
     container_dir.mkdir()
     (container_dir / "summary.json").write_text('{"rc": 0}', encoding="utf-8")
     (container_dir / "launcher.stdout.log").write_text("log\n", encoding="utf-8")
     (container_dir / "session-x.jsonl").write_text("{}\n", encoding="utf-8")
 
-    stanok._publish_evidence("run1", 0)
+    summary._publish_evidence(cfg, "run1", 0)
 
     published = repo / "evidence" / "run1"
     assert (published / "summary.json").read_text(encoding="utf-8") == '{"rc": 0}'
@@ -106,9 +105,9 @@ def test_publish_evidence_copies_the_verdict(tmp_path, monkeypatch):
     assert not (published / "session-x.jsonl").exists()
 
 
-def test_publish_evidence_absent_is_a_noop(tmp_path, monkeypatch):
-    repo, _ = _host_paths(tmp_path, monkeypatch)
-    stanok._publish_evidence("never-started", 0)
+def test_publish_evidence_absent_is_a_noop(tmp_path):
+    repo, _, cfg = _host_paths(tmp_path)
+    summary._publish_evidence(cfg, "never-started", 0)
     assert not (repo / "evidence").exists()
 
 

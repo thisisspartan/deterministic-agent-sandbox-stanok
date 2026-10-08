@@ -15,27 +15,27 @@ from pathlib import Path
 LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
-import stanok  # noqa: E402
+import verify  # noqa: E402
+from config import Config  # noqa: E402
 
 from conftest import repo, write
 
 STUB_HUNG = "#!/usr/bin/env bash\necho stub-hung\nexit 124\n"
 
 
-def test_run_suite_tags_rc124_as_timeout(repo, monkeypatch):
+def test_run_suite_tags_rc124_as_timeout(repo):
     # Re-homed from _run_one_test (removed with the rc=2 per-file fallback,
     # PLAN-HYGIENE 2026-10-08): the suite call is the only test executor.
     write(repo / "scripts" / "run.sh", STUB_HUNG)
     write(repo / "tests" / "hang.test.js", "stub")
-    monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
     failures: list[tuple[str, str]] = []
-    stanok._run_suite(failures, ["tests/hang.test.js"])
+    verify._run_suite(Config(repo_root=str(repo)), failures, ["tests/hang.test.js"])
     assert any(name == "(suite)" and msg.startswith("TIMEOUT:")
                and "rc=124" in msg for name, msg in failures), failures
 
 
 def test_fix_prompt_rules_timeout_branch():
-    rules = stanok._fix_prompt_rules(
+    rules = verify._fix_prompt_rules(
         [("tests/hang.test.js", "TIMEOUT: test hung (rc=124) — stub-hung")])
     assert "HUNG" in rules
     assert "NOT a red assertion" in rules
@@ -44,7 +44,7 @@ def test_fix_prompt_rules_timeout_branch():
 
 
 def test_fix_prompt_rules_priority_list_over_timeout():
-    rules = stanok._fix_prompt_rules([
+    rules = verify._fix_prompt_rules([
         ("(list)", "list failed: unclaimed test-like file"),
         ("tests/hang.test.js", "TIMEOUT: test hung (rc=124) — stub-hung"),
     ])
@@ -54,7 +54,7 @@ def test_fix_prompt_rules_priority_list_over_timeout():
 
 
 def test_fix_prompt_rules_generic_unchanged():
-    rules = stanok._fix_prompt_rules(
+    rules = verify._fix_prompt_rules(
         [("tests/a.test.js", "FAIL: assertion error")])
     assert "EXCLUSIVELY in the module implementations" in rules
     assert "HUNG" not in rules

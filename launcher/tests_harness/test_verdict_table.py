@@ -15,10 +15,13 @@ LAUNCHER_DIR = Path(__file__).resolve().parents[1]
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
 import summary  # noqa: E402
+from config import Config  # noqa: E402
 
 
 def _probe(job):
-    return summary.build_summary(job, 0)["probe_result"]
+    # build_summary needs a Config only for the provenance git call; the
+    # verdict table itself is cfg-independent.
+    return summary.build_summary(Config(), job, 0)["probe_result"]
 
 
 def test_clean_first():
