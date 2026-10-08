@@ -96,10 +96,13 @@ def _rotate_stale_summary(label: str) -> None:
 
 
 def _status_fields(rc: int, verifier: str, turns: int) -> str:
-    """RC_TABLE — single source of probe_result, derived from
+    """RC_TABLE — the derived fallback of decide(): probe_result from
     (rc, verifier, turns). A new outcome = one row here.
     Fail-closed: only rc==0 AND verifier=="PASS" is a pass; everything
-    else is a defect (no PASS-on-FAIL)."""
+    else is a defect (no PASS-on-FAIL).
+    Never make this a pure rc->fields table: rc=1 is polysemous
+    (NO-OP-PASS vs exhausted-retries) — the disambiguation is the
+    session/host override, applied by decide(), not here."""
     if rc == 0 and verifier == "PASS":
         return "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
     if rc == 16:
@@ -109,20 +112,26 @@ def _status_fields(rc: int, verifier: str, turns: int) -> str:
     return "VERIFY-FAIL"
 
 
+def decide(job: dict) -> str:
+    """probe_result with the priority made explicit (red-team review
+    2026-10-08): the session/host override (NO-OP-PASS, LOOP-TRAP) wins;
+    otherwise the derived table. INTEGRITY-FAIL is NOT here — the host sets
+    it after build_summary, in _publish_evidence. test_verdict_table.py
+    pins this priority: any change here must pass it UNCHANGED."""
+    override = job.get("probe_result")
+    if override:
+        return override
+    return _status_fields(job.get("rc", 1), job.get("verifier", "FAIL"),
+                          job.get("turns", 1))
+
+
 def build_summary(job: dict, elapsed_s: int) -> dict:
     """Single source of the summary.json schema (shared by write_summary
     and early_abort)."""
     turns = job.get("turns", 1)
     verifier = job.get("verifier", "FAIL")
     rc = job.get("rc", 1)
-    probe_result = _status_fields(rc, verifier, turns)
-    if job.get("probe_result"):
-        probe_result = job["probe_result"]
-        # rc=1 is polysemous: NO-OP-PASS vs exhausted-retries. Disambiguate by
-        # probe_result, NOT rc — the rc->fields table cannot express two field
-        # sets for one rc, so _status_fields is not a pure function of rc (the
-        # probe_result override above already broke that); do not "restore" a
-        # pure rc->fields table.
+    probe_result = decide(job)
 
     per_turn = job.get("turn_telemetry", [])
     inference_telemetry = {
