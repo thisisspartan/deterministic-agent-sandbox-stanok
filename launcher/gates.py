@@ -143,12 +143,10 @@ def zone_symlink_gate(cfg) -> list[str]:
 
     Returns the problem list (empty = OK); each problem names the path, its
     target and the fix — an accidental operator-side symlink must come with
-    an actionable message. Fail-closed: a scan error is a problem."""
-    try:
-        links = zone_symlinks(cfg)
-    except OSError as e:
-        log(f"ZONE-SYMLINK: scan failed: {e} — fail-closed")
-        return [f"zone scan failed: {e}"]
+    an actionable message. A scan error RAISES: a broken filesystem is not the
+    ticket's fault, the caller maps it to the infrastructure rc (ENV-FAIL,
+    rc=16), not to rc=13 (operator review 2026-10-09)."""
+    links = zone_symlinks(cfg)
     problems: list[str] = []
     for rel in links:
         target = os.readlink(os.path.join(cfg.repo_root, rel))

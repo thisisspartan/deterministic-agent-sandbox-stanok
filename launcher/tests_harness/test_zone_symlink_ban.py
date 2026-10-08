@@ -32,14 +32,20 @@ Tests:
   9  post-turn: link present in the baseline snapshot -> no violation
  10  post-turn: clean -> no violation
  11  wiring: _post_turn_decision runs the scan and returns the forced rc=1
+ 12  hard links: ln() from a zone to a repo file fails in Docker (EXDEV) —
+     the scanner does not look for hard links because they cannot escape a
+     zone: base repo :ro + per-zone rw binds are separate mounts
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_zone_symlink_ban.py -q
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from launcher import gates, session, verify
 from launcher.config import Config
@@ -196,8 +202,10 @@ def test_post_turn_decision_forces_fail_on_new_symlink(tmp_path, monkeypatch):
     repo, cfg = _repo(tmp_path)
     before = gates.zone_symlinks(cfg)
     (repo / "src" / "link").symlink_to("../launcher/target.txt")
-    # verify_gate is irrelevant here (the forced FAIL must not depend on it);
-    # the test pins the ORDER: the scan runs and feeds the forced-FAIL path.
+    # With the order contract (forced FAIL before verify_gate, operator
+    # review 2026-10-09) verify_gate is never reached — the stub is only a
+    # guard: the test pins that the scan feeds the forced-FAIL path BEFORE
+    # any test execution.
     monkeypatch.setattr(session, "verify_gate", lambda cfg, plan: (True, [], False))
     plan = SessionPlan(declared_paths=(), edit_paths=())
     result = session.TurnResult(usage={}, live_window={}, writes=1, error="",
@@ -208,3 +216,31 @@ def test_post_turn_decision_forces_fail_on_new_symlink(tmp_path, monkeypatch):
     assert rc == 1
     assert job["verifier"] == "FAIL"
     assert any("NEW-SYMLINK: src/link" in msg for _, msg in job["failures"])
+
+
+# --- 12: hard links cannot escape a zone (the scanner's deliberate gap) ---------
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
+def test_docker_hardlink_across_mounts_fails(tmp_path):
+    # The hard-link answer (operator review 2026-10-09): the scanner does NOT
+    # look for hard links, and this test proves why that is safe: the mount
+    # topology (sandbox._mount_specs: base repo :ro, each writable zone a
+    # separate rw bind) makes ln() from a zone to a file outside it cross
+    # mounts -> EXDEV. A hard link inside ONE zone stays inside it. The
+    # conclusion is verified at the Docker layer, not assumed from topology.
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "launcher").mkdir()
+    (repo / "launcher" / "target.txt").write_text("regular file\n")
+    image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
+    proc = subprocess.run(
+        ["docker", "run", "--rm",
+         "--user", f"{os.getuid()}:{os.getgid()}",
+         "-v", f"{repo}:{repo}:ro",
+         "-v", f"{repo}/src:{repo}/src:rw",
+         image, "bash", "-c", f"ln {repo}/launcher/target.txt {repo}/src/hard"],
+        capture_output=True, text=True, timeout=180)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "cross-device" in out.lower(), out
+    assert not (repo / "src" / "hard").exists()

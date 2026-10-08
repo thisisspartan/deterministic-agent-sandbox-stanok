@@ -60,11 +60,18 @@ The image preflight is NOT on this path (doctor-only, CC-106).
      and links under tests/ (host_ro_paths would bind them :ro verbatim and
      Docker resolves them to their targets). An accidental operator-side
      symlink is an operator-side fix, not a ticket defect: the error names the
-     path and the action.
+     path and the action. A SCAN failure raises and maps to rc=16 (ENV-FAIL):
+     a broken filesystem is not the ticket's fault. Hard links need no scan:
+     the base repo is :ro and each zone is a separate rw bind, so `ln()`
+     across the zone boundary is EXDEV (proven by
+     `test_docker_hardlink_across_mounts_fails`); a link inside one zone
+     stays inside it.
   2. POST-TURN — `verify._check_zone_symlinks` from
-     `session._post_turn_decision` (after `_check_contract_lock`): a symlink
-     CREATED in a zone during the run is a contract_lock violation -> the
-     existing forced-FAIL path (CONTRACT-FAIL, no retry). Compared against
+     `session._post_turn_decision` (after `_check_contract_lock`, and the
+     forced FAIL runs BEFORE `verify_gate` — the suite never executes on a
+     tree already declared tampered): a symlink CREATED in a zone during the
+     run is a contract_lock violation -> the existing forced-FAIL path
+     (CONTRACT-FAIL, no retry). Compared against
      the session-start snapshot, NOT the ticket — a ticket never declares
      arbitrary links. Tests: `launcher/tests_harness/test_zone_symlink_ban.py`
      (the two former GAP tests in test_ticket_zone.py are green with the ban).

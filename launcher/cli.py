@@ -589,7 +589,11 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
     # (the declared-path rule inspects only declared paths). The post-turn
     # counterpart is verify._check_zone_symlinks (CONTRACT-FAIL). The abort
     # message names each path, its target and the fix (CC-157-style).
-    zone_links = zone_symlink_gate(cfg)
+    try:
+        zone_links = zone_symlink_gate(cfg)
+    except OSError as e:
+        # A broken filesystem is not the ticket's fault: infrastructure rc.
+        return (ExitCode.ENV_FAIL, f"ERROR: zone-symlink scan failed (rc=16): {e}")
     if zone_links:
         return (ExitCode.TICKET, "ERROR: symlink in a writable zone (rc=13): "
                 + "; ".join(zone_links))

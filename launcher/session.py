@@ -447,8 +447,8 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
     code; rc is None -> continue the loop with next_prompt ("" on retry
     exhaustion). The order below is the verdict contract (do not reorder):
     dead-session stop -> contract_lock diff (protected files + zone symlinks)
-    -> observability warnings -> verify_gate -> ENV-FAIL stop ->
-    contract_lock forced FAIL -> NO-OP/PASS verdict -> FAIL fix prompt.
+    -> observability warnings -> contract_lock forced FAIL -> verify_gate ->
+    ENV-FAIL stop -> NO-OP/PASS verdict -> FAIL fix prompt.
     """
     # A turn that ended with an SDK API error (e.g. "API Error: terminated" —
     # the model server dropped the connection) leaves the session dead:
@@ -473,6 +473,14 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
 
     _observability_warnings(job, turn, inp, live_context)
 
+    # Fail-closed on contract_lock (W2.5 + P2): a tampered tree is decided
+    # BEFORE the suite runs — the tests must not execute on a tree already
+    # declared tampered (operator review 2026-10-09; the old placement after
+    # verify_gate only overwrote the verdict after burning the suite).
+    forced = _contract_lock_forced_fail(job, turn)
+    if forced is not None:
+        return forced, ""
+
     verify_ok, failures, env_fail = verify_gate(cfg, plan)
 
     if env_fail:
@@ -488,14 +496,6 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
         job["failures"] = failures
         job["turns"] = turn
         return int(ExitCode.ENV_FAIL), ""
-
-    # Fail-closed on contract_lock (W2.5 + P2): a PASS computed
-    # against tampered tests is not a PASS. Checked after env_fail
-    # (an unavailable runner is an infrastructure defect, rc=16,
-    # and takes precedence over a ticket defect).
-    forced = _contract_lock_forced_fail(job, turn)
-    if forced is not None:
-        return forced, ""
 
     if verify_ok:
         # NO-OP assert (W2.4): a turn-1 pass with zero Write/Edit
