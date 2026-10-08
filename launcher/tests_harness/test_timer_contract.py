@@ -10,16 +10,12 @@ far below the cap. A silent drift of either constant (e.g. "fixing" the
 mismatch by raising the cap) must fail this test and force an explicit
 decision together with the protocol text.
 """
-import sys
 from pathlib import Path
 
 import pytest
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import cli  # noqa: E402
-from config import Config  # noqa: E402
+from launcher import cli
+from launcher.config import Config
 
 # from_env() replicates the former hub env logic (STANOK_REPO included), so
 # the protocol path and the timer values resolve exactly as before C.

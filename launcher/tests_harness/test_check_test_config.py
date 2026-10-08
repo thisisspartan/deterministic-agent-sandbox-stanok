@@ -35,13 +35,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from launcher import gates
+from launcher.config import Config
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER_DIR = REPO_ROOT / "launcher"
-
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import gates  # noqa: E402
-from config import Config  # noqa: E402
 
 FORBIDDEN = ("conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")
 

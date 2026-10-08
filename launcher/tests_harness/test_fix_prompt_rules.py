@@ -9,14 +9,8 @@ Rule priority in _fix_prompt_rules: list-fail > timeout > no-tests > generic.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_fix_prompt_rules.py -q
 """
-import sys
-from pathlib import Path
-
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import verify  # noqa: E402
-from config import Config  # noqa: E402
+from launcher import verify
+from launcher.config import Config
 
 from conftest import repo, write
 

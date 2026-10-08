@@ -33,20 +33,11 @@ from the passed-in RunState.
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_session_plan.py -q
 """
 import dataclasses
-import sys
-from pathlib import Path
 
 import pytest
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import gates  # noqa: E402
-import sandbox  # noqa: E402
-import stanok  # noqa: E402
-import ticket  # noqa: E402
-import verify  # noqa: E402
-from config import Config, RunState  # noqa: E402
+from launcher import gates, sandbox, stanok, ticket, verify
+from launcher.config import Config, RunState
 
 from conftest import repo, write
 

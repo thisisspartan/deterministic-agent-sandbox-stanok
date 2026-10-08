@@ -22,11 +22,19 @@ bare `python3` the container needs.
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# ARCH-REVIEW A: make the `launcher` package importable from the harness —
+# tests import the production modules as `launcher.*`, the same instances the
+# CLI uses (patching a test's `launcher.gates` is what `launcher.cli` sees).
+# The bootstrap lives here; no test file carries its own sys.path.insert.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 RUNSH = Path(os.environ.get(
     "RUNSH_UNDER_TEST", REPO_ROOT / "scripts" / "run.sh"))
 # CC-156: host-side interpreter pin (pytest 8.3.3, image parity). Absent

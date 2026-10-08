@@ -16,9 +16,9 @@ import os
 import signal
 import time
 import uuid
-from stanok import ExitCode, log
-from gates import context_rot_threshold
-from verify import _check_contract_lock, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
+from launcher.stanok import ExitCode, log
+from launcher.gates import context_rot_threshold
+from launcher.verify import _check_contract_lock, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
 
 
 def _safe_json_default(obj):

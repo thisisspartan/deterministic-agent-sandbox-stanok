@@ -5,7 +5,8 @@ the sandbox supervision and the background self-spawn (--follow, CC-140).
 main() builds the Config ONCE (Config.from_env) and threads it explicitly;
 per-run mutable state is a RunState built from cfg.label_paths (C). `import
 stanok` stays only for the logging sink (stanok._stdout_log_f) and the child
-self-spawn path (stanok.__file__).
+self-spawn path (stanok.__file__) — imported as `launcher.stanok`, the one
+instance every consumer shares (ARCH-REVIEW A).
 """
 
 import argparse
@@ -19,18 +20,17 @@ import signal
 import subprocess
 import sys
 import time
-import sandbox
-import stanok
-from stanok import ExitCode, SessionPlan, log
-from config import Config, RunState
-from gates import (
+from launcher import sandbox, stanok
+from launcher.stanok import ExitCode, SessionPlan, log
+from launcher.config import Config, RunState
+from launcher.gates import (
     check_test_config, dirty_tree_gate, hidden_files_gate, preflight_server,
     root_refusal, sandbox_config_gate, validate_label,
 )
-from opik import _opik_trace_count
-from session import _install_signal_handlers, run_continuous_session
-from summary import _publish_evidence, _rotate_stale_summary, build_summary, write_summary
-from ticket import (
+from launcher.opik import _opik_trace_count
+from launcher.session import _install_signal_handlers, run_continuous_session
+from launcher.summary import _publish_evidence, _rotate_stale_summary, build_summary, write_summary
+from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
     host_ro_paths, host_rw_paths, parse_ticket_header, prepare_workspace,
 )

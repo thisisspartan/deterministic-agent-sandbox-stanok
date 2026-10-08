@@ -29,12 +29,10 @@ import sys
 import types
 from pathlib import Path
 
+from launcher import cli
+from launcher.config import Config
+
 LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import cli  # noqa: E402
-from config import Config  # noqa: E402
 
 
 def _host_cfg(tmp_path, monkeypatch, label="run1"):

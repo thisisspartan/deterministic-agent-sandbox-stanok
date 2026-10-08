@@ -24,7 +24,10 @@ What remains here: the rc namespace (ExitCode), the file-policy object
 file handle opened by cli.cmd_run, not configuration, so it stays a module
 global by design. The PEP 562 facade is gone: callers import the functional
 submodules (gates, ticket, verify, session, summary, opik) directly. Running
-this file directly enters the CLI (cli.main()).
+this file directly enters the CLI: the __main__ block is a thin shell — it
+puts the repo root on sys.path and calls launcher.cli.main(), so the three
+script-style call sites (launch.sh, the container argv, the background
+self-spawn) stay unchanged (ARCH-REVIEW A).
 """
 
 import dataclasses
@@ -100,5 +103,15 @@ def log(msg: str = "") -> None:
 
 
 if __name__ == "__main__":
-    import cli
-    raise SystemExit(cli.main())
+    # Thin entry shell (ARCH-REVIEW A): script-style invocation
+    # (`python3 launcher/stanok.py ...`) keeps sys.path[0] = launcher/, which
+    # is NOT enough for the package imports — add the repo root, then run the
+    # package CLI. All production code runs through `launcher.*` modules.
+    import os
+    import sys
+
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    from launcher.cli import main
+    raise SystemExit(main())
