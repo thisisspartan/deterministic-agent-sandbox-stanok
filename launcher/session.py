@@ -272,6 +272,111 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
 _HOOK_TEST_TIMEOUT_S = 75  # mirrors the old `timeout 75` in verifier.sh
 
 
+def _resolve_hook_target(cfg, hook_input: dict) -> "str | None":
+    """Resolve a PostToolUse hook_input to a repo-relative tests/ test path,
+    or None when this tool call is not a test-file write we must verify.
+
+    Filters (each was an early `return {}` in the original hook): no
+    file_path; path outside tests/; not an existing file; no scripts/run.sh
+    to run the test with."""
+    tool_input = hook_input.get("tool_input") or {}
+    fp = tool_input.get("file_path")
+    if not fp:
+        return None
+    if not fp.startswith("/"):
+        fp = os.path.join(cfg.repo_root, fp)
+    abs_path = os.path.realpath(fp)
+    tests_dir = os.path.join(cfg.repo_root, "tests")
+    if not abs_path.startswith(tests_dir + os.sep):
+        return None
+    if not os.path.isfile(abs_path):
+        return None
+    if not os.path.isfile(os.path.join(cfg.repo_root, "scripts", "run.sh")):
+        return None
+    return os.path.relpath(abs_path, cfg.repo_root)
+
+
+async def _run_hook_test(cfg, rel: str) -> tuple[int, bytes]:
+    """Run `scripts/run.sh test <rel>` under the hook backstop timeout.
+
+    Returns (rc, output). rc=124 on timeout (the hook's own backstop).
+    Read into a shared list: a cancelled wait_for discards the read task's
+    LOCAL state (a communicate() that was cancelled had already consumed the
+    pre-kill bytes into its own locals — they were lost). Chunks delivered
+    before the deadline survive in `chunks` (bug 6: the timeout message must
+    show what the test printed before it hung)."""
+    run_sh = os.path.join(cfg.repo_root, "scripts", "run.sh")
+    proc = await asyncio.create_subprocess_exec(
+        "bash", run_sh, "test", rel,
+        cwd=cfg.repo_root,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    chunks: list[bytes] = []
+
+    async def _drain() -> None:
+        while True:
+            c = await proc.stdout.read(65536)
+            if not c:
+                break
+            chunks.append(c)
+
+    try:
+        await asyncio.wait_for(_drain(), timeout=_HOOK_TEST_TIMEOUT_S)
+        await proc.wait()  # pipe EOF can arrive before the exit status
+        rc = proc.returncode
+    except asyncio.TimeoutError:
+        proc.kill()
+        await _drain()
+        rc = 124
+    return rc, b"".join(chunks)
+
+
+def _hook_verdict(rel: str, rc: int, out: bytes) -> dict:
+    """Map a hook-test result to the hook output ({} = stay silent).
+
+    rc=0: GREEN (implementation exists) — stay silent.
+    rc=2: runner refused the path (not a test in its terms) — not our concern.
+    rc=6: ENV-FAIL (runner unavailable in the image) — an environment
+          failure, NOT a red test; emitting RED here is what burned a
+          whole turn on CC-081 ("fix" the environment from src/).
+    rc=124: the test HUNG (run.sh's 60 s runner timeout, or this hook's own
+          backstop) — not a red assertion. "Implement src/ to make it GREEN"
+          here is a retry-loop DoS: the model iterates on src/, the test
+          hangs again, the hook fires again. Name the failure mode (hang)
+          and where to look instead."""
+    if rc in (0, 2, 6):
+        if rc == 6:
+            log(f"VERIFIER HOOK: ENV-FAIL ({rel} rc=6) — runner unavailable, no RED")
+        return {}
+    text = out.decode("utf-8", "replace")
+    tail = "\n".join(text.splitlines()[-25:])
+    if rc == 124:
+        log(f"VERIFIER HOOK: TIMEOUT-ABORT ({rel} rc=124)")
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": (
+                    f"VERIFY: TIMEOUT-ABORT ({rel} rc=124). The test hung "
+                    f"past the runner timeout — this is NOT a red test; "
+                    f"do not iterate on src/ to make it green. Locate and "
+                    f"remove the hang (infinite loop / blocking call) in "
+                    f"the test or in the implementation.\n{tail}"
+                ),
+            }
+        }
+    log(f"VERIFIER HOOK: RED CONFIRMED ({rel} rc={rc})")
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": (
+                f"VERIFY: RED CONFIRMED ({rel} rc={rc}). "
+                f"Implement src/ to make it GREEN.\n{tail}"
+            ),
+        }
+    }
+
+
 async def _verifier_hook(cfg, hook_input: dict, tool_use_id: "str | None", context) -> dict:
     # W8 double-hook diagnosis: log EVERY invocation with its tool_use_id.
     # After a run: grep 'HOOK-CALL' <launcher log> | awk id | sort | uniq -d —
@@ -280,91 +385,11 @@ async def _verifier_hook(cfg, hook_input: dict, tool_use_id: "str | None", conte
     _ti = hook_input.get("tool_input") or {}
     log(f"HOOK-CALL id={tool_use_id} file={_ti.get('file_path')}")
     try:
-        tool_input = hook_input.get("tool_input") or {}
-        fp = tool_input.get("file_path")
-        if not fp:
+        rel = _resolve_hook_target(cfg, hook_input)
+        if rel is None:
             return {}
-        if not fp.startswith("/"):
-            fp = os.path.join(cfg.repo_root, fp)
-        abs_path = os.path.realpath(fp)
-        tests_dir = os.path.join(cfg.repo_root, "tests")
-        if not abs_path.startswith(tests_dir + os.sep):
-            return {}
-        if not os.path.isfile(abs_path):
-            return {}
-        run_sh = os.path.join(cfg.repo_root, "scripts", "run.sh")
-        if not os.path.isfile(run_sh):
-            return {}
-        rel = os.path.relpath(abs_path, cfg.repo_root)
-        proc = await asyncio.create_subprocess_exec(
-            "bash", run_sh, "test", rel,
-            cwd=cfg.repo_root,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        # Read into a shared list: a cancelled wait_for discards the read
-        # task's LOCAL state (a communicate() that was cancelled had already
-        # consumed the pre-kill bytes into its own locals — they were lost).
-        # Chunks delivered before the deadline survive in `chunks` (bug 6:
-        # the timeout message must show what the test printed before it hung).
-        chunks: list[bytes] = []
-
-        async def _drain() -> None:
-            while True:
-                c = await proc.stdout.read(65536)
-                if not c:
-                    break
-                chunks.append(c)
-
-        try:
-            await asyncio.wait_for(_drain(), timeout=_HOOK_TEST_TIMEOUT_S)
-            await proc.wait()  # pipe EOF can arrive before the exit status
-            rc = proc.returncode
-        except asyncio.TimeoutError:
-            proc.kill()
-            await _drain()
-            rc = 124
-        out = b"".join(chunks)
-        # rc=0: GREEN (implementation exists) — stay silent.
-        # rc=2: runner refused the path (not a test in its terms) — not our concern.
-        # rc=6: ENV-FAIL (runner unavailable in the image) — an environment
-        #       failure, NOT a red test; emitting RED here is what burned a
-        #       whole turn on CC-081 ("fix" the environment from src/).
-        if rc in (0, 2, 6):
-            if rc == 6:
-                log(f"VERIFIER HOOK: ENV-FAIL ({rel} rc=6) — runner unavailable, no RED")
-            return {}
-        text = out.decode("utf-8", "replace")
-        tail = "\n".join(text.splitlines()[-25:])
-        if rc == 124:
-            # rc=124: the test HUNG (run.sh's 60 s runner timeout, or this
-            # hook's own backstop) — not a red assertion. "Implement src/ to
-            # make it GREEN" here is a retry-loop DoS: the model iterates on
-            # src/, the test hangs again, the hook fires again. Name the
-            # failure mode (hang) and where to look instead.
-            log(f"VERIFIER HOOK: TIMEOUT-ABORT ({rel} rc=124)")
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": (
-                        f"VERIFY: TIMEOUT-ABORT ({rel} rc=124). The test hung "
-                        f"past the runner timeout — this is NOT a red test; "
-                        f"do not iterate on src/ to make it green. Locate and "
-                        f"remove the hang (infinite loop / blocking call) in "
-                        f"the test or in the implementation.\n{tail}"
-                    ),
-                }
-            }
-        log(f"VERIFIER HOOK: RED CONFIRMED ({rel} rc={rc})")
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": (
-                    f"VERIFY: RED CONFIRMED ({rel} rc={rc}). "
-                    f"Implement src/ to make it GREEN.\n{tail}"
-                ),
-            }
-        }
+        rc, out = await _run_hook_test(cfg, rel)
+        return _hook_verdict(rel, rc, out)
     except Exception as e:
         log(f"VERIFIER HOOK: no-op (error: {e})")
         return {}

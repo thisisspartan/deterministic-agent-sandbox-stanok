@@ -36,6 +36,15 @@ def _mount_specs(repo_root: str, log_dir: str, rw_paths: tuple,
                  ro_paths: tuple) -> list[str]:
     """The `-v` mount set, in order (base :ro first, then the carve-outs).
 
+    rw_paths are repo-relative paths (files or dirs) to carve out rw — the
+    derivation is ticket.declared_carveout (T4, CC-135), the host computes
+    them before `docker run`. ro_paths are the pre-existing contract files
+    (tests/**, scripts/run.sh — ticket.host_ro_paths, T4b/CC-136) re-bound
+    :ro ON TOP of a rw carve-out DIR: Docker layers a file bind over a dir
+    bind by specificity, so a protected file stays immutable while new
+    siblings in that dir stay creatable. Emitted after the rw binds (deeper
+    destination wins).
+
     Writable carve-outs: base repo read-only, the ticket's declared paths
     re-mounted rw on top (Docker layers -v mounts by specificity) — the T3
     experiment (2026-09-24): an existing file bound rw over the ro repo is
@@ -96,20 +105,10 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     inner_argv is the container-side command (e.g.
     ["/usr/bin/python3", "launcher/stanok.py", "run", ...]).
 
-    rw_paths are repo-relative paths (files or dirs) to carve out rw — the
-    derivation is ticket.declared_carveout (T4, CC-135), the host computes them
-    before `docker run`. The default is () = nothing writable: a caller that
-    forgets the carve-outs gets a read-only container, not an open one.
-
-    ro_paths are the pre-existing contract files (tests/**, scripts/run.sh —
-    ticket.host_ro_paths, T4b/CC-136) re-bound :ro ON TOP of a rw carve-out
-    DIR: Docker layers a file bind over a dir bind by specificity, so a
-    protected file stays immutable while new siblings in that dir stay
-    creatable. Emitted after the rw binds (deeper destination wins).
-
-    The base repo mount is ALWAYS :ro (CC-154). Everything writable is an
-    explicit `rw_paths` carve-out, so a caller that forgets them gets a
-    read-only container, never an open one.
+    rw_paths/ro_paths are the per-ticket mount carve-outs derived by the host
+    before `docker run` (ticket.declared_carveout / ticket.host_ro_paths —
+    see _mount_specs). The default is () = nothing writable: a caller that
+    forgets them gets a read-only container, never an open one.
     """
     uid, gid = os.getuid(), os.getgid()
     name = f"stanok-{os.path.basename(repo_root)}-{os.getpid()}"
