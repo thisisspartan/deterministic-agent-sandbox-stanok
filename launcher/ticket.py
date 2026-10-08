@@ -33,6 +33,14 @@ def declared_carveout(cfg, rel: str) -> str | None:
         resolves a bind source's realpath, so a link inside the repo could
         smuggle an outside dir in — run.sh already refuses symlinked test
         paths, SEC-01);
+      - the FIRST component of the path must be one of sandbox.WRITABLE_ZONES
+        (the zone rule, cc217-impl incident): the container can only write
+        under the zones — the repo is `:ro`, the rw carve-outs exist only
+        inside them, settings.stanok.json denies Edit outside them. An
+        existing out-of-zone dir (`launcher/`) made an absent path declarable
+        through the ancestor rule and the machine burned ~141 s discovering
+        the write is physically impossible; refusal is at header parse (rc=13)
+        instead;
       - a bare zone name (`src`, `tests/`) is not a file -> None (quarantine
         would move the whole zone out of the tree);
       - the path exists (file or dir) -> itself: a per-file/per-dir rw bind;
@@ -45,6 +53,8 @@ def declared_carveout(cfg, rel: str) -> str | None:
     if rel.startswith("/") or rel.startswith("./"):
         return None
     if ".." in rel.split("/"):
+        return None
+    if rel.split("/")[0] not in sandbox.WRITABLE_ZONES:
         return None
     if rel.rstrip("/") in sandbox.WRITABLE_ZONES:
         return None
@@ -121,9 +131,12 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
     protected file (pre-existing `tests/**` or an existing `scripts/run.sh`) is
     refused by assert_edit_paths_are_not_protected (rc=13) before the container
     starts — a pre-existing test/entrypoint is immutable to the machine. Paths are validated against the
-    filesystem (declared_carveout: relative, no `..`, no symlink out of the
-    repo, and an existing path or an existing ancestor BELOW the repo root);
-    an undeclarable path raises ValueError (fail-closed, rc=13 upstream).
+    filesystem (declared_carveout: first component is a writable zone,
+    relative, no `..`, no symlink out of the repo, and an existing path or an
+    existing ancestor BELOW the repo root); an undeclarable path raises
+    ValueError (fail-closed, rc=13 upstream). The zone rule does NOT weaken
+    CC-206: `edit:` on a pre-existing protected file stays refused even
+    though its zone is writable — the two checks are complementary.
 
     Returns (declared_paths, edit_paths, reset_none); declared_paths is the
     union (edit paths included), so verify_gate is unchanged."""
@@ -146,11 +159,13 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
     for kind, rel in entries:
         if not _validate_declared_path(cfg, rel):
             raise ValueError(
-                f"invalid declared path {rel!r}: must be relative, contain no "
-                f"'..', resolve inside the repo (no symlink out), and either "
-                f"exist or lie under an existing directory (e.g. under "
-                f"{list(sandbox.WRITABLE_ZONES)}, created in the repo if it is "
-                f"absent) — a NEW top-level file/dir has no safe rw carve-out"
+                f"invalid declared path {rel!r}: the first path component must "
+                f"be a writable zone ({', '.join(sandbox.WRITABLE_ZONES)}) — "
+                f"outside a writable zone the container cannot write there; "
+                f"inside a zone the path must be relative, contain no '..', "
+                f"resolve inside the repo (no symlink out), and either exist "
+                f"or lie under an existing directory — a NEW top-level "
+                f"file/dir has no safe rw carve-out"
             )
         if kind == "edit":
             edit_paths.append(rel)

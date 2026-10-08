@@ -32,6 +32,18 @@ label guard (rc=15) -> role-leak (rc=24) -> ticket resolution (rc=13)
 
 The image preflight is NOT on this path (doctor-only, CC-106).
 
+- Zone rule (cc217-impl incident, 2026-10-09): `ticket.declared_carveout`
+  requires the FIRST component of every declared path (impl/test/docs/edit)
+  to be one of `sandbox.WRITABLE_ZONES` — the container mounts the repo `:ro`
+  and derives rw carve-outs only inside the zones. An existing out-of-zone dir
+  (`launcher/`) made an absent path declarable through the ancestor rule and
+  the machine discovered mid-run that the write is physically impossible
+  (`Edit(launcher/**)` denied in settings.stanok.json; Bash writes to
+  launcher/ from the sandbox do not persist — per-call tmpfs makes them look
+  successful). Refusal is at header parse (rc=13), before any container
+  starts. The zone rule does not weaken CC-206 (`edit:` on a pre-existing
+  protected file stays refused). Tests: `launcher/tests_harness/test_ticket_zone.py`.
+
 CONTAINER (the same `cli.main` re-runs inside the image):
 
 ```
