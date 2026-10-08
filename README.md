@@ -48,6 +48,10 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
   (CC-140/BL-1). Observe a detached launch: `tail -f /tmp/stanok-logs/<label>.launch.log`
 - `--direct` — headless directly, ticket path relative to the repo
 - `--local-retries N` — in-session retry turns on verifier FAIL (default 2)
+- `wait` / `run --follow` exit semantics: `0` on ANY terminal state (done/dead/missing —
+  including a completed-but-failed run), `124` at the 45-min cap. The verdict is read
+  from `evidence/<label>/summary.json`, never from the exit code (decision 2026-10-08:
+  documented as the current contract, not changed; `test_wait_follow` tests this semantics).
 
 ## Structure
 
