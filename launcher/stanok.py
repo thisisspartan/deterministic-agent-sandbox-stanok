@@ -32,7 +32,6 @@ import sys
 import time
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import tomllib  # stdlib TOML (Python 3.11+); CC-151 manifest-driven guard
@@ -99,7 +98,8 @@ _INTERRUPTED_RC = 0
 @dataclasses.dataclass(frozen=True)
 class SessionPlan:
     declared_paths:  tuple[str, ...]  # ticket header: impl:/test:/docs:/edit:
-    git_mode:        str = "ro"       # .git is always RO (I7, verified 2026-09-24)
+    # git_mode was dropped (PLAN-HYGIENE 2026-10-08): .git is always RO (I7)
+    # enforced at the mount layer — a field no consumer read was dead weight.
     # CC-125: `edit:`-declared paths are MODIFIED IN PLACE, not created from
     # scratch — prepare_workspace must not quarantine them. They stay in
     # declared_paths (positive contract + contract_lock exemption).
@@ -458,6 +458,12 @@ def sandbox_config_gate() -> list[str]:
 # window when STANOK_REQUIRED_WINDOW is not set (preflight_server).
 REQUIRED_WINDOW_MARGIN = 2000
 
+# The required window derived from the live server by preflight_server when
+# STANOK_REQUIRED_WINDOW is unset. Single source (PLAN-HYGIENE 2026-10-08):
+# context_rot_threshold reads this instead of a hardcoded default — the old
+# `or 128000` silently overrode the real window when the env was unset.
+_DERIVED_REQUIRED_WINDOW: int | None = None
+
 
 def _required_context_window() -> int | None:
     """Required context window, from the env only: STANOK_REQUIRED_WINDOW
@@ -468,7 +474,9 @@ def _required_context_window() -> int | None:
     required window from the live server (n_ctx - REQUIRED_WINDOW_MARGIN)
     instead of skipping the check — a stale env number must not be the only
     thing standing between a healthy server and rc=20 (incident
-    smoke-cc183-retry1: env 128000 vs server n_ctx 125184)."""
+    smoke-cc183-retry1: env 128000 vs server n_ctx 125184). The derived
+    value is stored in _DERIVED_REQUIRED_WINDOW for the consumers that need
+    a window without re-reading /props."""
     env_val = os.environ.get("STANOK_REQUIRED_WINDOW")
     if env_val:
         try:
@@ -478,17 +486,25 @@ def _required_context_window() -> int | None:
     return None
 
 
-def context_rot_threshold() -> int:
+def context_rot_threshold() -> int | None:
     """Warn threshold for the live context window (tokens on the LAST API call).
-    Env STANOK_CONTEXT_ROT_TOKENS wins; otherwise 80% of the compaction window —
-    the point where attention on a long prompt visibly degrades."""
+    Env STANOK_CONTEXT_ROT_TOKENS wins; otherwise 80% of the required window —
+    the point where attention on a long prompt visibly degrades. The window
+    has ONE source (PLAN-HYGIENE 2026-10-08): env STANOK_REQUIRED_WINDOW, else
+    the value preflight_server derived from the live /props. None when no
+    window is known — the caller skips the WARN rather than inventing a
+    default."""
     env = os.environ.get("STANOK_CONTEXT_ROT_TOKENS")
     if env:
         try:
             return int(env)
         except ValueError:
             log(f"WARN: STANOK_CONTEXT_ROT_TOKENS={env!r} is not an integer; ignoring")
-    window = _required_context_window() or 128000
+    window = _required_context_window()
+    if window is None:
+        window = _DERIVED_REQUIRED_WINDOW
+    if window is None:
+        return None
     return int(window * 0.8)
 
 
@@ -515,6 +531,7 @@ def preflight_server() -> bool:
         log(f"PREFLIGHT: unparseable n_ctx in /props (fail-closed) (rc=20)")
         return False
 
+    global _DERIVED_REQUIRED_WINDOW
     required = _required_context_window()
     if required is None:
         # No hard window in env — derive it from the live server so the check
@@ -523,6 +540,7 @@ def preflight_server() -> bool:
         if required <= 0:
             log(f"PREFLIGHT: server n_ctx={n_ctx} <= margin {REQUIRED_WINDOW_MARGIN} (fail-closed) (rc=20)")
             return False
+        _DERIVED_REQUIRED_WINDOW = required
         log(f"PREFLIGHT: STANOK_REQUIRED_WINDOW unset — derived required window "
             f"{required} (n_ctx {n_ctx} - margin {REQUIRED_WINDOW_MARGIN})")
     if n_ctx < required:
@@ -913,53 +931,22 @@ def _extract_smart_diff(raw_text: str) -> str:
     return res
 
 
-def _run_one_test(rel: str) -> tuple[str, str] | None:
-    """Run one test through the project's declared entrypoint (D3).
-
-    The machine does not own the test invocation: it calls scripts/run.sh,
-    exactly as the model's Bash tool does. Any runner flags (node/--test/...)
-    live inside run.sh, so all call sites agree by construction.
-    """
-    try:
-        p = subprocess.run(["bash", "scripts/run.sh", "test", rel],
-                           cwd=REPO_ROOT, capture_output=True, text=True, timeout=90)
-        if p.returncode == 6:
-            # ENV-FAIL: the runner is unavailable in the image — tagged so
-            # verify_gate can fail-closed WITHOUT a fix prompt (rc=16).
-            raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
-            return (rel, "ENV-FAIL: " + _extract_smart_diff(raw_err))
-        if p.returncode == 124:
-            # The test HUNG (run.sh's 60 s runner timeout). Tagged like
-            # ENV-FAIL so the fix prompt gets the timeout rules, not the
-            # generic "fix src exclusively" block (retry-loop DoS: the model
-            # iterates on src/, the test hangs again, same prompt again).
-            raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
-            return (rel, "TIMEOUT: test hung (rc=124) — " + _extract_smart_diff(raw_err))
-        if p.returncode != 0:
-            raw_err = (p.stderr or "") + "\n" + (p.stdout or "")
-            return (rel, _extract_smart_diff(raw_err))
-    except subprocess.TimeoutExpired:
-        return (rel, "TIMEOUT: test execution exceeded the runner limit")
-    except Exception as e:
-        return (rel, f"EXEC_ERROR: {e}")
-    return None
-
-
 def _run_suite(failures: list[tuple[str, str]], tests: list[str]) -> None:
-    """D4 (CC-149): run the whole suite in ONE `test --all` call instead of
-    N per-file spawns. The suite runs every list-discovered file sequentially
-    with per-file timeouts and `=== <file> ===` headers; rc maps:
+    """D4 (CC-149): run the whole suite in ONE `test --all` call. The suite
+    runs every list-discovered file sequentially with per-file timeouts and
+    `=== <file> ===` headers; rc maps:
       0   -> all pass (no failures appended)
       1   -> a test failed (or unclaimed file) -> one (suite) failure w/ output
-      2   -> run.sh refused `--all` (no suite mode) -> per-file fallback
+      2   -> run.sh REFUSED `--all` -> FAIL (strict contract, PLAN-HYGIENE
+             2026-10-08: `test --all` support is mandatory; the pre-CC-149
+             per-file fallback was removed — an entrypoint without suite mode
+             is a defect, not something to work around)
       6   -> ENV-FAIL (runner unavailable) -> tagged for fail-closed rc=16
       124 -> a file hit the 60 s timeout (suite stopped) -> tagged TIMEOUT
 
     Per-file attribution: the combined output carries `=== <file> ===`
     headers, so the fix-prompt diff shows which file failed; the model can
-    re-run `test <file>` to localize. The pre-CC-149 per-file spawns are kept
-    as the rc=2 fallback so an old entrypoint without suite mode still
-    verifies (and `_run_one_test` stays the per-file primitive).
+    re-run `test <file>` to localize.
     """
     try:
         sp = subprocess.run(["bash", "scripts/run.sh", "test", "--all"],
@@ -984,17 +971,8 @@ def _run_suite(failures: list[tuple[str, str]], tests: list[str]) -> None:
                          "TIMEOUT: suite hit the per-file 60 s timeout "
                          "(rc=124) — " + _extract_smart_diff(raw)))
         return
-    if rc == 2:
-        # run.sh does not support `test --all` (pre-CC-149): fall back to
-        # per-file spawns so an old entrypoint still verifies.
-        with ThreadPoolExecutor(max_workers=min(8, len(tests))) as ex:
-            futures = {ex.submit(_run_one_test, t): t for t in tests}
-            for fut in as_completed(futures):
-                res = fut.result()
-                if res is not None:
-                    failures.append(res)
-        return
-    # rc == 1 (a test failed / unclaimed file) or any other non-zero rc:
+    # rc == 1 (a test failed / unclaimed file), rc == 2 (run.sh refused
+    # `test --all` — strict contract) or any other non-zero rc:
     # surface the suite output so the fix prompt can localize the failure.
     failures.append(("(suite)", _extract_smart_diff(raw)))
 
@@ -1005,9 +983,9 @@ def verify_gate(plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]
 
     Discovery goes through the project entrypoint too (run.sh list), so the
     machine no longer hardcodes the *.test.js convention. Test execution is
-    ONE whole-suite call per turn (`run.sh test --all`, D4/CC-149) instead of
-    N per-file spawns; see `_run_suite` for the rc mapping and the rc=2
-    per-file fallback.
+    ONE whole-suite call per turn (`run.sh test --all`, D4/CC-149); see
+    `_run_suite` for the rc mapping — an entrypoint that refuses `--all`
+    (rc=2) fails the run (strict contract, PLAN-HYGIENE 2026-10-08).
     Returns (ok, failures, env_fail): env_fail is True when any failure is
     an ENV-FAIL (run.sh rc=6, runner unavailable) — an environment defect
     the model cannot fix from src/, so the caller must stop fail-closed
@@ -1236,7 +1214,7 @@ def build_agent_env() -> dict[str, str]:
     is the local API server, which is directly reachable. Native sandbox injects
     its own proxy env into Bash commands when network.allowedDomains is set.
     """
-    return {
+    agent_env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "ANTHROPIC_BASE_URL": SERVER_URL,
         "ANTHROPIC_MODEL": LOCAL_MODEL,
@@ -1244,13 +1222,20 @@ def build_agent_env() -> dict[str, str]:
         "ANTHROPIC_DEFAULT_OPUS_MODEL": LOCAL_MODEL,
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": LOCAL_MODEL,
         "CLAUDE_CODE_SUBAGENT_MODEL": LOCAL_MODEL,
-        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "128000"),
         "API_TIMEOUT_MS": API_TIMEOUT_MS,
         # CC-207: the loop-guard termination-marker channel. The hook writes
         # it at the 5th consecutive identical call; _execute_turn reads it
         # mid-turn. Derived-from-runtime (per-run dir) -> belongs here.
         "STANOK_LOOP_TRAP_FILE": _loop_trap_path(),
     }
+    # PLAN-HYGIENE 2026-10-08: no hardcoded AUTO_COMPACT default (the old
+    # "128000" silently overrode the settings window when the env was unset).
+    # Pass the key through ONLY when the operator exported it (P0-launch.sh
+    # derives it from settings); otherwise omit it — settings.env applies.
+    acw = os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+    if acw:
+        agent_env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = acw
+    return agent_env
 
 
 # ==================================================================================
@@ -1654,7 +1639,7 @@ async def run_continuous_session(job: dict, ticket_prompt: str, max_retries: int
                             f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
 
                 rot_threshold = context_rot_threshold()
-                if live_context > rot_threshold:
+                if rot_threshold is not None and live_context > rot_threshold:
                     log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
                         f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
 
@@ -1927,7 +1912,6 @@ def cmd_run(args) -> int:
     # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
     plan = SessionPlan(
         declared_paths=tuple(declared_paths),
-        git_mode="ro",
         edit_paths=tuple(edit_paths),
     )
 

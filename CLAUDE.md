@@ -52,6 +52,10 @@ scripts/run.sh test --all        # run every registered test file; rc=1 if ANY
 scripts/run.sh smoke <path>      # sanity-load one module; exit 0 = clean
 ```
 
+**`test --all` is mandatory:** the external verifier runs the whole suite with
+`scripts/run.sh test --all` after every turn. An entrypoint that refuses it
+(rc=2) FAILS the run — there is no per-file fallback.
+
 **If `scripts/run.sh` already exists:** use it as-is. Do not rewrite it to make a failing
 test pass — that is the same violation as weakening an assertion in `tests/`.
 

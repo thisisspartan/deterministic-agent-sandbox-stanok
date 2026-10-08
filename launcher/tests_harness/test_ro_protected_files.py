@@ -291,7 +291,7 @@ def test_host_hardlink_escapes_ro_bind_contract_lock_detects(tmp_path, monkeypat
 
     # Detection echelon: the post-turn manifest diff records the violation and
     # the forced-fail turns it into a failed run (rc=1, verifier FAIL).
-    plan = stanok.SessionPlan(declared_paths=(), git_mode="ro", edit_paths=())
+    plan = stanok.SessionPlan(declared_paths=(), edit_paths=())
     job: dict = {}
     stanok._check_contract_lock(before, job, 1, plan)
     assert job["contract_lock_violations"] == ["turn 1: MODIFIED: tests/old_test.py"]

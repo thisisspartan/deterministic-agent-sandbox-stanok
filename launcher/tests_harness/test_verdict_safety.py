@@ -16,7 +16,8 @@ Pins the fail-closed verdict paths in launcher/stanok.py:
      is untouched; absent summary is a no-op
   7  verify_gate suite mode (D4/CC-149): ONE `test --all` call per turn —
      rc=0 pass / rc=1 a (suite) failure / rc=6 ENV-FAIL / rc=124 TIMEOUT /
-     rc=2 (no suite mode) falls back to per-file spawns
+     rc=2 (entrypoint refuses `--all`) is a FAIL — strict contract, the
+     per-file fallback was removed (PLAN-HYGIENE 2026-10-08)
   8  _publish_evidence I5 integrity check: a summary claiming PASS after a
      non-zero container exit, or with an rc field disagreeing with the
      container exit, is rewritten to FAIL + integrity_violation; clean
@@ -185,12 +186,10 @@ def test_rotate_stale_summary_noop_when_absent(tmp_path, monkeypatch):
 
 # --- 7: verify_gate suite mode (D4/CC-149) -------------------------------------
 
-def _suite_repo(base: Path, name: str, all_rc: int, all_out: str,
-                perfile_rc: int = 0) -> Path:
+def _suite_repo(base: Path, name: str, all_rc: int, all_out: str) -> Path:
     """A tmp repo whose stub run.sh:
       - `list` prints tests/t_test.py and exits 0
       - `test --all` cats all.out and exits all_rc
-      - `test <file>` (per-file fallback) exits perfile_rc
     """
     repo = base / name
     (repo / "scripts").mkdir(parents=True)
@@ -205,7 +204,6 @@ def _suite_repo(base: Path, name: str, all_rc: int, all_out: str,
         "  cat all.out\n"
         f"  exit {all_rc}\n"
         "fi\n"
-        f'if [[ "$1" == "test" ]]; then exit {perfile_rc}; fi\n'
         "exit 0\n",
     )
     return repo
@@ -252,17 +250,16 @@ def test_verify_gate_suite_envfail_rc6(tmp_path, monkeypatch):
                for name, msg in failures)
 
 
-def test_verify_gate_suite_rc2_fallback_perfile(tmp_path, monkeypatch):
-    # run.sh has no `--all` (rc=2) -> verify_gate falls back to per-file spawns
-    # and attributes the failure to the file, not (suite).
-    repo = _suite_repo(tmp_path, "suitefallback", all_rc=2, all_out="",
-                       perfile_rc=1)
+def test_verify_gate_suite_rc2_is_fail(tmp_path, monkeypatch):
+    # Strict contract (PLAN-HYGIENE 2026-10-08): an entrypoint that REFUSES
+    # `test --all` (rc=2) fails the run — the pre-CC-149 per-file fallback
+    # was removed; suite-mode support is mandatory (pinned in CLAUDE.md).
+    repo = _suite_repo(tmp_path, "suiterefused", all_rc=2, all_out="refused: no suite mode")
     monkeypatch.setattr(stanok, "REPO_ROOT", str(repo))
     ok, failures, env_fail = stanok.verify_gate(_empty_plan())
     assert ok is False
     assert env_fail is False
-    assert any(name == "tests/t_test.py" for name, _ in failures)
-    assert not any(name == "(suite)" for name, _ in failures)
+    assert any(name == "(suite)" and "refused" in msg for name, msg in failures)
 
 
 # --- 8: _publish_evidence I5 integrity check -----------------------------------
