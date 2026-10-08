@@ -33,7 +33,10 @@ def _tail_output(cfg, raw_text: str) -> str:
 
     b_res = res.encode("utf-8")
     if len(b_res) > cfg.max_test_bytes:
-        res = b_res[:cfg.max_test_bytes].decode("utf-8", errors="ignore") + "\n... [output truncated at the byte limit] ..."
+        res = (
+            b_res[:cfg.max_test_bytes].decode("utf-8", errors="ignore")
+            + "\n... [output truncated at the byte limit] ..."
+        )
     return res
 
 
@@ -146,23 +149,31 @@ def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
     has_no_tests = any(name == "(no tests)" for name, _ in failures)
     if has_list_fail:
         return (
-            "1. The project runner's `list` command failed: tests/ contains a test-like file that no registry line in scripts/run.sh claims.\n"
-            "2. Delete the unclaimed file or move it to tests/fixtures/ (or tests/data/). It is CATEGORICALLY FORBIDDEN to add a registry line to scripts/run.sh to claim it, and to weaken or modify the tests in tests/.\n"
+            "1. The project runner's `list` command failed: tests/ contains a "
+            "test-like file that no registry line in scripts/run.sh claims.\n"
+            "2. Delete the unclaimed file or move it to tests/fixtures/ (or "
+            "tests/data/). It is CATEGORICALLY FORBIDDEN to add a registry "
+            "line to scripts/run.sh to claim it, and to weaken or modify the "
+            "tests in tests/.\n"
             "3. Then re-check with `bash scripts/run.sh list` — it must exit 0."
         )
     if has_timeout_fail:
         return (
-            "1. A test HUNG (rc=124, runner timeout) — this is NOT a red assertion; do not iterate on src/ to make it green.\n"
+            "1. A test HUNG (rc=124, runner timeout) — this is NOT a red "
+            "assertion; do not iterate on src/ to make it green.\n"
             "2. Locate and remove the hang (infinite loop / blocking call) in the test or in the implementation.\n"
             "3. Then re-check with `bash scripts/run.sh test <path>` — it must finish well under the runner timeout."
         )
     if has_no_tests:
         return (
-            "1. There are no test files in the tests/ directory! Create the reference tests strictly per the ticket specification.\n"
+            "1. There are no test files in the tests/ directory! Create the "
+            "reference tests strictly per the ticket specification.\n"
             "2. Then implement the corresponding working module code in the src/ directory."
         )
     return (
-        "1. The tests in tests/ are the reference specification of the ticket. It is CATEGORICALLY FORBIDDEN to delete, modify, or weaken assertions in tests/.\n"
+        "1. The tests in tests/ are the reference specification of the ticket. "
+        "It is CATEGORICALLY FORBIDDEN to delete, modify, or weaken "
+        "assertions in tests/.\n"
         "2. Fixes are made EXCLUSIVELY in the module implementations in the src/ directory.\n"
         "3. Study the diff and stack above, localize the error in src/ and eliminate the root cause of the bug."
     )
