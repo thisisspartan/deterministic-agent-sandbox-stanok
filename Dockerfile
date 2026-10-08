@@ -31,22 +31,20 @@
 # line added here the day a real ticket actually needs it. Do not
 # pre-guess every stack the project might ever use.
 
-FROM debian:bookworm-slim
+# W7 supply-chain pin (same pattern as the uv COPY below): the digest is the
+# manifest-list digest from `docker buildx imagetools inspect
+# debian:bookworm-slim` (2026-10-08) — a tag move on Docker Hub can no
+# longer change what we build FROM. Human-readable tag: debian:bookworm-slim
+# (bookworm, image created 2026-10-05).
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 
 ARG STANOK_UID=10001
 ARG STANOK_GID=10001
-# Pin deliberately. The SDK wheel bundles a second, independently-versioned
-# Claude Code CLI (_bundled/claude); we install from sdist (--no-binary) so
-# the image carries ONLY the *Python SDK* surface stanok.py imports against
-# (ClaudeAgentOptions, ClaudeSDKClient, message types). stanok.py's
-# cli_path resolves `claude` on PATH — inside the container that is the
-# baked-in /usr/local/bin/claude (Node.js + CLI section below); without it
-# the SDK has no bundled fallback and the launch fails closed.
-# Bump it deliberately when you upgrade, not by accident on a rebuild.
-ARG CLAUDE_AGENT_SDK_VERSION=0.2.139
 
-# Image provenance: setup.sh computes sha256(Dockerfile + scripts/run.sh +
-# scripts/stacks/*.toml, sorted) and passes it as --build-arg STANOK_DIGEST.
+# Image provenance: setup.sh computes sha256 over the digest inputs
+# (Dockerfile + scripts/run.sh + scripts/stacks/*.toml sorted + uv.lock —
+# the same list gates.DIGEST_INPUTS declares) and passes it as
+# --build-arg STANOK_DIGEST.
 # Doctor re-computes the same digest via the SAME function (stanok.py
 # preflight_image; CC-106: moved off the launch path — the former blocking
 # rc=25 is freed) and fails closed on a mismatch — an image older than the
@@ -125,20 +123,29 @@ ENV UV_SYSTEM_PYTHON=1 \
     UV_BREAK_SYSTEM_PACKAGES=1
 
 # --- Launcher runtime ---------------------------------------------------
-# --no-binary: build from sdist, NOT the wheel — the wheel ships
-# _bundled/claude (a second CLI, ~300 MB). The sdist build has no _bundled
-# dir; cli_path (stanok.py) resolves `claude` on PATH — inside the
-# container that is the baked-in /usr/local/bin/claude.
+# The image's package set is pinned by uv.lock — the single source: the two
+# direct pins (claude-agent-sdk, pytest) plus their full transitive closure
+# (mcp/anyio/sniffio/...), every package with sha256 hashes, resolved for
+# python 3.11/linux (the image's system python). Bump a dependency by
+# regenerating the lock deliberately:
+#   printf 'claude-agent-sdk==X\npytest==Y\n' | \
+#     uv pip compile - -o uv.lock --python-version 3.11 \
+#       --python-platform linux --generate-hashes
+# uv.lock is a digest input (setup.sh + gates.DIGEST_INPUTS): a lock change
+# moves the image digest, so doctor fails a stale image instead of silently
+# shipping a different package set.
+# --no-binary claude-agent-sdk: install from sdist, NOT the wheel — the
+# wheel ships _bundled/claude (a second CLI, ~300 MB). The sdist build has
+# no _bundled dir; cli_path (stanok.py) resolves `claude` on PATH — inside
+# the container that is the baked-in /usr/local/bin/claude.
 # pytest — the py stack's test-runner in scripts/run.sh is
-# `env PYTHONDONTWRITEBYTECODE=1 uv run --no-project python3 -m pytest -q -p no:cacheprovider`;
-# Python-stack tickets run their suites with it. Pin deliberately (same rule
-# as the SDK): an unpinned install drifts on every rebuild, and a missing
-# pytest in the image is exactly the ENV-FAIL class that run.sh's rc=6 and
-# doctor's image preflight (preflight_image, CC-106 — off the launch path)
-# exist to catch.
-RUN uv pip install --no-binary claude-agent-sdk \
-      "claude-agent-sdk==${CLAUDE_AGENT_SDK_VERSION}" \
-      "pytest==8.3.3"
+# `env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider -o pythonpath=src`;
+# Python-stack tickets run their suites with it. An unpinned install drifts
+# on every rebuild, and a missing pytest in the image is exactly the
+# ENV-FAIL class that run.sh's rc=6 and doctor's image preflight
+# (preflight_image, CC-106 — off the launch path) exist to catch.
+COPY uv.lock /opt/uv.lock
+RUN uv pip install --no-binary claude-agent-sdk -r /opt/uv.lock
 
 # --- Node.js + Claude Code CLI (R4: hermetic image) ------------------------
 # Node: official nodejs.org tarball, extracted over /usr/local (bin/node,

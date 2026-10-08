@@ -8,6 +8,7 @@ by context_rot_threshold); tests_harness monkeypatches this module's functions
 directly — Python resolves module globals at call time, so patching works.
 """
 
+import glob
 import hashlib
 import json
 import os
@@ -338,30 +339,40 @@ def _stack_preflights(cfg) -> list[str]:
     return preflights
 
 
+# The image-defining sources, in the exact order BOTH digest computations
+# concatenate them (modernization batch 2, 2026-10-08): setup.sh bakes
+# sha256 of these into the image LABEL stanok.digest at build; _image_digest()
+# re-computes the same hash in doctor. A glob entry is resolved sorted by
+# filename. uv.lock is an input: a dependency-lock change must move the
+# digest, or a stale image passes the doctor check while carrying a different
+# package set than the tree declares. test_image_digest_inputs.py pins that
+# setup.sh's cat list and this tuple cannot drift.
+DIGEST_INPUTS = ("Dockerfile", "scripts/run.sh", "scripts/stacks/*.toml", "uv.lock")
+
+
 def _image_digest(cfg) -> str:
-    """sha256 over the image-defining sources: Dockerfile + scripts/run.sh
-    + scripts/stacks/*.toml (the STACKS registry, sorted by filename —
-    the same explicit order setup.sh uses at build time). setup.sh bakes
-    this into the image LABEL stanok.digest at build time;
+    """sha256 over DIGEST_INPUTS (the single declared list — see above).
+    setup.sh bakes this into the image LABEL stanok.digest at build time;
     preflight_image() re-computes it in doctor (CC-106: moved off the
     launch path)."""
     h = hashlib.sha256()
-    for rel in ("Dockerfile", "scripts/run.sh"):
-        with open(os.path.join(cfg.repo_root, rel), "rb") as f:
-            h.update(f.read())
-    stacks_dir = os.path.join(cfg.repo_root, "scripts", "stacks")
-    for name in sorted(os.listdir(stacks_dir)):
-        if name.endswith(".toml"):
-            with open(os.path.join(stacks_dir, name), "rb") as f:
+    for pattern in DIGEST_INPUTS:
+        if "*" in pattern:
+            for path in sorted(glob.glob(os.path.join(cfg.repo_root, pattern))):
+                with open(path, "rb") as f:
+                    h.update(f.read())
+        else:
+            with open(os.path.join(cfg.repo_root, pattern), "rb") as f:
                 h.update(f.read())
     return h.hexdigest()
 
 
 def preflight_image(cfg, image: str) -> bool:
     """Host-side image provenance + runner preflight.
-    1. The image LABEL stanok.digest must equal sha256(Dockerfile + run.sh
-       + scripts/stacks/*.toml) — an image older than the Dockerfile or
-       the STACKS registry is caught here, not mid-run.
+    1. The image LABEL stanok.digest must equal sha256 over gates.DIGEST_INPUTS
+       (Dockerfile + run.sh + scripts/stacks/*.toml + uv.lock) — an image
+       older than the Dockerfile, the STACKS registry or the dependency lock
+       is caught here, not mid-run.
     2. Each stack's preflight command must succeed INSIDE the image
        (docker run --rm) — the runner is available where the tests run.
     CC-106: no longer on the launch path (the former blocking rc=25 is

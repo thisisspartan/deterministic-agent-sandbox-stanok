@@ -75,15 +75,15 @@ echo "--- building the machine image (Docker boundary) ---"
 # The .venv above is only the HOST-side python for the Runner's host-side
 # gates; the run itself executes in the image (launcher/sandbox.py runs the
 # image system python, which carries the SDK).
-# Image provenance: bake sha256(Dockerfile + scripts/run.sh +
-# scripts/stacks/*.toml — the STACKS registry) into the image LABEL
-# stanok.digest. The manifests are concatenated in EXPLICIT filename order
-# (ls | sort — no reliance on shell-glob order), the same order
-# _image_digest() uses in doctor. Doctor re-computes this digest
-# (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches)
-# and fails if the image no longer matches the tree (CC-106: the check moved
-# out of the launch path).
-STANOK_DIGEST="$(cat "$DIR/Dockerfile" "$DIR/scripts/run.sh" $(ls "$DIR"/scripts/stacks/*.toml | sort) | sha256sum | cut -d' ' -f1)"
+# Image provenance: bake sha256 over the digest inputs (Dockerfile +
+# scripts/run.sh + scripts/stacks/*.toml — the STACKS registry + uv.lock —
+# the image dependency lock) into the image LABEL stanok.digest. The inputs
+# are concatenated in EXPLICIT filename order (ls | sort — no reliance on
+# shell-glob order), the same list and order gates.DIGEST_INPUTS declares in
+# doctor: test_image_digest_inputs.py pins the two lists equal,
+# test_docker_image_digest_matches fails a stale image (CC-106: the check
+# lives in doctor, not the launch path).
+STANOK_DIGEST="$(cat "$DIR/Dockerfile" "$DIR/scripts/run.sh" $(ls "$DIR"/scripts/stacks/*.toml | sort) "$DIR/uv.lock" | sha256sum | cut -d' ' -f1)"
 docker build -t "${STANOK_DOCKER_IMAGE:-stanok-machine:latest}" -f "$DIR/Dockerfile" "$DIR" \
     --build-arg STANOK_DIGEST="$STANOK_DIGEST"
 
