@@ -181,6 +181,41 @@ def test_zone_membership_is_exact_not_prefix(repo):
         ticket.parse_ticket_header(_cfg(repo), "impl: srcfoo/x.py\n")
 
 
+def test_dangling_symlink_component_is_refused(repo):
+    # islink fires on dangling links too — the target need not exist.
+    (repo / "launcher").mkdir()
+    (repo / "src" / "dangling").symlink_to("../launcher/missing")
+    with pytest.raises(ValueError):
+        ticket.parse_ticket_header(_cfg(repo), "impl: src/dangling/x.py\n")
+
+
+# --- gaps: NOT covered by the declared-path rule, closed by the launch ban -----
+
+def test_existing_undeclared_symlink_not_blocked_yet_GAP(repo):
+    # GAP, documented on purpose: declared_carveout inspects only DECLARED
+    # paths. A symlink already in the zone, not declared by the ticket, does
+    # not block the header today. Do not read the zone tests as covering it —
+    # the launch-time ban (next commit) closes this; flip this test to expect
+    # refusal when the ban lands.
+    (repo / "launcher").mkdir()
+    (repo / "src" / "link").symlink_to("../launcher")
+    declared, _, _ = ticket.parse_ticket_header(_cfg(repo), "impl: src/mod.py\n")
+    assert declared == ["src/mod.py"]
+
+
+def test_protected_symlink_flows_into_host_ro_paths_verbatim_GAP(repo):
+    # GAP, closed by the launch-time ban: a symlink under tests/ is listed by
+    # _protected_files (os.walk sees it as a file; the manifest hash is the
+    # TARGET's content) and handed to host_ro_paths verbatim — Docker
+    # resolves a bind source's realpath, so the :ro bind lands on the target.
+    (repo / "launcher").mkdir()
+    write(repo / "launcher" / "target.py", "x = 1\n")
+    (repo / "tests" / "link_test.py").symlink_to("../launcher/target.py")
+    cfg = _cfg(repo)
+    ro = ticket.host_ro_paths(cfg, ("tests",))
+    assert "tests/link_test.py" in ro
+
+
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
 def test_docker_bind_resolves_symlink_source(repo):
     # The threat proven at the Docker layer (why the string rule is not
