@@ -138,6 +138,7 @@ def test_header_rejects_undeclarable_path():
     with pytest.raises(ValueError) as exc:
         ticket.parse_ticket_header(Config(), "impl: brand_new_top_level.py\n")
     assert "brand_new_top_level.py" in str(exc.value)
+    assert "writable zone" in str(exc.value).lower()
 
 
 def test_plan_carries_no_mount_field():
