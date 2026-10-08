@@ -53,6 +53,22 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
   from `evidence/<label>/summary.json`, never from the exit code (decision 2026-10-08:
   documented as the current contract, not changed; `test_wait_follow` tests this semantics).
 
+## Triage and environment notes (verified)
+
+- Triage order on a failed run: `evidence/<label>/summary.json` (`rc`, `verifier`,
+  `failures`/`errors`) -> the rc namespace (`ExitCode` docstring in `launcher/stanok.py`,
+  gate order in `launcher/cli.py main()`) -> `/tmp/stanok-logs/<label>.launch.log`
+  (read it only when `summary.json` is missing — an aborted run).
+- Running as root is refused by a gate (`launcher/gates.py`, exit 1) — use a regular user.
+- Docker-dependent doctor tests skip with reason `docker not available` when the host
+  has no Docker — expected on a laptop, not a defect.
+- The `jq` stack needs `jq` on the host for the hermetic tests; without it the
+  `run.sh` preflight returns ENV-FAIL (rc=6) — an environment defect, not a red test.
+- In a clone without the supervisor zone (no `CONTEXT.md` / `specs/`), the tests that
+  require those files skip with an explicit reason — nothing to do.
+- rc=22 (dirty tree): commit or stash the changes in this repo before a launch —
+  the gate is fail-closed by design.
+
 ## Structure
 
 ```
