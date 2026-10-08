@@ -483,14 +483,12 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
     return None, ""
 
 
-async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
-                                max_retries: int, plan: "SessionPlan") -> int:
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
+def _agent_options(cfg, run_state):
+    """The ClaudeAgentOptions for one machine session (R3/R1: tool surface,
+    in-process verifier hook, static machine settings)."""
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
-    local_run_id = str(uuid.uuid4())[:8]
-    stream_out_path = os.path.join(run_state.live_dir, f"session-{local_run_id}.jsonl")
-
-    options = ClaudeAgentOptions(
+    return ClaudeAgentOptions(
         cli_path=cfg.claude_bin,
         cwd=cfg.repo_root,
         setting_sources=["project"],
@@ -514,6 +512,107 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
         model=cfg.model,
         env=build_agent_env(cfg, run_state),
     )
+
+
+async def _interrupt_client(client) -> None:
+    """Best-effort interrupt of the live SDK client; an interrupt error is a
+    WARN, never a new failure (the run is already being failed closed)."""
+    try:
+        await client.interrupt()
+    except Exception as e:
+        log(f"WARN: client.interrupt() finished with an error: {e}")
+
+
+async def _drain_turn_task(turn_task) -> None:
+    """Post-timeout cleanup of the shielded turn task: give it 5 s to finish
+    on its own (the interrupt may end it), then cancel and collect."""
+    try:
+        await asyncio.wait_for(asyncio.shield(turn_task), timeout=5.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+    if not turn_task.done():
+        turn_task.cancel()
+    await asyncio.gather(turn_task, return_exceptions=True)
+
+
+async def _turn_timeout_verdict(client, turn_task, job: dict, turn: int,
+                               cfg) -> int:
+    """Silent-stall timeout: interrupt, drain the shielded task, fail closed
+    with the TURN-TIMEOUT code."""
+    log(f"TIMEOUT: turn {turn} exceeded {cfg.turn_timeout_s:.0f}s (silent stall) -> interrupt")
+    await _interrupt_client(client)
+    await _drain_turn_task(turn_task)
+    job["error"] = f"TURN-TIMEOUT ({cfg.turn_timeout_s:.0f}s)"
+    job["verifier"] = "FAIL"
+    job["turns"] = turn
+    return 1
+
+
+def _record_turn_telemetry(job: dict, total_tokens: dict, result: TurnResult,
+                          turn: int, elapsed_turn: float) -> int:
+    """Cumulative token & cache telemetry for one finished turn (guarantee 4).
+
+    Updates total_tokens in place, recomputes job["tokens"]/job["cache_hit_rate"],
+    appends the turn_telemetry entry, logs the turn line. Returns live_context:
+    the prompt size on the LAST API call (not the turn's cumulative usage) —
+    the real context the model had to attend to (CONTEXT-ROT input).
+    """
+    inp = result.usage.get("input_tokens", 0)
+    out = result.usage.get("output_tokens", 0)
+    c_read = result.usage.get("cache_read_input_tokens", 0)
+    c_create = result.usage.get("cache_creation_input_tokens", 0)
+
+    total_tokens["input_tokens"] += inp
+    total_tokens["output_tokens"] += out
+    total_tokens["cache_read_input_tokens"] += c_read
+    total_tokens["cache_creation_input_tokens"] += c_create
+
+    total_input_context = (
+        total_tokens["input_tokens"]
+        + total_tokens["cache_read_input_tokens"]
+        + total_tokens.get("cache_creation_input_tokens", 0)
+    )
+    session_hit_rate = (
+        total_tokens["cache_read_input_tokens"] / total_input_context * 100.0
+    ) if total_input_context > 0 else 0.0
+    job["tokens"] = total_tokens
+    job["cache_hit_rate"] = f"{session_hit_rate:.1f}%"
+
+    turn_input_context = inp + c_read + c_create
+    turn_hit_rate = (c_read / turn_input_context * 100.0) if turn_input_context > 0 else 0.0
+
+    live_context = (
+        result.live_window.get("input_tokens", 0)
+        + result.live_window.get("cache_read_input_tokens", 0)
+        + result.live_window.get("cache_creation_input_tokens", 0)
+    ) or turn_input_context
+
+    log(f"Turn {turn} finished in {elapsed_turn:.1f}s | "
+        f"Turn tokens: in={inp}, out={out}, cache_hit={c_read} ({turn_hit_rate:.1f}%) | "
+        f"live window: {live_context} | "
+        f"Session cache_hit: {session_hit_rate:.1f}%")
+
+    job.setdefault("turn_telemetry", []).append({
+        "turn": turn,
+        "elapsed_s": round(elapsed_turn, 1),
+        "input_tokens": inp,
+        "output_tokens": out,
+        "cache_read_input_tokens": c_read,
+        "cache_creation_input_tokens": c_create,
+        "live_context_tokens": live_context,
+        "turn_hit_rate": round(turn_hit_rate, 1),
+        "writes": result.writes,
+    })
+    return inp, live_context
+
+
+async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
+                                max_retries: int, plan: "SessionPlan") -> int:
+    from claude_agent_sdk import ClaudeSDKClient
+
+    local_run_id = str(uuid.uuid4())[:8]
+    stream_out_path = os.path.join(run_state.live_dir, f"session-{local_run_id}.jsonl")
+    options = _agent_options(cfg, run_state)
 
     max_turns = 1 + max_retries
     current_prompt = ticket_prompt
@@ -544,27 +643,14 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
                     _execute_turn(client, current_prompt, turn, stream_f, job, run_state)
                 )
 
+                # Shielded Turn Watchdog (guarantee 5): asyncio.shield keeps the
+                # turn task alive past wait_for, so client.interrupt() runs
+                # cleanly and the summary is written with the TURN-TIMEOUT code
+                # without the process dying on CancelledError.
                 try:
                     result = await asyncio.wait_for(asyncio.shield(turn_task), timeout=cfg.turn_timeout_s)
                 except asyncio.TimeoutError:
-                    log(f"TIMEOUT: turn {turn} exceeded {cfg.turn_timeout_s:.0f}s (silent stall) -> interrupt")
-                    try:
-                        await client.interrupt()
-                    except Exception as e:
-                        log(f"WARN: client.interrupt() finished with an error: {e}")
-
-                    try:
-                        await asyncio.wait_for(asyncio.shield(turn_task), timeout=5.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
-                        pass
-                    if not turn_task.done():
-                        turn_task.cancel()
-                    await asyncio.gather(turn_task, return_exceptions=True)
-
-                    job["error"] = f"TURN-TIMEOUT ({cfg.turn_timeout_s:.0f}s)"
-                    job["verifier"] = "FAIL"
-                    job["turns"] = turn
-                    return 1
+                    return await _turn_timeout_verdict(client, turn_task, job, turn, cfg)
 
                 # CC-207: the loop-guard circuit breaker tripped mid-turn —
                 # the model repeated one identical call 5x in a row and the
@@ -576,63 +662,12 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
                     log(f"LOOP-TRAP (turn {turn}): {result.loop_trap.get('tool')!r} "
                         f"repeated {result.loop_trap.get('n')}x consecutively — "
                         "circuit breaker tripped, interrupting the session")
-                    try:
-                        await client.interrupt()
-                    except Exception as e:
-                        log(f"WARN: client.interrupt() finished with an error: {e}")
+                    await _interrupt_client(client)
                     job["turns"] = turn
                     return _loop_trap_verdict(job, result.loop_trap)
 
                 elapsed_turn = time.time() - t0
-
-                inp = result.usage.get("input_tokens", 0)
-                out = result.usage.get("output_tokens", 0)
-                c_read = result.usage.get("cache_read_input_tokens", 0)
-                c_create = result.usage.get("cache_creation_input_tokens", 0)
-
-                total_tokens["input_tokens"] += inp
-                total_tokens["output_tokens"] += out
-                total_tokens["cache_read_input_tokens"] += c_read
-                total_tokens["cache_creation_input_tokens"] += c_create
-
-                total_input_context = (
-                    total_tokens["input_tokens"]
-                    + total_tokens["cache_read_input_tokens"]
-                    + total_tokens.get("cache_creation_input_tokens", 0)
-                )
-                session_hit_rate = (
-                    total_tokens["cache_read_input_tokens"] / total_input_context * 100.0
-                ) if total_input_context > 0 else 0.0
-                job["tokens"] = total_tokens
-                job["cache_hit_rate"] = f"{session_hit_rate:.1f}%"
-
-                turn_input_context = inp + c_read + c_create
-                turn_hit_rate = (c_read / turn_input_context * 100.0) if turn_input_context > 0 else 0.0
-
-                # Live window = prompt size on the LAST API call (not the turn's
-                # cumulative usage) — the real context the model had to attend to.
-                live_context = (
-                    result.live_window.get("input_tokens", 0)
-                    + result.live_window.get("cache_read_input_tokens", 0)
-                    + result.live_window.get("cache_creation_input_tokens", 0)
-                ) or turn_input_context
-
-                log(f"Turn {turn} finished in {elapsed_turn:.1f}s | "
-                    f"Turn tokens: in={inp}, out={out}, cache_hit={c_read} ({turn_hit_rate:.1f}%) | "
-                    f"live window: {live_context} | "
-                    f"Session cache_hit: {session_hit_rate:.1f}%")
-
-                job.setdefault("turn_telemetry", []).append({
-                    "turn": turn,
-                    "elapsed_s": round(elapsed_turn, 1),
-                    "input_tokens": inp,
-                    "output_tokens": out,
-                    "cache_read_input_tokens": c_read,
-                    "cache_creation_input_tokens": c_create,
-                    "live_context_tokens": live_context,
-                    "turn_hit_rate": round(turn_hit_rate, 1),
-                    "writes": result.writes,
-                })
+                inp, live_context = _record_turn_telemetry(job, total_tokens, result, turn, elapsed_turn)
 
                 # The verdict pipeline (dead-session stop, contract_lock,
                 # observability warnings, verify_gate, NO-OP/PASS/FAIL verdict,
