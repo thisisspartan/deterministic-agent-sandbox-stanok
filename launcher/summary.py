@@ -9,7 +9,6 @@ passed-in RunState (C).
 import json
 import os
 import shutil
-import subprocess
 from launcher.logs import log
 
 
@@ -144,15 +143,16 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
         },
     }
 
-    # Provenance (W2.6): the exact commit the run started from.
-    commit_sha = None
-    try:
-        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cfg.repo_root,
-                             capture_output=True, text=True, timeout=10)
-        if out.returncode == 0 and out.stdout.strip():
-            commit_sha = out.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
+    # Provenance (W2.6): the exact commit the run started from — captured on
+    # the HOST (cli._capture_start_commit) before the container starts and
+    # passed in via STANOK_START_COMMIT (the container never runs git: in a
+    # worktree `.git` points outside the mounted tree, rev-parse fails there
+    # — plan 2026-10-08, step 1). Missing env -> explicit None + WARN, never
+    # a silent swallow.
+    commit_sha = os.environ.get("STANOK_START_COMMIT") or None
+    if commit_sha is None:
+        log("WARN: commit provenance: STANOK_START_COMMIT not set — "
+            "publishing commit_sha=None")
 
     return {
         "label": job.get("label"),

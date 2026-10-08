@@ -44,12 +44,19 @@ gates re-run + lock (rc=21) -> session.run_continuous_session:
 
 - TDD red phase: the in-process PostToolUse hook `session._verifier_hook`.
 - Circuit breaker: the loop-guard hook (N=5) -> `session._loop_trap_verdict`.
+- Lock key (D2, plan 2026-10-08): `cli._lock_key` = the shared GIT COMMON DIR
+  (`git rev-parse --git-common-dir`, abspath-normalized) — computed on the HOST,
+  exported via `STANOK_LOCK_KEY` (the STANOK_* passthrough); the container never
+  runs git. Two worktrees of one repo share the lock (second run gets rc=21);
+  a missing key aborts the run — no silent md5(repo_root) fallback.
 
 VERDICT:
 
 ```
 summary.write_summary -> summary.json staged in LOG_DIR/<label>
-(the container cannot write evidence/, CC-134)
+(the container cannot write evidence/, CC-134; commit_sha is captured on the
+HOST by cli._capture_start_commit before any launch and passed via the
+STANOK_START_COMMIT env — the container never runs git, plan 2026-10-08)
 -> host summary._publish_evidence: the I5 check (the container exit is
 ground truth) may overwrite the verdict to INTEGRITY-FAIL
 -> evidence/<label>/summary.json is read exactly once by the supervisor

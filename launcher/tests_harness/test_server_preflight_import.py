@@ -16,9 +16,8 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from conftest import REPO_ROOT  # the single sys.path bootstrap lives in conftest
 
 
 class _PropsHandler(BaseHTTPRequestHandler):
@@ -40,14 +39,17 @@ def test_fetch_server_props_with_only_gates_imported():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         code = (
-            "import sys; sys.path.insert(0, %r)\n"
+            "import sys\n"
             "from launcher import gates\n"
             "from launcher.config import Config\n"
             "props = gates._fetch_server_props(Config(server_url=%r))\n"
             "sys.exit(0 if props else 1)\n"
-        ) % (str(REPO_ROOT), f"http://127.0.0.1:{port}")
+        ) % f"http://127.0.0.1:{port}"
+        # cwd=REPO_ROOT: `python -c` puts the cwd on sys.path — the subprocess
+        # imports the launcher package without its own sys.path.insert hack.
         proc = subprocess.run(
-            [sys.executable, "-c", code], capture_output=True, text=True, timeout=30
+            [sys.executable, "-c", code], cwd=str(REPO_ROOT),
+            capture_output=True, text=True, timeout=30
         )
         assert proc.returncode == 0, (
             "gates._fetch_server_props failed with only gates imported "

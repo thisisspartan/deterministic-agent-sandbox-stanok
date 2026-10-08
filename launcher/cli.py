@@ -599,6 +599,48 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
     return None
 
 
+def _capture_start_commit(cfg) -> None:
+    """W2.6 provenance (plan 2026-10-08, step 1): capture HEAD on the HOST
+    before any launch and export it as STANOK_START_COMMIT — the container
+    never runs git (in a worktree `.git` is a file pointing outside the
+    mounted tree, rev-parse fails there). An already-set env is kept: the
+    background child must not re-capture a HEAD the operator may have moved
+    during the run — provenance is the commit at START, not at publish.
+    On failure: WARN + no env; build_summary then publishes an explicit None."""
+    if os.environ.get("STANOK_START_COMMIT"):
+        return
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cfg.repo_root,
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            os.environ["STANOK_START_COMMIT"] = out.stdout.strip()
+            return
+        log(f"WARN: commit provenance: git rev-parse HEAD failed "
+            f"(rc={out.returncode}): {out.stderr.strip()}")
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"WARN: commit provenance: git rev-parse HEAD error: {e}")
+
+
+def _lock_key(cfg) -> "str | None":
+    """D2 (plan 2026-10-08, step 3): the lock key is the shared GIT COMMON
+    DIR, not the repo path — a worktree has a different path but the same
+    git directory, so two runs from two worktrees of one repo serialize
+    (second gets rc=21). Returns None when git cannot answer: the lock
+    branch then aborts (fail closed — no silent md5(repo_root) fallback)."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                             cwd=cfg.repo_root, capture_output=True,
+                             text=True, timeout=10)
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        d = out.stdout.strip()
+        if not os.path.isabs(d):
+            d = os.path.join(cfg.repo_root, d)
+        return os.path.abspath(d)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
     """Host sync: supervise the Docker container (launcher/sandbox.py).
 
@@ -650,6 +692,20 @@ def main() -> int:
         def abort(code: ExitCode, err_msg: str) -> int:
             return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket, code, err_msg)
 
+        # W2.6 provenance: capture HEAD on the HOST before anything launches
+        # (gates, container, child) — the container-side build_summary reads
+        # the env, never git. Container-side main() skips: the env arrived.
+        if os.environ.get("STANOK_IN_CONTAINER") != "1":
+            _capture_start_commit(cfg)
+            # D2: derive the lock key on the HOST (git common dir) and export
+            # it — the container child inherits it via the STANOK_* passthrough
+            # and never runs git itself (in a worktree .git is a file pointing
+            # outside the mounted tree).
+            if not os.environ.get("STANOK_LOCK_KEY"):
+                key = _lock_key(cfg)
+                if key is not None:
+                    os.environ["STANOK_LOCK_KEY"] = key
+
         refused = _launch_gates(cfg, args)
         if refused is not None:
             return abort(*refused)
@@ -668,8 +724,17 @@ def main() -> int:
 
         if in_container or no_sandbox:
             # In-process session (container-side Runner, or host no-sandbox):
-            # the lock serializes runs of this repo.
-            lock_path = os.path.join(cfg.log_dir, f"stanok-{hashlib.md5(cfg.repo_root.encode()).hexdigest()[:12]}.lock")
+            # the lock serializes runs of this repo. D2: the key is the git
+            # common dir exported by the host (STANOK_LOCK_KEY) — two
+            # worktrees of one repo share it. Missing key = git could not
+            # answer: abort, no silent path fallback.
+            key = os.environ.get("STANOK_LOCK_KEY")
+            if not key:
+                return abort(ExitCode.DEFECT,
+                            "ERROR: lock key unavailable (STANOK_LOCK_KEY unset — "
+                            "git rev-parse --git-common-dir failed): refusing to run "
+                            "without a shared lock (D2, fail closed)")
+            lock_path = os.path.join(cfg.log_dir, f"stanok-{hashlib.md5(key.encode()).hexdigest()[:12]}.lock")
             lf = open(lock_path, "w")
             try:
                 fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
