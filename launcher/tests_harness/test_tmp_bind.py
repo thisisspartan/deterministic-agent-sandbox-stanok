@@ -26,15 +26,10 @@ Pinned here (the e2e tests need docker; they skip cleanly without it):
 import os
 import shutil
 import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import sandbox  # noqa: E402
+from launcher import sandbox
 
 
 def _argv(tmp_path):

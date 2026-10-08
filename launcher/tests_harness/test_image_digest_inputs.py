@@ -12,14 +12,10 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_image_digest_inputs
 import hashlib
 import re
 import shlex
-import sys
 from pathlib import Path
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import gates  # noqa: E402
-from config import Config  # noqa: E402
+from launcher import gates
+from launcher.config import Config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETUP_SH = REPO_ROOT / "setup.sh"

@@ -4,8 +4,10 @@ argparse, the gate sequence in main(), cmd_run/cmd_status/cmd_wait/cmd_stop,
 the sandbox supervision and the background self-spawn (--follow, CC-140).
 main() builds the Config ONCE (Config.from_env) and threads it explicitly;
 per-run mutable state is a RunState built from cfg.label_paths (C). `import
-stanok` stays only for the logging sink (stanok._stdout_log_f) and the child
-self-spawn path (stanok.__file__).
+stanok` stays only for the child self-spawn path (stanok.__file__) — the
+entry shell is the one file every call site invokes (ARCH-REVIEW A/C). The
+logging sink is the `logs` module global (logs._stdout_log_f), assigned by
+cmd_run.
 """
 
 import argparse
@@ -19,18 +21,19 @@ import signal
 import subprocess
 import sys
 import time
-import sandbox
-import stanok
-from stanok import ExitCode, SessionPlan, log
-from config import Config, RunState
-from gates import (
+from launcher import logs, sandbox, stanok
+from launcher.config import Config, RunState
+from launcher.exitcodes import ExitCode
+from launcher.logs import log
+from launcher.plan import SessionPlan
+from launcher.gates import (
     check_test_config, dirty_tree_gate, hidden_files_gate, preflight_server,
     root_refusal, sandbox_config_gate, validate_label,
 )
-from opik import _opik_trace_count
-from session import _install_signal_handlers, run_continuous_session
-from summary import _publish_evidence, _rotate_stale_summary, build_summary, write_summary
-from ticket import (
+from launcher.opik import _opik_trace_count
+from launcher.session import _install_signal_handlers, run_continuous_session
+from launcher.summary import _publish_evidence, _rotate_stale_summary, build_summary, write_summary
+from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
     host_ro_paths, host_rw_paths, parse_ticket_header, prepare_workspace,
 )
@@ -49,30 +52,46 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def cmd_run(cfg, args) -> int:
-    try:
-        if os.getpgid(0) != os.getpid():
-            os.setpgid(0, 0)
-    except OSError:
-        pass
+def _fail_early(cfg, run_state, job: dict, start_ts: int, code: int, error: str) -> int:
+    """Early-failure exit for cmd_run: write the summary, remove the marker.
 
-    evidence_dir, live_dir = cfg.label_paths(args.label)
+    The same three steps every pre-session refusal in cmd_run needs (ticket
+    parse, no-declared-paths, server preflight, workspace prep) — one place,
+    so no refusal path can forget the marker cleanup.
+    """
+    job["rc"] = int(code)
+    job["error"] = error
+    write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+    if os.path.exists(run_state.marker_path):
+        try:
+            os.remove(run_state.marker_path)
+        except OSError:
+            pass
+    return int(code)
+
+
+def _open_run_state(cfg, label: str) -> tuple:
+    """Per-run setup: dirs, the logging sink, RunState, the .running marker.
+
+    Returns (run_state, start_ts). The logging sink is a per-run handle (see
+    the logs module docstring): opened here, assigned to the module global,
+    released at process exit.
+
+    R2: the marker is written by the host-side supervisor (run_sandboxed /
+    launch_background) with ITS pid — inside the container os.getpid() is
+    not visible from the host. If the marker already exists, preserve its
+    start_ts/pid; only a fresh in-process run (no-sandbox) writes its own.
+    """
+    evidence_dir, live_dir = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
     os.makedirs(live_dir, exist_ok=True)
 
-    # The logging sink is a per-run handle (see the stanok module docstring):
-    # opened here, assigned to the module global, released at process exit.
-    stanok._stdout_log_f = open(os.path.join(evidence_dir, "launcher.stdout.log"), "a", encoding="utf-8")
+    logs._stdout_log_f = open(os.path.join(evidence_dir, "launcher.stdout.log"), "a", encoding="utf-8")
     run_state = RunState(evidence_dir=evidence_dir, live_dir=live_dir,
                          marker_path=os.path.join(evidence_dir, ".running"))
 
     start_ts = int(time.time())
     recorded_pid = os.getpid()
-
-    # R2: the marker is written by the host-side supervisor (run_sandboxed /
-    # launch_background) with ITS pid — inside the container os.getpid() is
-    # not visible from the host. If the marker already exists, preserve its
-    # start_ts/pid; only a fresh in-process run (no-sandbox) writes its own.
     if os.path.exists(run_state.marker_path):
         try:
             parts = open(run_state.marker_path, "r", encoding="utf-8").read().split()
@@ -84,81 +103,37 @@ def cmd_run(cfg, args) -> int:
 
     with open(run_state.marker_path, "w", encoding="utf-8") as f:
         f.write(f"{start_ts} {recorded_pid}\n")
+    return run_state, start_ts
 
-    _install_signal_handlers(run_state)
 
-    job = {"label": args.label, "ticket": args.ticket}
-    log(f"STANOK RUNNER | Repo: {cfg.repo_root} | Label: {args.label}")
-    if args.direct:
-        log("--direct MODE: the ticket path is resolved relative to the repository")
+def _read_ticket_contract(cfg, ticket_path: str) -> tuple:
+    """Ticket-scoped invariant (W2.1): read the ticket and parse its header.
 
-    # Ticket-scoped invariant (W2.1): parse the header BEFORE any workspace
-    # mutation. Fail-closed: no `impl:`/`test:`/`docs:`/`edit:` line and no
-    # `reset: none` means the invariant cannot be enforced (the old false
-    # CLEAN-FIRST returns); an invalid literal path — including a
-    # create-declared path that already exists (CC-133) — is rejected the same
-    # way, before any workspace mutation.
-    try:
-        with open(args.ticket_path, encoding="utf-8") as f:
-            ticket_prompt = f.read().strip()
-        declared_paths, edit_paths, reset_none = parse_ticket_header(cfg, ticket_prompt)
-        # CC-133: the create/edit split is derived from the filesystem, not
-        # trusted from the header (ValueError -> rc=13 below).
-        assert_create_paths_are_new(cfg, declared_paths, edit_paths)
-        # CC-206: `edit:` on a protected file is an unsatisfiable contract
-        # (CC-204-retry3) — refuse it here, before any workspace mutation.
-        assert_edit_paths_are_not_protected(cfg, edit_paths)
-    except (OSError, ValueError) as e:
-        job["rc"] = int(ExitCode.TICKET)
-        job["error"] = f"ticket parse error: {e}"
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
-        if os.path.exists(run_state.marker_path):
-            try: os.remove(run_state.marker_path)
-            except OSError: pass
-        return int(ExitCode.TICKET)
+    Returns (ticket_prompt, declared_paths, edit_paths, reset_none). Raises
+    OSError/ValueError for any refusal: no `impl:`/`test:`/`docs:`/`edit:`
+    line and no `reset: none` means the invariant cannot be enforced (the old
+    false CLEAN-FIRST returns); an invalid literal path — including a
+    create-declared path that already exists (CC-133) — is rejected the same
+    way. Called BEFORE any workspace mutation.
+    """
+    with open(ticket_path, encoding="utf-8") as f:
+        ticket_prompt = f.read().strip()
+    declared_paths, edit_paths, reset_none = parse_ticket_header(cfg, ticket_prompt)
+    # CC-133: the create/edit split is derived from the filesystem, not
+    # trusted from the header.
+    assert_create_paths_are_new(cfg, declared_paths, edit_paths)
+    # CC-206: `edit:` on a protected file is an unsatisfiable contract
+    # (CC-204-retry3) — refuse it here, before any workspace mutation.
+    assert_edit_paths_are_not_protected(cfg, edit_paths)
+    return ticket_prompt, declared_paths, edit_paths, reset_none
 
-    if not declared_paths and not reset_none:
-        job["rc"] = int(ExitCode.TICKET)
-        job["error"] = ("ticket declares no `impl:`/`test:`/`docs:`/`edit:` "
-                        "line and no `reset: none` — the ticket-scoped invariant "
-                        "cannot be enforced (fail-closed)")
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
-        if os.path.exists(run_state.marker_path):
-            try: os.remove(run_state.marker_path)
-            except OSError: pass
-        return int(ExitCode.TICKET)
-    if declared_paths:
-        log(f"DECLARED PATHS: {declared_paths}")
-    if edit_paths:
-        log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
 
-    # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
-    plan = SessionPlan(
-        declared_paths=tuple(declared_paths),
-        edit_paths=tuple(edit_paths),
-    )
-
-    if not preflight_server(cfg):
-        job["rc"] = int(ExitCode.SERVER)
-        job["error"] = f"Server unavailable ({cfg.server_url})"
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
-        if os.path.exists(run_state.marker_path):
-            try: os.remove(run_state.marker_path)
-            except OSError: pass
-        return int(ExitCode.SERVER)
-
-    if prepare_workspace(cfg, run_state, plan) != 0:
-        job["rc"] = int(ExitCode.WORKSPACE)
-        job["error"] = "workspace prep error"
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
-        if os.path.exists(run_state.marker_path):
-            try: os.remove(run_state.marker_path)
-            except OSError: pass
-        return int(ExitCode.WORKSPACE)
-
+def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: int,
+                 plan: SessionPlan, start_ts: int) -> int:
+    """Run the continuous session, then finalize: Opik sample, summary, marker."""
     rc = 1
     try:
-        rc = asyncio.run(run_continuous_session(cfg, run_state, job, ticket_prompt, args.local_retries, plan))
+        rc = asyncio.run(run_continuous_session(cfg, run_state, job, ticket_prompt, local_retries, plan))
     except KeyboardInterrupt:
         rc = run_state.interrupted_rc or 130
     except Exception as e:
@@ -185,7 +160,55 @@ def cmd_run(cfg, args) -> int:
                 os.remove(run_state.marker_path)
             except OSError:
                 pass
+    return rc
 
+
+def cmd_run(cfg, args) -> int:
+    try:
+        if os.getpgid(0) != os.getpid():
+            os.setpgid(0, 0)
+    except OSError:
+        pass
+
+    run_state, start_ts = _open_run_state(cfg, args.label)
+    _install_signal_handlers(run_state)
+
+    job = {"label": args.label, "ticket": args.ticket}
+    log(f"STANOK RUNNER | Repo: {cfg.repo_root} | Label: {args.label}")
+
+    try:
+        ticket_prompt, declared_paths, edit_paths, reset_none = _read_ticket_contract(
+            cfg, args.ticket_path)
+    except (OSError, ValueError) as e:
+        return _fail_early(cfg, run_state, job, start_ts, ExitCode.TICKET,
+                           f"ticket parse error: {e}")
+
+    if not declared_paths and not reset_none:
+        return _fail_early(
+            cfg, run_state, job, start_ts, ExitCode.TICKET,
+            "ticket declares no `impl:`/`test:`/`docs:`/`edit:` "
+            "line and no `reset: none` — the ticket-scoped invariant "
+            "cannot be enforced (fail-closed)")
+    if declared_paths:
+        log(f"DECLARED PATHS: {declared_paths}")
+    if edit_paths:
+        log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
+
+    # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
+    plan = SessionPlan(
+        declared_paths=tuple(declared_paths),
+        edit_paths=tuple(edit_paths),
+    )
+
+    if not preflight_server(cfg):
+        return _fail_early(cfg, run_state, job, start_ts, ExitCode.SERVER,
+                           f"Server unavailable ({cfg.server_url})")
+
+    if prepare_workspace(cfg, run_state, plan) != 0:
+        return _fail_early(cfg, run_state, job, start_ts, ExitCode.WORKSPACE,
+                           "workspace prep error")
+
+    rc = _run_session(cfg, run_state, job, ticket_prompt, args.local_retries, plan, start_ts)
     log(f"RUN FINISHED: rc={rc}")
     return rc
 
@@ -301,8 +324,6 @@ def cmd_stop(cfg, label: str) -> int:
 def _inner_run_argv(cfg, args) -> list:
     """The container-side / child-side `run` argv (single source)."""
     inner = ["run", args.ticket]
-    if args.direct:
-        inner.append("--direct")
     if args.local_retries != cfg.default_retries:
         inner += ["--local-retries", str(args.local_retries)]
     inner += ["--", args.label, *args.extra]
@@ -416,25 +437,19 @@ def launch_background(cfg, args) -> int:
 # ==================================================================================
 # CLI entry point
 # ==================================================================================
-def _resolve_ticket(cfg, arg: str, direct: bool = False) -> str:
-    if direct:
-        candidates = [os.path.join(cfg.repo_root, arg), os.path.abspath(arg)]
-    else:
-        candidates = [
-            os.path.join(os.path.dirname(cfg.repo_root), arg),  # project root (highest priority)
-            os.path.join(cfg.repo_root, arg),                    # machine root
-            os.path.abspath(arg)                             # as given
-        ]
+def _resolve_ticket(cfg, arg: str) -> str:
+    candidates = [
+        os.path.join(os.path.dirname(cfg.repo_root), arg),  # project root (highest priority)
+        os.path.join(cfg.repo_root, arg),                    # machine root
+        os.path.abspath(arg)                                 # as given
+    ]
     for c in candidates:
         if os.path.isfile(c):
             return c
     return candidates[0]
 
 
-def main() -> int:
-    root_refusal()
-    cfg = Config.from_env()
-
+def _build_parser(cfg) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="stanok",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -447,7 +462,7 @@ def main() -> int:
         epilog=(
             "Architecture: stanok/ARCHITECTURE.md (the call chain, the module\n"
             "map, the verdict table). Exit codes: the ExitCode namespace in\n"
-            "launcher/stanok.py."
+            "launcher/exitcodes.py."
         ),
     )
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -464,7 +479,6 @@ def main() -> int:
     r.add_argument("ticket")
     r.add_argument("label")
     r.add_argument("extra", nargs="*", default=[])
-    r.add_argument("--direct", action="store_true")
     r.add_argument("--local-retries", type=int, default=cfg.default_retries)
     # CC-140/BL-1: --follow is the SOLE background flag: a detached
     # self-spawn, then block in cmd_wait until the run is terminal and print
@@ -490,8 +504,137 @@ def main() -> int:
                      "container",
     )
     st.add_argument("label")
+    return p
 
-    args = p.parse_args()
+
+def _early_abort(cfg, evidence_dir: str, marker: str, label: str, ticket: str,
+                 code: ExitCode, err_msg: str) -> int:
+    """Launch-level refusal: log, clean a dead marker, write the EARLY-ABORT
+    summary (only when absent — a fresh verdict must not be overwritten)."""
+    log(err_msg)
+    if os.path.exists(marker):
+        # A live run's marker must survive an early abort of a
+        # concurrent launch attempt: remove it only when the
+        # recorded process is dead (or the marker is unparseable).
+        live = False
+        try:
+            with open(marker, encoding="utf-8") as f:
+                pid = int(f.read().split()[-1])
+            live = _pid_alive(pid)
+        except (OSError, ValueError):
+            pass
+        if not live:
+            try:
+                os.remove(marker)
+            except OSError:
+                pass
+    os.makedirs(evidence_dir, exist_ok=True)
+    sum_path = os.path.join(evidence_dir, "summary.json")
+    if not os.path.exists(sum_path):
+        job = {
+            "label": label,
+            "ticket": ticket,
+            "rc": int(code),
+            "verifier": "FAIL",
+            "probe_result": "EARLY-ABORT",
+            "turns": 0,
+            "error": err_msg,
+        }
+        with open(sum_path, "w", encoding="utf-8") as f:
+            json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
+    return int(code)
+
+
+def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
+    """The launch gate order — the documented rc contract (ARCHITECTURE.md).
+
+    One readable sequence: label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
+    ticket resolution (rc=13) -> dirty-tree (rc=22) -> hidden-files (rc=26)
+    -> test-config (rc=27) -> sandbox-config (rc=28). Returns None when all
+    gates pass, else (rc, message) for the caller to abort with. Sets
+    args.ticket_path on success (the resolved ticket, used by the launch
+    branches). Do not reorder: the order is the rc contract.
+    """
+    if validate_label(args.label):
+        return (ExitCode.BAD_LABEL, f"ERROR: Invalid label {args.label}")
+
+    # A stale summary.json from an earlier run of this label must not
+    # survive: abort writes only when the file is absent, so the
+    # supervisor could otherwise read a verdict from the previous run.
+    _rotate_stale_summary(cfg, args.label)
+
+    # ROLE-LEAK (rc=24): a parent CLAUDE.md above the repo would be auto-loaded
+    # into the machine session (cwd = REPO_ROOT) -> role leak. Fail-closed before
+    # reset/lock/preflight, no side effects.
+    parent_claude = os.path.join(os.path.dirname(cfg.repo_root), "CLAUDE.md")
+    if os.path.isfile(parent_claude):
+        return (ExitCode.ROLE_LEAK, f"ERROR: ROLE-LEAK: parent CLAUDE.md above the repo: {parent_claude}")
+
+    args.ticket_path = _resolve_ticket(cfg, args.ticket)
+    if not os.path.isfile(args.ticket_path):
+        return (ExitCode.TICKET, f"ERROR: Ticket not found: {args.ticket_path}")
+
+    if dirty_tree_gate(cfg):
+        return (ExitCode.DIRTY_TREE, "ERROR: the machine repo contains uncommitted changes (rc=22)")
+
+    # W4 hygiene gate (rc=26): hidden/TEMP leftovers in src/tests/docs/scripts
+    # leak into the machine's context and slip past dirty_tree_gate.
+    if hidden_files_gate(cfg):
+        return (ExitCode.HIDDEN_FILES, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
+
+    # W6 verdict-subversion gate (rc=27): pytest config files under tests/
+    # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
+    if check_test_config(cfg):
+        return (ExitCode.TEST_CONFIG, "ERROR: pytest config files in tests/ (rc=27)")
+
+    # W7 sandbox-config gate (rc=28): a sandbox.filesystem deny entry that
+    # resolves (against the settings dir, per cli.js) to a non-existent
+    # path makes bwrap EROFS-kill every Bash call in the session (CC-107).
+    # The abort message carries the offending entries + fix (CC-157).
+    sandbox_problems = sandbox_config_gate(cfg)
+    if sandbox_problems:
+        return (ExitCode.SANDBOX_CONFIG, "ERROR: sandbox.filesystem deny entry invalid (rc=28): "
+                + "; ".join(sandbox_problems))
+
+    return None
+
+
+def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
+    """Host sync: supervise the Docker container (launcher/sandbox.py).
+
+    The container-side Runner re-runs the gates and takes the lock.
+    CC-106: the image digest/runner preflight no longer blocks the
+    launch path — it lives in doctor
+    (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
+    """
+    if shutil.which("docker") is None:
+        return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket,
+                            ExitCode.DEFECT, "ERROR: docker not found on PATH")
+    # T4 (CC-135): the container's rw carve-outs must be fixed BEFORE
+    # `docker run`, but the SessionPlan is built later, inside the
+    # container — so the host derives them from the same ticket text with
+    # the same parser and the same rule (declared_carveout). A header the
+    # parser refuses (including a create-declared path that already exists,
+    # CC-133) is rc=13 here, before any container starts.
+    try:
+        with open(args.ticket_path, encoding="utf-8") as f:
+            declared, edit_paths, _ = parse_ticket_header(cfg, f.read())
+        assert_create_paths_are_new(cfg, declared, edit_paths)
+        # CC-206: same gate as cmd_run — the host must not start a
+        # container for a ticket that edits a protected file.
+        assert_edit_paths_are_not_protected(cfg, edit_paths)
+    except (OSError, ValueError) as e:
+        return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket,
+                            ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
+    rw_paths = host_rw_paths(cfg, declared)
+    ro_paths = host_ro_paths(cfg, rw_paths)
+    return run_sandboxed(cfg, args, rw_paths, ro_paths)
+
+
+def main() -> int:
+    root_refusal()
+    cfg = Config.from_env()
+    args = _build_parser(cfg).parse_args()
 
     if args.cmd == "status":
         return cmd_status(cfg, args.label)
@@ -505,80 +648,11 @@ def main() -> int:
         marker = os.path.join(evidence_dir, ".running")
 
         def abort(code: ExitCode, err_msg: str) -> int:
-            log(err_msg)
-            if os.path.exists(marker):
-                # A live run's marker must survive an early abort of a
-                # concurrent launch attempt: remove it only when the
-                # recorded process is dead (or the marker is unparseable).
-                live = False
-                try:
-                    with open(marker, encoding="utf-8") as f:
-                        pid = int(f.read().split()[-1])
-                    live = _pid_alive(pid)
-                except (OSError, ValueError):
-                    pass
-                if not live:
-                    try:
-                        os.remove(marker)
-                    except OSError:
-                        pass
-            os.makedirs(evidence_dir, exist_ok=True)
-            sum_path = os.path.join(evidence_dir, "summary.json")
-            if not os.path.exists(sum_path):
-                job = {
-                    "label": args.label,
-                    "ticket": args.ticket,
-                    "rc": int(code),
-                    "verifier": "FAIL",
-                    "probe_result": "EARLY-ABORT",
-                    "turns": 0,
-                    "error": err_msg,
-                }
-                with open(sum_path, "w", encoding="utf-8") as f:
-                    json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
-            return int(code)
+            return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket, code, err_msg)
 
-        if validate_label(args.label):
-            return abort(ExitCode.BAD_LABEL, f"ERROR: Invalid label {args.label}")
-
-        # A stale summary.json from an earlier run of this label must not
-        # survive: abort writes only when the file is absent, so the
-        # supervisor could otherwise read a verdict from the previous run.
-        _rotate_stale_summary(cfg, args.label)
-
-        # ROLE-LEAK (rc=24): a parent CLAUDE.md above the repo would be auto-loaded
-        # into the machine session (cwd = REPO_ROOT) -> role leak. Fail-closed before
-        # reset/lock/preflight, no side effects.
-        parent_claude = os.path.join(os.path.dirname(cfg.repo_root), "CLAUDE.md")
-        if os.path.isfile(parent_claude):
-            return abort(ExitCode.ROLE_LEAK, f"ERROR: ROLE-LEAK: parent CLAUDE.md above the repo: {parent_claude}")
-
-        args.ticket_path = _resolve_ticket(cfg, args.ticket, direct=args.direct)
-        if not os.path.isfile(args.ticket_path):
-            return abort(ExitCode.TICKET, f"ERROR: Ticket not found: {args.ticket_path}")
-
-        if dirty_tree_gate(cfg):
-            return abort(ExitCode.DIRTY_TREE, "ERROR: the machine repo contains uncommitted changes (rc=22)")
-
-        # W4 hygiene gate (rc=26): hidden/TEMP leftovers in src/tests/docs/scripts
-        # leak into the machine's context and slip past dirty_tree_gate.
-        if hidden_files_gate(cfg):
-            return abort(ExitCode.HIDDEN_FILES, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
-
-        # W6 verdict-subversion gate (rc=27): pytest config files under tests/
-        # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
-        if check_test_config(cfg):
-            return abort(ExitCode.TEST_CONFIG, "ERROR: pytest config files in tests/ (rc=27)")
-
-        # W7 sandbox-config gate (rc=28): a sandbox.filesystem deny entry that
-        # resolves (against the settings dir, per cli.js) to a non-existent
-        # path makes bwrap EROFS-kill every Bash call in the session (CC-107).
-        # The abort message carries the offending entries + fix (CC-157).
-        sandbox_problems = sandbox_config_gate(cfg)
-        if sandbox_problems:
-            return abort(
-                ExitCode.SANDBOX_CONFIG, "ERROR: sandbox.filesystem deny entry invalid (rc=28): "
-                + "; ".join(sandbox_problems))
+        refused = _launch_gates(cfg, args)
+        if refused is not None:
+            return abort(*refused)
 
         # R2: launch orchestration (the former launch.sh branches, in Python).
         in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
@@ -603,30 +677,6 @@ def main() -> int:
                 return abort(ExitCode.LOCK, f"LOCK: the repo is already busy with another run ({lock_path})")
             return cmd_run(cfg, args)
 
-        # Host sync: supervise the Docker container (launcher/sandbox.py).
-        # The container-side Runner re-runs the gates and takes the lock.
-        # CC-106: the image digest/runner preflight no longer blocks the
-        # launch path — it lives in doctor
-        # (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
-        if shutil.which("docker") is None:
-            return abort(ExitCode.DEFECT, "ERROR: docker not found on PATH")
-        # T4 (CC-135): the container's rw carve-outs must be fixed BEFORE
-        # `docker run`, but the SessionPlan is built later, inside the
-        # container — so the host derives them from the same ticket text with
-        # the same parser and the same rule (declared_carveout). A header the
-        # parser refuses (including a create-declared path that already exists,
-        # CC-133) is rc=13 here, before any container starts.
-        try:
-            with open(args.ticket_path, encoding="utf-8") as f:
-                declared, edit_paths, _ = parse_ticket_header(cfg, f.read())
-            assert_create_paths_are_new(cfg, declared, edit_paths)
-            # CC-206: same gate as cmd_run — the host must not start a
-            # container for a ticket that edits a protected file.
-            assert_edit_paths_are_not_protected(cfg, edit_paths)
-        except (OSError, ValueError) as e:
-            return abort(ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
-        rw_paths = host_rw_paths(cfg, declared)
-        ro_paths = host_ro_paths(cfg, rw_paths)
-        return run_sandboxed(cfg, args, rw_paths, ro_paths)
+        return _host_launch(cfg, args, evidence_dir, marker)
 
     return 0

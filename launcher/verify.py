@@ -8,7 +8,7 @@ repo root come from the passed-in Config (C).
 import hashlib
 import os
 import subprocess
-from stanok import log
+from launcher.logs import log
 
 
 # ==================================================================================

@@ -29,12 +29,10 @@ import sys
 import types
 from pathlib import Path
 
+from launcher import cli
+from launcher.config import Config
+
 LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import cli  # noqa: E402
-from config import Config  # noqa: E402
 
 
 def _host_cfg(tmp_path, monkeypatch, label="run1"):
@@ -130,8 +128,8 @@ def test_cli_wires_wait_and_run_follow(tmp_path, monkeypatch):
     # `run ... --follow` (the sole background flag) is accepted and takes the
     # background/launch branch: a missing ticket aborts at the ticket gate
     # (rc=13) before any launch — it does not fall through to a sync run.
-    proc = subprocess.run([sys.executable, py, "run", "no-such-ticket.md", "f1",
-                           "--follow", "--direct"],
+    proc = subprocess.run([sys.executable, py, "run", str(repo / "no-such-ticket.md"), "f1",
+                           "--follow"],
                           env=env, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 13, proc.stdout + proc.stderr
 
@@ -141,7 +139,7 @@ def test_cli_wires_wait_and_run_follow(tmp_path, monkeypatch):
 def test_follow_not_propagated_to_child_argv():
     cfg = Config()
     args = types.SimpleNamespace(ticket="tickets/T.md", label="lbl",
-                                direct=False, local_retries=cfg.default_retries,
+                                local_retries=cfg.default_retries,
                                 extra=[], follow=True)
     inner = cli._inner_run_argv(cfg, args)
     assert "--follow" not in inner

@@ -31,23 +31,15 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_launcher_preflight.
 """
 import asyncio
 import os
-import sys
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-LAUNCHER_DIR = REPO_ROOT / "launcher"
+from launcher import gates, session, summary, verify
+from launcher.config import Config, RunState
+from launcher.plan import SessionPlan
 
-# Import the launcher modules (pure stdlib + sandbox; the SDK is imported lazily).
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import gates  # noqa: E402
-import session  # noqa: E402
-import summary  # noqa: E402
-import verify  # noqa: E402
-from config import Config, RunState  # noqa: E402
-from stanok import SessionPlan  # noqa: E402
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _make_fake_docker(base: Path) -> Path:

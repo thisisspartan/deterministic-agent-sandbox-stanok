@@ -8,9 +8,10 @@ from the passed-in Config; the quarantine dir from the passed-in RunState (C).
 import os
 import re
 import shutil
-import sandbox
-from stanok import ExitCode, log
-from verify import _protected_files
+from launcher import sandbox
+from launcher.exitcodes import ExitCode
+from launcher.logs import log
+from launcher.verify import _protected_files
 
 # The ONE kind list for a ticket header (CC-132). `scripts` is a ZONE, not a
 # kind: a path under scripts/ is declared with impl:/test:/docs:/edit: like

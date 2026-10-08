@@ -11,19 +11,13 @@ repo (CC-168), so these tests drive the real manifests. House style per
 test_ro_protected_files.py: module-level import of verify + an explicit
 Config(repo_root=...) (C: no hub facade, no monkeypatched globals).
 """
-import sys
-from pathlib import Path
-
 import pytest
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import verify  # noqa: E402
-from config import Config  # noqa: E402
-from stanok import SessionPlan  # noqa: E402
+from launcher import verify
+from launcher.config import Config
+from launcher.plan import SessionPlan
 
-from conftest import repo, write  # noqa: E402,F401
+from conftest import repo, write  # noqa: F401
 
 STACKS = ("jq.toml", "js.toml", "py.toml")  # the shipped manifests (sorted)
 

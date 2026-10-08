@@ -30,20 +30,14 @@ import dataclasses
 import os
 import shutil
 import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import sandbox  # noqa: E402
-import ticket  # noqa: E402
-from config import Config  # noqa: E402
-from stanok import SessionPlan  # noqa: E402
+from launcher import sandbox, ticket
+from launcher.config import Config
+from launcher.plan import SessionPlan
 
-from conftest import repo, write  # noqa: E402,F401
+from conftest import repo, write  # noqa: F401
 
 
 def _carve(cfg, rel):

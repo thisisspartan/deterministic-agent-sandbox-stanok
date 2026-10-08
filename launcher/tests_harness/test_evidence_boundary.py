@@ -22,17 +22,11 @@ already): a zone write succeeds, an evidence/ write is refused.
 import os
 import shutil
 import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import sandbox  # noqa: E402
-import summary  # noqa: E402
-from config import Config  # noqa: E402
+from launcher import sandbox, summary
+from launcher.config import Config
 
 
 def _host_paths(tmp_path):

@@ -16,9 +16,10 @@ import os
 import signal
 import time
 import uuid
-from stanok import ExitCode, log
-from gates import context_rot_threshold
-from verify import _check_contract_lock, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
+from launcher.exitcodes import ExitCode
+from launcher.logs import log
+from launcher.gates import context_rot_threshold
+from launcher.verify import _check_contract_lock, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
 
 
 def _safe_json_default(obj):
@@ -271,6 +272,111 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
 _HOOK_TEST_TIMEOUT_S = 75  # mirrors the old `timeout 75` in verifier.sh
 
 
+def _resolve_hook_target(cfg, hook_input: dict) -> "str | None":
+    """Resolve a PostToolUse hook_input to a repo-relative tests/ test path,
+    or None when this tool call is not a test-file write we must verify.
+
+    Filters (each was an early `return {}` in the original hook): no
+    file_path; path outside tests/; not an existing file; no scripts/run.sh
+    to run the test with."""
+    tool_input = hook_input.get("tool_input") or {}
+    fp = tool_input.get("file_path")
+    if not fp:
+        return None
+    if not fp.startswith("/"):
+        fp = os.path.join(cfg.repo_root, fp)
+    abs_path = os.path.realpath(fp)
+    tests_dir = os.path.join(cfg.repo_root, "tests")
+    if not abs_path.startswith(tests_dir + os.sep):
+        return None
+    if not os.path.isfile(abs_path):
+        return None
+    if not os.path.isfile(os.path.join(cfg.repo_root, "scripts", "run.sh")):
+        return None
+    return os.path.relpath(abs_path, cfg.repo_root)
+
+
+async def _run_hook_test(cfg, rel: str) -> tuple[int, bytes]:
+    """Run `scripts/run.sh test <rel>` under the hook backstop timeout.
+
+    Returns (rc, output). rc=124 on timeout (the hook's own backstop).
+    Read into a shared list: a cancelled wait_for discards the read task's
+    LOCAL state (a communicate() that was cancelled had already consumed the
+    pre-kill bytes into its own locals — they were lost). Chunks delivered
+    before the deadline survive in `chunks` (bug 6: the timeout message must
+    show what the test printed before it hung)."""
+    run_sh = os.path.join(cfg.repo_root, "scripts", "run.sh")
+    proc = await asyncio.create_subprocess_exec(
+        "bash", run_sh, "test", rel,
+        cwd=cfg.repo_root,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    chunks: list[bytes] = []
+
+    async def _drain() -> None:
+        while True:
+            c = await proc.stdout.read(65536)
+            if not c:
+                break
+            chunks.append(c)
+
+    try:
+        await asyncio.wait_for(_drain(), timeout=_HOOK_TEST_TIMEOUT_S)
+        await proc.wait()  # pipe EOF can arrive before the exit status
+        rc = proc.returncode
+    except asyncio.TimeoutError:
+        proc.kill()
+        await _drain()
+        rc = 124
+    return rc, b"".join(chunks)
+
+
+def _hook_verdict(rel: str, rc: int, out: bytes) -> dict:
+    """Map a hook-test result to the hook output ({} = stay silent).
+
+    rc=0: GREEN (implementation exists) — stay silent.
+    rc=2: runner refused the path (not a test in its terms) — not our concern.
+    rc=6: ENV-FAIL (runner unavailable in the image) — an environment
+          failure, NOT a red test; emitting RED here is what burned a
+          whole turn on CC-081 ("fix" the environment from src/).
+    rc=124: the test HUNG (run.sh's 60 s runner timeout, or this hook's own
+          backstop) — not a red assertion. "Implement src/ to make it GREEN"
+          here is a retry-loop DoS: the model iterates on src/, the test
+          hangs again, the hook fires again. Name the failure mode (hang)
+          and where to look instead."""
+    if rc in (0, 2, 6):
+        if rc == 6:
+            log(f"VERIFIER HOOK: ENV-FAIL ({rel} rc=6) — runner unavailable, no RED")
+        return {}
+    text = out.decode("utf-8", "replace")
+    tail = "\n".join(text.splitlines()[-25:])
+    if rc == 124:
+        log(f"VERIFIER HOOK: TIMEOUT-ABORT ({rel} rc=124)")
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": (
+                    f"VERIFY: TIMEOUT-ABORT ({rel} rc=124). The test hung "
+                    f"past the runner timeout — this is NOT a red test; "
+                    f"do not iterate on src/ to make it green. Locate and "
+                    f"remove the hang (infinite loop / blocking call) in "
+                    f"the test or in the implementation.\n{tail}"
+                ),
+            }
+        }
+    log(f"VERIFIER HOOK: RED CONFIRMED ({rel} rc={rc})")
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": (
+                f"VERIFY: RED CONFIRMED ({rel} rc={rc}). "
+                f"Implement src/ to make it GREEN.\n{tail}"
+            ),
+        }
+    }
+
+
 async def _verifier_hook(cfg, hook_input: dict, tool_use_id: "str | None", context) -> dict:
     # W8 double-hook diagnosis: log EVERY invocation with its tool_use_id.
     # After a run: grep 'HOOK-CALL' <launcher log> | awk id | sort | uniq -d —
@@ -279,94 +385,56 @@ async def _verifier_hook(cfg, hook_input: dict, tool_use_id: "str | None", conte
     _ti = hook_input.get("tool_input") or {}
     log(f"HOOK-CALL id={tool_use_id} file={_ti.get('file_path')}")
     try:
-        tool_input = hook_input.get("tool_input") or {}
-        fp = tool_input.get("file_path")
-        if not fp:
+        rel = _resolve_hook_target(cfg, hook_input)
+        if rel is None:
             return {}
-        if not fp.startswith("/"):
-            fp = os.path.join(cfg.repo_root, fp)
-        abs_path = os.path.realpath(fp)
-        tests_dir = os.path.join(cfg.repo_root, "tests")
-        if not abs_path.startswith(tests_dir + os.sep):
-            return {}
-        if not os.path.isfile(abs_path):
-            return {}
-        run_sh = os.path.join(cfg.repo_root, "scripts", "run.sh")
-        if not os.path.isfile(run_sh):
-            return {}
-        rel = os.path.relpath(abs_path, cfg.repo_root)
-        proc = await asyncio.create_subprocess_exec(
-            "bash", run_sh, "test", rel,
-            cwd=cfg.repo_root,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        # Read into a shared list: a cancelled wait_for discards the read
-        # task's LOCAL state (a communicate() that was cancelled had already
-        # consumed the pre-kill bytes into its own locals — they were lost).
-        # Chunks delivered before the deadline survive in `chunks` (bug 6:
-        # the timeout message must show what the test printed before it hung).
-        chunks: list[bytes] = []
-
-        async def _drain() -> None:
-            while True:
-                c = await proc.stdout.read(65536)
-                if not c:
-                    break
-                chunks.append(c)
-
-        try:
-            await asyncio.wait_for(_drain(), timeout=_HOOK_TEST_TIMEOUT_S)
-            await proc.wait()  # pipe EOF can arrive before the exit status
-            rc = proc.returncode
-        except asyncio.TimeoutError:
-            proc.kill()
-            await _drain()
-            rc = 124
-        out = b"".join(chunks)
-        # rc=0: GREEN (implementation exists) — stay silent.
-        # rc=2: runner refused the path (not a test in its terms) — not our concern.
-        # rc=6: ENV-FAIL (runner unavailable in the image) — an environment
-        #       failure, NOT a red test; emitting RED here is what burned a
-        #       whole turn on CC-081 ("fix" the environment from src/).
-        if rc in (0, 2, 6):
-            if rc == 6:
-                log(f"VERIFIER HOOK: ENV-FAIL ({rel} rc=6) — runner unavailable, no RED")
-            return {}
-        text = out.decode("utf-8", "replace")
-        tail = "\n".join(text.splitlines()[-25:])
-        if rc == 124:
-            # rc=124: the test HUNG (run.sh's 60 s runner timeout, or this
-            # hook's own backstop) — not a red assertion. "Implement src/ to
-            # make it GREEN" here is a retry-loop DoS: the model iterates on
-            # src/, the test hangs again, the hook fires again. Name the
-            # failure mode (hang) and where to look instead.
-            log(f"VERIFIER HOOK: TIMEOUT-ABORT ({rel} rc=124)")
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": (
-                        f"VERIFY: TIMEOUT-ABORT ({rel} rc=124). The test hung "
-                        f"past the runner timeout — this is NOT a red test; "
-                        f"do not iterate on src/ to make it green. Locate and "
-                        f"remove the hang (infinite loop / blocking call) in "
-                        f"the test or in the implementation.\n{tail}"
-                    ),
-                }
-            }
-        log(f"VERIFIER HOOK: RED CONFIRMED ({rel} rc={rc})")
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": (
-                    f"VERIFY: RED CONFIRMED ({rel} rc={rc}). "
-                    f"Implement src/ to make it GREEN.\n{tail}"
-                ),
-            }
-        }
+        rc, out = await _run_hook_test(cfg, rel)
+        return _hook_verdict(rel, rc, out)
     except Exception as e:
         log(f"VERIFIER HOOK: no-op (error: {e})")
         return {}
+
+
+def _observability_warnings(job: dict, turn: int, inp: int, live_context: int) -> None:
+    """PREFIX-BREAK + CONTEXT-ROT warnings (diagnostics only — never a verdict).
+
+    PREFIX-BREAK: a KV-prefix break shows up exactly as a spike in the turn's
+    input_tokens (uncached re-send). Only meaningful from turn 2: on turn 1
+    there is no previous turn to break the prefix from, so comparing the first
+    prompt against a constant baseline fired a false WARN on every run (CC-126).
+    """
+    prev_inputs = [t["input_tokens"] for t in job["turn_telemetry"][:-1]]
+    if prev_inputs:
+        median_prev = sorted(prev_inputs)[len(prev_inputs) // 2]
+        if inp > 2 * median_prev:
+            job["turn_telemetry"][-1]["prefix_break"] = True
+            log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} "
+                f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
+
+    rot_threshold = context_rot_threshold()
+    if rot_threshold is not None and live_context > rot_threshold:
+        log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
+            f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
+
+
+def _fix_prompt(failures, turn: int) -> str:
+    """The FAIL fix prompt: <verification_result> XML with the failure blocks
+    and the <contract_lock> rules the machine must respect while fixing."""
+    rules = _fix_prompt_rules(failures)
+    fail_xml_blocks = "\n".join([
+        f'  <failure test="{name}">\n{diff}\n  </failure>'
+        for name, diff in failures
+    ])
+    return (
+        f"<verification_result status=\"FAIL\" turn=\"{turn}\">\n"
+        f"<test_errors count=\"{len(failures)}\">\n"
+        f"{fail_xml_blocks}\n"
+        f"</test_errors>\n"
+        f"<contract_lock>\n"
+        f"{rules}\n"
+        f"</contract_lock>\n"
+        f"</verification_result>"
+    )
 
 
 def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "SessionPlan",
@@ -398,23 +466,7 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
     # tests/ or scripts/run.sh?
     _check_contract_lock(cfg, tests_manifest_before, job, turn, plan)
 
-    # PREFIX-BREAK alarm: a KV-prefix break shows up exactly as a
-    # spike in the turn's input_tokens (uncached re-send). Only
-    # meaningful from turn 2: on turn 1 there is no previous turn to
-    # break the prefix from, so comparing the first prompt against a
-    # constant baseline fired a false WARN on every run (CC-126).
-    prev_inputs = [t["input_tokens"] for t in job["turn_telemetry"][:-1]]
-    if prev_inputs:
-        median_prev = sorted(prev_inputs)[len(prev_inputs) // 2]
-        if inp > 2 * median_prev:
-            job["turn_telemetry"][-1]["prefix_break"] = True
-            log(f"  [PREFIX-BREAK WARN] turn {turn} input_tokens={inp} "
-                f"> 2x median of previous turns ({median_prev}) — KV prefix likely not reused")
-
-    rot_threshold = context_rot_threshold()
-    if rot_threshold is not None and live_context > rot_threshold:
-        log(f"  [CONTEXT-ROT WARN] Live context window ({live_context} tokens) "
-            f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
+    _observability_warnings(job, turn, inp, live_context)
 
     verify_ok, failures, env_fail = verify_gate(cfg, plan)
 
@@ -460,36 +512,18 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
     job["failures"] = failures
 
     if turn < max_turns:
-        rules = _fix_prompt_rules(failures)
-
-        fail_xml_blocks = "\n".join([
-            f'  <failure test="{name}">\n{diff}\n  </failure>'
-            for name, diff in failures
-        ])
-        next_prompt = (
-            f"<verification_result status=\"FAIL\" turn=\"{turn}\">\n"
-            f"<test_errors count=\"{len(failures)}\">\n"
-            f"{fail_xml_blocks}\n"
-            f"</test_errors>\n"
-            f"<contract_lock>\n"
-            f"{rules}\n"
-            f"</contract_lock>\n"
-            f"</verification_result>"
-        )
-        return None, next_prompt
+        return None, _fix_prompt(failures, turn)
 
     log("Retry limit exhausted (Context Inertia Guard). Finishing.")
     return None, ""
 
 
-async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
-                                max_retries: int, plan: "SessionPlan") -> int:
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
+def _agent_options(cfg, run_state):
+    """The ClaudeAgentOptions for one machine session (R3/R1: tool surface,
+    in-process verifier hook, static machine settings)."""
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
-    local_run_id = str(uuid.uuid4())[:8]
-    stream_out_path = os.path.join(run_state.live_dir, f"session-{local_run_id}.jsonl")
-
-    options = ClaudeAgentOptions(
+    return ClaudeAgentOptions(
         cli_path=cfg.claude_bin,
         cwd=cfg.repo_root,
         setting_sources=["project"],
@@ -513,6 +547,107 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
         model=cfg.model,
         env=build_agent_env(cfg, run_state),
     )
+
+
+async def _interrupt_client(client) -> None:
+    """Best-effort interrupt of the live SDK client; an interrupt error is a
+    WARN, never a new failure (the run is already being failed closed)."""
+    try:
+        await client.interrupt()
+    except Exception as e:
+        log(f"WARN: client.interrupt() finished with an error: {e}")
+
+
+async def _drain_turn_task(turn_task) -> None:
+    """Post-timeout cleanup of the shielded turn task: give it 5 s to finish
+    on its own (the interrupt may end it), then cancel and collect."""
+    try:
+        await asyncio.wait_for(asyncio.shield(turn_task), timeout=5.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+    if not turn_task.done():
+        turn_task.cancel()
+    await asyncio.gather(turn_task, return_exceptions=True)
+
+
+async def _turn_timeout_verdict(client, turn_task, job: dict, turn: int,
+                               cfg) -> int:
+    """Silent-stall timeout: interrupt, drain the shielded task, fail closed
+    with the TURN-TIMEOUT code."""
+    log(f"TIMEOUT: turn {turn} exceeded {cfg.turn_timeout_s:.0f}s (silent stall) -> interrupt")
+    await _interrupt_client(client)
+    await _drain_turn_task(turn_task)
+    job["error"] = f"TURN-TIMEOUT ({cfg.turn_timeout_s:.0f}s)"
+    job["verifier"] = "FAIL"
+    job["turns"] = turn
+    return 1
+
+
+def _record_turn_telemetry(job: dict, total_tokens: dict, result: TurnResult,
+                          turn: int, elapsed_turn: float) -> int:
+    """Cumulative token & cache telemetry for one finished turn (guarantee 4).
+
+    Updates total_tokens in place, recomputes job["tokens"]/job["cache_hit_rate"],
+    appends the turn_telemetry entry, logs the turn line. Returns live_context:
+    the prompt size on the LAST API call (not the turn's cumulative usage) —
+    the real context the model had to attend to (CONTEXT-ROT input).
+    """
+    inp = result.usage.get("input_tokens", 0)
+    out = result.usage.get("output_tokens", 0)
+    c_read = result.usage.get("cache_read_input_tokens", 0)
+    c_create = result.usage.get("cache_creation_input_tokens", 0)
+
+    total_tokens["input_tokens"] += inp
+    total_tokens["output_tokens"] += out
+    total_tokens["cache_read_input_tokens"] += c_read
+    total_tokens["cache_creation_input_tokens"] += c_create
+
+    total_input_context = (
+        total_tokens["input_tokens"]
+        + total_tokens["cache_read_input_tokens"]
+        + total_tokens.get("cache_creation_input_tokens", 0)
+    )
+    session_hit_rate = (
+        total_tokens["cache_read_input_tokens"] / total_input_context * 100.0
+    ) if total_input_context > 0 else 0.0
+    job["tokens"] = total_tokens
+    job["cache_hit_rate"] = f"{session_hit_rate:.1f}%"
+
+    turn_input_context = inp + c_read + c_create
+    turn_hit_rate = (c_read / turn_input_context * 100.0) if turn_input_context > 0 else 0.0
+
+    live_context = (
+        result.live_window.get("input_tokens", 0)
+        + result.live_window.get("cache_read_input_tokens", 0)
+        + result.live_window.get("cache_creation_input_tokens", 0)
+    ) or turn_input_context
+
+    log(f"Turn {turn} finished in {elapsed_turn:.1f}s | "
+        f"Turn tokens: in={inp}, out={out}, cache_hit={c_read} ({turn_hit_rate:.1f}%) | "
+        f"live window: {live_context} | "
+        f"Session cache_hit: {session_hit_rate:.1f}%")
+
+    job.setdefault("turn_telemetry", []).append({
+        "turn": turn,
+        "elapsed_s": round(elapsed_turn, 1),
+        "input_tokens": inp,
+        "output_tokens": out,
+        "cache_read_input_tokens": c_read,
+        "cache_creation_input_tokens": c_create,
+        "live_context_tokens": live_context,
+        "turn_hit_rate": round(turn_hit_rate, 1),
+        "writes": result.writes,
+    })
+    return inp, live_context
+
+
+async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
+                                max_retries: int, plan: "SessionPlan") -> int:
+    from claude_agent_sdk import ClaudeSDKClient
+
+    local_run_id = str(uuid.uuid4())[:8]
+    stream_out_path = os.path.join(run_state.live_dir, f"session-{local_run_id}.jsonl")
+    options = _agent_options(cfg, run_state)
 
     max_turns = 1 + max_retries
     current_prompt = ticket_prompt
@@ -543,27 +678,14 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
                     _execute_turn(client, current_prompt, turn, stream_f, job, run_state)
                 )
 
+                # Shielded Turn Watchdog (guarantee 5): asyncio.shield keeps the
+                # turn task alive past wait_for, so client.interrupt() runs
+                # cleanly and the summary is written with the TURN-TIMEOUT code
+                # without the process dying on CancelledError.
                 try:
                     result = await asyncio.wait_for(asyncio.shield(turn_task), timeout=cfg.turn_timeout_s)
                 except asyncio.TimeoutError:
-                    log(f"TIMEOUT: turn {turn} exceeded {cfg.turn_timeout_s:.0f}s (silent stall) -> interrupt")
-                    try:
-                        await client.interrupt()
-                    except Exception as e:
-                        log(f"WARN: client.interrupt() finished with an error: {e}")
-
-                    try:
-                        await asyncio.wait_for(asyncio.shield(turn_task), timeout=5.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
-                        pass
-                    if not turn_task.done():
-                        turn_task.cancel()
-                    await asyncio.gather(turn_task, return_exceptions=True)
-
-                    job["error"] = f"TURN-TIMEOUT ({cfg.turn_timeout_s:.0f}s)"
-                    job["verifier"] = "FAIL"
-                    job["turns"] = turn
-                    return 1
+                    return await _turn_timeout_verdict(client, turn_task, job, turn, cfg)
 
                 # CC-207: the loop-guard circuit breaker tripped mid-turn —
                 # the model repeated one identical call 5x in a row and the
@@ -575,63 +697,12 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
                     log(f"LOOP-TRAP (turn {turn}): {result.loop_trap.get('tool')!r} "
                         f"repeated {result.loop_trap.get('n')}x consecutively — "
                         "circuit breaker tripped, interrupting the session")
-                    try:
-                        await client.interrupt()
-                    except Exception as e:
-                        log(f"WARN: client.interrupt() finished with an error: {e}")
+                    await _interrupt_client(client)
                     job["turns"] = turn
                     return _loop_trap_verdict(job, result.loop_trap)
 
                 elapsed_turn = time.time() - t0
-
-                inp = result.usage.get("input_tokens", 0)
-                out = result.usage.get("output_tokens", 0)
-                c_read = result.usage.get("cache_read_input_tokens", 0)
-                c_create = result.usage.get("cache_creation_input_tokens", 0)
-
-                total_tokens["input_tokens"] += inp
-                total_tokens["output_tokens"] += out
-                total_tokens["cache_read_input_tokens"] += c_read
-                total_tokens["cache_creation_input_tokens"] += c_create
-
-                total_input_context = (
-                    total_tokens["input_tokens"]
-                    + total_tokens["cache_read_input_tokens"]
-                    + total_tokens.get("cache_creation_input_tokens", 0)
-                )
-                session_hit_rate = (
-                    total_tokens["cache_read_input_tokens"] / total_input_context * 100.0
-                ) if total_input_context > 0 else 0.0
-                job["tokens"] = total_tokens
-                job["cache_hit_rate"] = f"{session_hit_rate:.1f}%"
-
-                turn_input_context = inp + c_read + c_create
-                turn_hit_rate = (c_read / turn_input_context * 100.0) if turn_input_context > 0 else 0.0
-
-                # Live window = prompt size on the LAST API call (not the turn's
-                # cumulative usage) — the real context the model had to attend to.
-                live_context = (
-                    result.live_window.get("input_tokens", 0)
-                    + result.live_window.get("cache_read_input_tokens", 0)
-                    + result.live_window.get("cache_creation_input_tokens", 0)
-                ) or turn_input_context
-
-                log(f"Turn {turn} finished in {elapsed_turn:.1f}s | "
-                    f"Turn tokens: in={inp}, out={out}, cache_hit={c_read} ({turn_hit_rate:.1f}%) | "
-                    f"live window: {live_context} | "
-                    f"Session cache_hit: {session_hit_rate:.1f}%")
-
-                job.setdefault("turn_telemetry", []).append({
-                    "turn": turn,
-                    "elapsed_s": round(elapsed_turn, 1),
-                    "input_tokens": inp,
-                    "output_tokens": out,
-                    "cache_read_input_tokens": c_read,
-                    "cache_creation_input_tokens": c_create,
-                    "live_context_tokens": live_context,
-                    "turn_hit_rate": round(turn_hit_rate, 1),
-                    "writes": result.writes,
-                })
+                inp, live_context = _record_turn_telemetry(job, total_tokens, result, turn, elapsed_turn)
 
                 # The verdict pipeline (dead-session stop, contract_lock,
                 # observability warnings, verify_gate, NO-OP/PASS/FAIL verdict,

@@ -14,13 +14,8 @@ incident. What is pinned here are the two pure helpers the session code uses:
       re-enters the same loop (the marker is cumulative for the session).
 """
 import json
-import sys
-from pathlib import Path
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import session  # noqa: E402
+from launcher import session
 
 
 MARKER = {"tool": "Read", "hash": "a" * 64, "n": 5, "ts": "2026-10-07T12:00:00"}

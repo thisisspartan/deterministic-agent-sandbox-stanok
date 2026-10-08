@@ -5,7 +5,8 @@ the submodule is not imported, so the call raises AttributeError unless some
 other module happens to import urllib.request as a side effect. The C refactor
 (hub gutted) removed that accidental cover: the launch-path preflight died
 with rc=20 "Server unavailable (AttributeError)" while the server was live.
-The subprocess below imports ONLY gates+config against a local /props stub:
+The subprocess below imports ONLY launcher.gates+launcher.config against a
+local /props stub:
 before the fix it exits 1 (AttributeError -> None), after the fix 0.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_server_preflight_import.py -q
@@ -17,7 +18,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class _PropsHandler(BaseHTTPRequestHandler):
@@ -40,11 +41,11 @@ def test_fetch_server_props_with_only_gates_imported():
     try:
         code = (
             "import sys; sys.path.insert(0, %r)\n"
-            "import gates\n"
-            "from config import Config\n"
+            "from launcher import gates\n"
+            "from launcher.config import Config\n"
             "props = gates._fetch_server_props(Config(server_url=%r))\n"
             "sys.exit(0 if props else 1)\n"
-        ) % (str(LAUNCHER_DIR), f"http://127.0.0.1:{port}")
+        ) % (str(REPO_ROOT), f"http://127.0.0.1:{port}")
         proc = subprocess.run(
             [sys.executable, "-c", code], capture_output=True, text=True, timeout=30
         )

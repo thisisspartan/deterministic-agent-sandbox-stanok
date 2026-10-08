@@ -1,14 +1,26 @@
 # ARCHITECTURE — the one-page map of a stanok run
 
-The call chain, the module map, and "where to change what". Operational
-docs (setup, run commands, env table, triage) stay in `README.md`; the
-machine's own rules are in `CLAUDE.md` (auto-loaded into the machine
-session — do not move them here).
+The call chain, the module map, the runner guarantees, and "where to change
+what". Operational docs (setup, run commands, env table, triage) stay in
+`README.md`; the machine's own rules are in `CLAUDE.md` (auto-loaded into
+the machine session — do not move them here).
+
+## Guarantees (runner-level; moved from the hub docstring — ARCH-REVIEW C, 2026-10-08)
+
+1. Single Continuous Session (ClaudeSDKClient): retries inside ONE session (99% KV cache) — `session.py`.
+2. Strict summary.json contract (probe_result, errors) for L1 — `summary.py`.
+3. Adaptive Contract Lock: adaptation for creating tests from scratch and a ban on weakening assertions — `verify.py`.
+4. Cumulative Token & Cache Telemetry: exact session_hit_rate calculation — `session.py`.
+5. Shielded Turn Watchdog: the turn timeout (default 1800s) is a terminal DoS circuit breaker — asyncio.shield() keeps the turn task alive past wait_for, so client.interrupt() runs cleanly and summary.json is written with the TURN-TIMEOUT code (rc=1) without the process dying on CancelledError — `session.py`.
+6. Verifier-output compression: last-N raw tail, no pattern heuristics at all (REVIEW-KISS-CLI-FIRST §3.3; the last substring filter — CC-138) — `verify.py`.
+7. Process cleanup: guaranteed at the container boundary via `docker stop -t 5` (client processes spawned with start_new_session=True are outside the host process group — the Reaper's os.killpg(0) does not reach them) — `cli.py`.
 
 ## The chain of one run
 
-HOST (`launch.sh` -> `launcher/cli.py main()` — the gate order is the
-launch-level rc contract, the namespace is `ExitCode` in `stanok.py`):
+HOST (`launch.sh` -> `launcher/cli.py main()` -> `cli._launch_gates` — the
+gate order lives in `_launch_gates`, one readable function; it is the
+launch-level rc contract, the namespace is `ExitCode` in
+`launcher/exitcodes.py`):
 
 ```
 label guard (rc=15) -> role-leak (rc=24) -> ticket resolution (rc=13)
@@ -54,7 +66,10 @@ by `summary.decide` (override first, then the table); pinned by
 | File | Owns |
 |---|---|
 | `launcher/config.py` | static configuration (`Config`, `from_env`) + per-run mutable state (`RunState`) |
-| `launcher/stanok.py` | the rc namespace (`ExitCode`), `SessionPlan` (the file-policy object), logging |
+| `launcher/stanok.py` | the entry shell ONLY (the three script call sites) — owns nothing (ARCH-REVIEW C) |
+| `launcher/exitcodes.py` | the rc namespace (`ExitCode` — the summary.json `rc` contract) |
+| `launcher/plan.py` | `SessionPlan` (the file-policy object, the single source — I1) |
+| `launcher/logs.py` | logging (`log()`; the per-run sink `_stdout_log_f` assigned by `cli.cmd_run`) |
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
 | `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, server preflight |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
@@ -84,6 +99,19 @@ globals. Acceptance criterion met: the harness is green (235 passed /
 2 skipped) with the old names deleted from the hub — a missed reference
 failed loudly on the first run and was fixed.
 
+**Follow-up (ARCH-REVIEW C, landed 2026-10-08): the hub is fully gutted.**
+The three remaining hub contents moved to their own modules unchanged:
+`ExitCode` -> `launcher/exitcodes.py`, `SessionPlan` -> `launcher/plan.py`
+(the single-source-of-policy invariant I1 is untouched), `log()` + the sink
+`_stdout_log_f` -> `launcher/logs.py` (still a module global by design: a
+per-run handle assigned by `cli.cmd_run`, not configuration).
+`launcher/stanok.py` is now the entry shell only — the one file the three
+script call sites invoke (launch.sh, the container argv, the background
+self-spawn via `stanok.__file__`). The transient double-instance quirk of
+running the hub as a script (body executed in `__main__` AND imported as
+`launcher.stanok`) is closed: the shell has no import-time side effects.
+Harness green (243 passed / 2 skipped).
+
 ## Supply chain: image-requirements.lock + digest inputs (landed 2026-10-08, modernization batch 2)
 
 **Decision (operator):** the image's package set is pinned by
@@ -103,8 +131,8 @@ COPY).
 
 ## Where to change what
 
-- A new rc or gate -> `cli.py main()` (the order) + `stanok.py ExitCode`
-  (the namespace) + this table.
+- A new rc or gate -> `cli.py _launch_gates` (the order) + `exitcodes.py
+  ExitCode` (the namespace) + this table.
 - A new test stack -> `scripts/stacks/*.toml` only (run.sh and the
   launcher derive from it at runtime).
 - Editing any digest input (`Dockerfile`, `scripts/run.sh`,

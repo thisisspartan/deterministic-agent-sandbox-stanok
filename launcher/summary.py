@@ -10,7 +10,7 @@ import json
 import os
 import shutil
 import subprocess
-from stanok import log
+from launcher.logs import log
 
 
 def _publish_evidence(cfg, label: str, container_rc: int) -> None:

@@ -29,20 +29,11 @@ and launcher/summary.py (C: no hub facade — the Config is passed explicitly):
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_verdict_safety.py -q
 """
 import json
-import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-LAUNCHER_DIR = REPO_ROOT / "launcher"
-
-# Import the launcher modules (pure stdlib + sandbox; the SDK is imported lazily).
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import summary  # noqa: E402
-import ticket  # noqa: E402
-import verify  # noqa: E402
-from config import Config  # noqa: E402
-from stanok import SessionPlan  # noqa: E402
+from launcher import summary, ticket, verify
+from launcher.config import Config
+from launcher.plan import SessionPlan
 
 
 # --- 1: _validate_declared_path ------------------------------------------------

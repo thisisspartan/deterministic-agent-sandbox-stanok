@@ -8,14 +8,8 @@ describes real behavior, not expectations: a future decide() refactor is
 correct only if this table passes UNCHANGED and the docstring is updated in
 the same diff.
 """
-import sys
-from pathlib import Path
-
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import summary  # noqa: E402
-from config import Config  # noqa: E402
+from launcher import summary
+from launcher.config import Config
 
 
 def _probe(job):

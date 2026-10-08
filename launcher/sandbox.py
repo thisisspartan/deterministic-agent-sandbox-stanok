@@ -32,6 +32,72 @@ import subprocess
 WRITABLE_ZONES = ("src", "tests", "docs", "scripts")
 
 
+def _mount_specs(repo_root: str, log_dir: str, rw_paths: tuple,
+                 ro_paths: tuple) -> list[str]:
+    """The `-v` mount set, in order (base :ro first, then the carve-outs).
+
+    rw_paths are repo-relative paths (files or dirs) to carve out rw — the
+    derivation is ticket.declared_carveout (T4, CC-135), the host computes
+    them before `docker run`. ro_paths are the pre-existing contract files
+    (tests/**, scripts/run.sh — ticket.host_ro_paths, T4b/CC-136) re-bound
+    :ro ON TOP of a rw carve-out DIR: Docker layers a file bind over a dir
+    bind by specificity, so a protected file stays immutable while new
+    siblings in that dir stay creatable. Emitted after the rw binds (deeper
+    destination wins).
+
+    Writable carve-outs: base repo read-only, the ticket's declared paths
+    re-mounted rw on top (Docker layers -v mounts by specificity) — the T3
+    experiment (2026-09-24): an existing file bound rw over the ro repo is
+    writable while its siblings stay EROFS, and a file bound ro over a rw DIR
+    is EROFS while its new siblings stay creatable (verified 2026-09-24).
+    .git inherits :ro from the base mount — git reads work, git writes fail
+    at the filesystem layer. Parent of the repo mounted ro FIRST: tickets live
+    in $PARENT_DIR/tickets and the role-leak gate (rc=24) checks
+    $PARENT_DIR/CLAUDE.md.
+    The base repo is ALWAYS :ro (CC-154).
+    """
+    parent_dir = os.path.dirname(repo_root)
+    specs = [
+        f"{parent_dir}:{parent_dir}:ro",
+        f"{repo_root}:{repo_root}:ro",
+    ]
+    specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:rw" for rel in rw_paths]
+    specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:ro" for rel in ro_paths]
+    specs.append(f"{log_dir}:{log_dir}:rw")
+    return specs
+
+
+def _container_env(claude_tmp: str) -> dict[str, str]:
+    """The `-e` env set for the container process.
+
+    Env passthrough: stanok.py reads only STANOK_* (Prefix Invariance).
+    R4: node + claude are baked into the image at /usr/local/bin — no host
+    bind-mounts, PATH just needs the image dirs.
+    """
+    env = {k: v for k, v in os.environ.items() if k.startswith("STANOK_")}
+    env["STANOK_IN_CONTAINER"] = "1"
+    env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+    env["HOME"] = "/home/stanok"
+    env["CLAUDE_TMPDIR"] = claude_tmp
+    # T4 baseline (CC-135): declared paths may be files inside otherwise-ro
+    # dirs, so CPython must not drop __pycache__/*.pyc next to an imported
+    # module. run.sh's py runner already sets this for pytest; this covers the
+    # agent's own python invocations (deterministic env, not a workaround).
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    for var in ("http_proxy", "https_proxy", "no_proxy", "NO_PROXY"):
+        if os.environ.get(var):
+            env[var] = os.environ[var]
+    # Diagnostic passthrough (CC-082 T6 capture): CLI debug log file + SDK HTTP
+    # logging + NODE_OPTIONS (abort()/fetch forensic preload, --require).
+    # Forwarded ONLY when set on the host (opt-in per launch); logging
+    # only — never alters transport behavior.
+    for var in ("DEBUG_SDK", "ANTHROPIC_LOG", "CLAUDE_CODE_DEBUG_LOGS_DIR",
+                "CLAUDE_CODE_DEBUG_LOG_LEVEL", "NODE_OPTIONS"):
+        if os.environ.get(var):
+            env[var] = os.environ[var]
+    return env
+
+
 def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
                  rw_paths: tuple = (), ro_paths: tuple = ()) -> tuple:
     """Return (container_name, docker_argv).
@@ -39,22 +105,11 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     inner_argv is the container-side command (e.g.
     ["/usr/bin/python3", "launcher/stanok.py", "run", ...]).
 
-    rw_paths are repo-relative paths (files or dirs) to carve out rw — the
-    derivation is ticket.declared_carveout (T4, CC-135), the host computes them
-    before `docker run`. The default is () = nothing writable: a caller that
-    forgets the carve-outs gets a read-only container, not an open one.
-
-    ro_paths are the pre-existing contract files (tests/**, scripts/run.sh —
-    ticket.host_ro_paths, T4b/CC-136) re-bound :ro ON TOP of a rw carve-out
-    DIR: Docker layers a file bind over a dir bind by specificity, so a
-    protected file stays immutable while new siblings in that dir stay
-    creatable. Emitted after the rw binds (deeper destination wins).
-
-    The base repo mount is ALWAYS :ro (CC-154). Everything writable is an
-    explicit `rw_paths` carve-out, so a caller that forgets them gets a
-    read-only container, never an open one.
+    rw_paths/ro_paths are the per-ticket mount carve-outs derived by the host
+    before `docker run` (ticket.declared_carveout / ticket.host_ro_paths —
+    see _mount_specs). The default is () = nothing writable: a caller that
+    forgets them gets a read-only container, never an open one.
     """
-    parent_dir = os.path.dirname(repo_root)
     uid, gid = os.getuid(), os.getgid()
     name = f"stanok-{os.path.basename(repo_root)}-{os.getpid()}"
 
@@ -90,51 +145,10 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
         "-w", repo_root,
     ]
 
-    # Writable carve-outs: base repo read-only, the ticket's declared paths
-    # re-mounted rw on top (Docker layers -v mounts by specificity) — the T3
-    # experiment (2026-09-24): an existing file bound rw over the ro repo is
-    # writable while its siblings stay EROFS, and a file bound ro over a rw DIR
-    # is EROFS while its new siblings stay creatable (verified 2026-09-24).
-    # .git inherits :ro from the base mount — git reads work, git writes fail
-    # at the filesystem layer. Parent of the repo mounted ro FIRST: tickets live
-    # in $PARENT_DIR/tickets and the role-leak gate (rc=24) checks
-    # $PARENT_DIR/CLAUDE.md.
-    # The base repo is ALWAYS :ro (CC-154).
-    specs = [
-        f"{parent_dir}:{parent_dir}:ro",
-        f"{repo_root}:{repo_root}:ro",
-    ]
-    specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:rw" for rel in rw_paths]
-    specs += [f"{repo_root}/{rel}:{repo_root}/{rel}:ro" for rel in ro_paths]
-    specs.append(f"{log_dir}:{log_dir}:rw")
-    for spec in specs:
+    for spec in _mount_specs(repo_root, log_dir, rw_paths, ro_paths):
         argv += ["-v", spec]
 
-    # Env passthrough: stanok.py reads only STANOK_* (Prefix Invariance).
-    # R4: node + claude are baked into the image at /usr/local/bin — no host
-    # bind-mounts, PATH just needs the image dirs.
-    env = {k: v for k, v in os.environ.items() if k.startswith("STANOK_")}
-    env["STANOK_IN_CONTAINER"] = "1"
-    env["PATH"] = "/usr/local/bin:/usr/bin:/bin"
-    env["HOME"] = "/home/stanok"
-    env["CLAUDE_TMPDIR"] = claude_tmp
-    # T4 baseline (CC-135): declared paths may be files inside otherwise-ro
-    # dirs, so CPython must not drop __pycache__/*.pyc next to an imported
-    # module. run.sh's py runner already sets this for pytest; this covers the
-    # agent's own python invocations (deterministic env, not a workaround).
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    for var in ("http_proxy", "https_proxy", "no_proxy", "NO_PROXY"):
-        if os.environ.get(var):
-            env[var] = os.environ[var]
-    # Diagnostic passthrough (CC-082 T6 capture): CLI debug log file + SDK HTTP
-    # logging + NODE_OPTIONS (abort()/fetch forensic preload, --require).
-    # Forwarded ONLY when set on the host (opt-in per launch); logging
-    # only — never alters transport behavior.
-    for var in ("DEBUG_SDK", "ANTHROPIC_LOG", "CLAUDE_CODE_DEBUG_LOGS_DIR",
-                "CLAUDE_CODE_DEBUG_LOG_LEVEL", "NODE_OPTIONS"):
-        if os.environ.get(var):
-            env[var] = os.environ[var]
-    for k, v in env.items():
+    for k, v in _container_env(claude_tmp).items():
         argv += ["-e", f"{k}={v}"]
 
     # Resource limits: defense in depth alongside the Python TURN_TIMEOUT_S

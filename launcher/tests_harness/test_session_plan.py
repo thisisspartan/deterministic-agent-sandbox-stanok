@@ -28,25 +28,17 @@ being a second policy list in the plan — pinned in test_t4_mounts.py.
 
 C (PLAN-HYGIENE 2026-10-08): the hub facade is gone — the functions live in
 ticket/verify/gates and take the Config explicitly; the quarantine dir comes
-from the passed-in RunState.
+from the passed-in RunState. ARCH-REVIEW C (2026-10-08): SessionPlan moved
+to launcher/plan.py — the single-source invariant (I1) is unchanged.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_session_plan.py -q
 """
 import dataclasses
-import sys
-from pathlib import Path
 
 import pytest
 
-LAUNCHER_DIR = Path(__file__).resolve().parents[1]
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import gates  # noqa: E402
-import sandbox  # noqa: E402
-import stanok  # noqa: E402
-import ticket  # noqa: E402
-import verify  # noqa: E402
-from config import Config, RunState  # noqa: E402
+from launcher import gates, plan as plan_mod, sandbox, ticket, verify
+from launcher.config import Config, RunState
 
 from conftest import repo, write
 
@@ -56,7 +48,7 @@ def _build_plan(cfg, ticket_text):
     plan (the plan carries no mount/protected lists — T4/CC-135 derives the
     rw mounts, T4b/CC-136 the :ro binds)."""
     declared, edit_paths, _ = ticket.parse_ticket_header(cfg, ticket_text)
-    return stanok.SessionPlan(
+    return plan_mod.SessionPlan(
         declared_paths=tuple(declared),
         edit_paths=tuple(edit_paths),
     )
@@ -88,7 +80,7 @@ def test_plan_fields_from_ticket_header():
     # mutable_paths collapsed into declared_paths — it was always equal).
     # git_mode dropped as dead (PLAN-HYGIENE 2026-10-08): .git RO is enforced
     # at the mount layer; no consumer ever read the field.
-    assert {f.name for f in dataclasses.fields(stanok.SessionPlan)} == {
+    assert {f.name for f in dataclasses.fields(plan_mod.SessionPlan)} == {
         "declared_paths", "edit_paths"}
 
 
@@ -180,7 +172,7 @@ def test_zones_have_one_source():
     # (declared_carveout), so the plan carries no zone field at all.
     assert not hasattr(sandbox, "DEFAULT_RW_ZONES")
     assert sandbox.WRITABLE_ZONES == ("src", "tests", "docs", "scripts")
-    fields = {f.name for f in dataclasses.fields(stanok.SessionPlan)}
+    fields = {f.name for f in dataclasses.fields(plan_mod.SessionPlan)}
     assert "rw_zones" not in fields
 
 
@@ -242,9 +234,9 @@ def test_bootstrap_is_not_a_kind():
     )
     assert declared == []
     assert edit_paths == []
-    assert not hasattr(stanok, "_validate_bootstrap_path")
-    assert not hasattr(stanok, "precreate_bootstrap_paths")
-    assert not hasattr(stanok, "_bootstrap_paths")
+    assert not hasattr(plan_mod, "_validate_bootstrap_path")
+    assert not hasattr(plan_mod, "precreate_bootstrap_paths")
+    assert not hasattr(plan_mod, "_bootstrap_paths")
 
 
 # --- CC-133: create-vs-edit derived from the filesystem -------------------------

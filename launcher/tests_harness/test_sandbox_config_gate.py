@@ -31,13 +31,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from launcher import gates
+from launcher.config import Config
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER_DIR = REPO_ROOT / "launcher"
-
-if str(LAUNCHER_DIR) not in sys.path:
-    sys.path.insert(0, str(LAUNCHER_DIR))
-import gates  # noqa: E402
-from config import Config  # noqa: E402
 
 
 def _repo_with_settings(tmp_path, fs):
@@ -147,7 +145,7 @@ def test_full_path_rc28(tmp_path):
     label = "w7-rc28"
     proc = subprocess.run(
         [sys.executable, str(LAUNCHER_DIR / "stanok.py"),
-         "run", "tickets/TASK-TEST.md", label, "--direct"],
+         "run", str(repo / "tickets" / "TASK-TEST.md"), label],
         cwd=repo, env=env, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 28, proc.stdout + proc.stderr
