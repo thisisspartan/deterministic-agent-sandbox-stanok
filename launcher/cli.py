@@ -52,30 +52,46 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
-def cmd_run(cfg, args) -> int:
-    try:
-        if os.getpgid(0) != os.getpid():
-            os.setpgid(0, 0)
-    except OSError:
-        pass
+def _fail_early(cfg, run_state, job: dict, start_ts: int, code: int, error: str) -> int:
+    """Early-failure exit for cmd_run: write the summary, remove the marker.
 
-    evidence_dir, live_dir = cfg.label_paths(args.label)
+    The same three steps every pre-session refusal in cmd_run needs (ticket
+    parse, no-declared-paths, server preflight, workspace prep) — one place,
+    so no refusal path can forget the marker cleanup.
+    """
+    job["rc"] = int(code)
+    job["error"] = error
+    write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+    if os.path.exists(run_state.marker_path):
+        try:
+            os.remove(run_state.marker_path)
+        except OSError:
+            pass
+    return int(code)
+
+
+def _open_run_state(cfg, label: str) -> tuple:
+    """Per-run setup: dirs, the logging sink, RunState, the .running marker.
+
+    Returns (run_state, start_ts). The logging sink is a per-run handle (see
+    the logs module docstring): opened here, assigned to the module global,
+    released at process exit.
+
+    R2: the marker is written by the host-side supervisor (run_sandboxed /
+    launch_background) with ITS pid — inside the container os.getpid() is
+    not visible from the host. If the marker already exists, preserve its
+    start_ts/pid; only a fresh in-process run (no-sandbox) writes its own.
+    """
+    evidence_dir, live_dir = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
     os.makedirs(live_dir, exist_ok=True)
 
-    # The logging sink is a per-run handle (see the logs module docstring):
-    # opened here, assigned to the module global, released at process exit.
     logs._stdout_log_f = open(os.path.join(evidence_dir, "launcher.stdout.log"), "a", encoding="utf-8")
     run_state = RunState(evidence_dir=evidence_dir, live_dir=live_dir,
                          marker_path=os.path.join(evidence_dir, ".running"))
 
     start_ts = int(time.time())
     recorded_pid = os.getpid()
-
-    # R2: the marker is written by the host-side supervisor (run_sandboxed /
-    # launch_background) with ITS pid — inside the container os.getpid() is
-    # not visible from the host. If the marker already exists, preserve its
-    # start_ts/pid; only a fresh in-process run (no-sandbox) writes its own.
     if os.path.exists(run_state.marker_path):
         try:
             parts = open(run_state.marker_path, "r", encoding="utf-8").read().split()
@@ -87,79 +103,37 @@ def cmd_run(cfg, args) -> int:
 
     with open(run_state.marker_path, "w", encoding="utf-8") as f:
         f.write(f"{start_ts} {recorded_pid}\n")
+    return run_state, start_ts
 
-    _install_signal_handlers(run_state)
 
-    job = {"label": args.label, "ticket": args.ticket}
-    log(f"STANOK RUNNER | Repo: {cfg.repo_root} | Label: {args.label}")
+def _read_ticket_contract(cfg, ticket_path: str) -> tuple:
+    """Ticket-scoped invariant (W2.1): read the ticket and parse its header.
 
-    # Ticket-scoped invariant (W2.1): parse the header BEFORE any workspace
-    # mutation. Fail-closed: no `impl:`/`test:`/`docs:`/`edit:` line and no
-    # `reset: none` means the invariant cannot be enforced (the old false
-    # CLEAN-FIRST returns); an invalid literal path — including a
-    # create-declared path that already exists (CC-133) — is rejected the same
-    # way, before any workspace mutation.
-    try:
-        with open(args.ticket_path, encoding="utf-8") as f:
-            ticket_prompt = f.read().strip()
-        declared_paths, edit_paths, reset_none = parse_ticket_header(cfg, ticket_prompt)
-        # CC-133: the create/edit split is derived from the filesystem, not
-        # trusted from the header (ValueError -> rc=13 below).
-        assert_create_paths_are_new(cfg, declared_paths, edit_paths)
-        # CC-206: `edit:` on a protected file is an unsatisfiable contract
-        # (CC-204-retry3) — refuse it here, before any workspace mutation.
-        assert_edit_paths_are_not_protected(cfg, edit_paths)
-    except (OSError, ValueError) as e:
-        job["rc"] = int(ExitCode.TICKET)
-        job["error"] = f"ticket parse error: {e}"
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
-        if os.path.exists(run_state.marker_path):
-            try: os.remove(run_state.marker_path)
-            except OSError: pass
-        return int(ExitCode.TICKET)
+    Returns (ticket_prompt, declared_paths, edit_paths, reset_none). Raises
+    OSError/ValueError for any refusal: no `impl:`/`test:`/`docs:`/`edit:`
+    line and no `reset: none` means the invariant cannot be enforced (the old
+    false CLEAN-FIRST returns); an invalid literal path — including a
+    create-declared path that already exists (CC-133) — is rejected the same
+    way. Called BEFORE any workspace mutation.
+    """
+    with open(ticket_path, encoding="utf-8") as f:
+        ticket_prompt = f.read().strip()
+    declared_paths, edit_paths, reset_none = parse_ticket_header(cfg, ticket_prompt)
+    # CC-133: the create/edit split is derived from the filesystem, not
+    # trusted from the header.
+    assert_create_paths_are_new(cfg, declared_paths, edit_paths)
+    # CC-206: `edit:` on a protected file is an unsatisfiable contract
+    # (CC-204-retry3) — refuse it here, before any workspace mutation.
+    assert_edit_paths_are_not_protected(cfg, edit_paths)
+    return ticket_prompt, declared_paths, edit_paths, reset_none
 
-    if not declared_paths and not reset_none:
-        job["rc"] = int(ExitCode.TICKET)
-        job["error"] = ("ticket declares no `impl:`/`test:`/`docs:`/`edit:` "
-                        "line and no `reset: none` — the ticket-scoped invariant "
-                        "cannot be enforced (fail-closed)")
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
-        if os.path.exists(run_state.marker_path):
-            try: os.remove(run_state.marker_path)
-            except OSError: pass
-        return int(ExitCode.TICKET)
-    if declared_paths:
-        log(f"DECLARED PATHS: {declared_paths}")
-    if edit_paths:
-        log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
 
-    # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
-    plan = SessionPlan(
-        declared_paths=tuple(declared_paths),
-        edit_paths=tuple(edit_paths),
-    )
-
-    if not preflight_server(cfg):
-        job["rc"] = int(ExitCode.SERVER)
-        job["error"] = f"Server unavailable ({cfg.server_url})"
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
-        if os.path.exists(run_state.marker_path):
-            try: os.remove(run_state.marker_path)
-            except OSError: pass
-        return int(ExitCode.SERVER)
-
-    if prepare_workspace(cfg, run_state, plan) != 0:
-        job["rc"] = int(ExitCode.WORKSPACE)
-        job["error"] = "workspace prep error"
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
-        if os.path.exists(run_state.marker_path):
-            try: os.remove(run_state.marker_path)
-            except OSError: pass
-        return int(ExitCode.WORKSPACE)
-
+def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: int,
+                 plan: SessionPlan, start_ts: int) -> int:
+    """Run the continuous session, then finalize: Opik sample, summary, marker."""
     rc = 1
     try:
-        rc = asyncio.run(run_continuous_session(cfg, run_state, job, ticket_prompt, args.local_retries, plan))
+        rc = asyncio.run(run_continuous_session(cfg, run_state, job, ticket_prompt, local_retries, plan))
     except KeyboardInterrupt:
         rc = run_state.interrupted_rc or 130
     except Exception as e:
@@ -186,7 +160,55 @@ def cmd_run(cfg, args) -> int:
                 os.remove(run_state.marker_path)
             except OSError:
                 pass
+    return rc
 
+
+def cmd_run(cfg, args) -> int:
+    try:
+        if os.getpgid(0) != os.getpid():
+            os.setpgid(0, 0)
+    except OSError:
+        pass
+
+    run_state, start_ts = _open_run_state(cfg, args.label)
+    _install_signal_handlers(run_state)
+
+    job = {"label": args.label, "ticket": args.ticket}
+    log(f"STANOK RUNNER | Repo: {cfg.repo_root} | Label: {args.label}")
+
+    try:
+        ticket_prompt, declared_paths, edit_paths, reset_none = _read_ticket_contract(
+            cfg, args.ticket_path)
+    except (OSError, ValueError) as e:
+        return _fail_early(cfg, run_state, job, start_ts, ExitCode.TICKET,
+                           f"ticket parse error: {e}")
+
+    if not declared_paths and not reset_none:
+        return _fail_early(
+            cfg, run_state, job, start_ts, ExitCode.TICKET,
+            "ticket declares no `impl:`/`test:`/`docs:`/`edit:` "
+            "line and no `reset: none` — the ticket-scoped invariant "
+            "cannot be enforced (fail-closed)")
+    if declared_paths:
+        log(f"DECLARED PATHS: {declared_paths}")
+    if edit_paths:
+        log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
+
+    # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
+    plan = SessionPlan(
+        declared_paths=tuple(declared_paths),
+        edit_paths=tuple(edit_paths),
+    )
+
+    if not preflight_server(cfg):
+        return _fail_early(cfg, run_state, job, start_ts, ExitCode.SERVER,
+                           f"Server unavailable ({cfg.server_url})")
+
+    if prepare_workspace(cfg, run_state, plan) != 0:
+        return _fail_early(cfg, run_state, job, start_ts, ExitCode.WORKSPACE,
+                           "workspace prep error")
+
+    rc = _run_session(cfg, run_state, job, ticket_prompt, args.local_retries, plan, start_ts)
     log(f"RUN FINISHED: rc={rc}")
     return rc
 
