@@ -449,10 +449,7 @@ def _resolve_ticket(cfg, arg: str) -> str:
     return candidates[0]
 
 
-def main() -> int:
-    root_refusal()
-    cfg = Config.from_env()
-
+def _build_parser(cfg) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="stanok",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -507,8 +504,137 @@ def main() -> int:
                      "container",
     )
     st.add_argument("label")
+    return p
 
-    args = p.parse_args()
+
+def _early_abort(cfg, evidence_dir: str, marker: str, label: str, ticket: str,
+                 code: ExitCode, err_msg: str) -> int:
+    """Launch-level refusal: log, clean a dead marker, write the EARLY-ABORT
+    summary (only when absent — a fresh verdict must not be overwritten)."""
+    log(err_msg)
+    if os.path.exists(marker):
+        # A live run's marker must survive an early abort of a
+        # concurrent launch attempt: remove it only when the
+        # recorded process is dead (or the marker is unparseable).
+        live = False
+        try:
+            with open(marker, encoding="utf-8") as f:
+                pid = int(f.read().split()[-1])
+            live = _pid_alive(pid)
+        except (OSError, ValueError):
+            pass
+        if not live:
+            try:
+                os.remove(marker)
+            except OSError:
+                pass
+    os.makedirs(evidence_dir, exist_ok=True)
+    sum_path = os.path.join(evidence_dir, "summary.json")
+    if not os.path.exists(sum_path):
+        job = {
+            "label": label,
+            "ticket": ticket,
+            "rc": int(code),
+            "verifier": "FAIL",
+            "probe_result": "EARLY-ABORT",
+            "turns": 0,
+            "error": err_msg,
+        }
+        with open(sum_path, "w", encoding="utf-8") as f:
+            json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
+    return int(code)
+
+
+def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
+    """The launch gate order — the documented rc contract (ARCHITECTURE.md).
+
+    One readable sequence: label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
+    ticket resolution (rc=13) -> dirty-tree (rc=22) -> hidden-files (rc=26)
+    -> test-config (rc=27) -> sandbox-config (rc=28). Returns None when all
+    gates pass, else (rc, message) for the caller to abort with. Sets
+    args.ticket_path on success (the resolved ticket, used by the launch
+    branches). Do not reorder: the order is the rc contract.
+    """
+    if validate_label(args.label):
+        return (ExitCode.BAD_LABEL, f"ERROR: Invalid label {args.label}")
+
+    # A stale summary.json from an earlier run of this label must not
+    # survive: abort writes only when the file is absent, so the
+    # supervisor could otherwise read a verdict from the previous run.
+    _rotate_stale_summary(cfg, args.label)
+
+    # ROLE-LEAK (rc=24): a parent CLAUDE.md above the repo would be auto-loaded
+    # into the machine session (cwd = REPO_ROOT) -> role leak. Fail-closed before
+    # reset/lock/preflight, no side effects.
+    parent_claude = os.path.join(os.path.dirname(cfg.repo_root), "CLAUDE.md")
+    if os.path.isfile(parent_claude):
+        return (ExitCode.ROLE_LEAK, f"ERROR: ROLE-LEAK: parent CLAUDE.md above the repo: {parent_claude}")
+
+    args.ticket_path = _resolve_ticket(cfg, args.ticket)
+    if not os.path.isfile(args.ticket_path):
+        return (ExitCode.TICKET, f"ERROR: Ticket not found: {args.ticket_path}")
+
+    if dirty_tree_gate(cfg):
+        return (ExitCode.DIRTY_TREE, "ERROR: the machine repo contains uncommitted changes (rc=22)")
+
+    # W4 hygiene gate (rc=26): hidden/TEMP leftovers in src/tests/docs/scripts
+    # leak into the machine's context and slip past dirty_tree_gate.
+    if hidden_files_gate(cfg):
+        return (ExitCode.HIDDEN_FILES, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
+
+    # W6 verdict-subversion gate (rc=27): pytest config files under tests/
+    # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
+    if check_test_config(cfg):
+        return (ExitCode.TEST_CONFIG, "ERROR: pytest config files in tests/ (rc=27)")
+
+    # W7 sandbox-config gate (rc=28): a sandbox.filesystem deny entry that
+    # resolves (against the settings dir, per cli.js) to a non-existent
+    # path makes bwrap EROFS-kill every Bash call in the session (CC-107).
+    # The abort message carries the offending entries + fix (CC-157).
+    sandbox_problems = sandbox_config_gate(cfg)
+    if sandbox_problems:
+        return (ExitCode.SANDBOX_CONFIG, "ERROR: sandbox.filesystem deny entry invalid (rc=28): "
+                + "; ".join(sandbox_problems))
+
+    return None
+
+
+def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
+    """Host sync: supervise the Docker container (launcher/sandbox.py).
+
+    The container-side Runner re-runs the gates and takes the lock.
+    CC-106: the image digest/runner preflight no longer blocks the
+    launch path — it lives in doctor
+    (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
+    """
+    if shutil.which("docker") is None:
+        return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket,
+                            ExitCode.DEFECT, "ERROR: docker not found on PATH")
+    # T4 (CC-135): the container's rw carve-outs must be fixed BEFORE
+    # `docker run`, but the SessionPlan is built later, inside the
+    # container — so the host derives them from the same ticket text with
+    # the same parser and the same rule (declared_carveout). A header the
+    # parser refuses (including a create-declared path that already exists,
+    # CC-133) is rc=13 here, before any container starts.
+    try:
+        with open(args.ticket_path, encoding="utf-8") as f:
+            declared, edit_paths, _ = parse_ticket_header(cfg, f.read())
+        assert_create_paths_are_new(cfg, declared, edit_paths)
+        # CC-206: same gate as cmd_run — the host must not start a
+        # container for a ticket that edits a protected file.
+        assert_edit_paths_are_not_protected(cfg, edit_paths)
+    except (OSError, ValueError) as e:
+        return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket,
+                            ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
+    rw_paths = host_rw_paths(cfg, declared)
+    ro_paths = host_ro_paths(cfg, rw_paths)
+    return run_sandboxed(cfg, args, rw_paths, ro_paths)
+
+
+def main() -> int:
+    root_refusal()
+    cfg = Config.from_env()
+    args = _build_parser(cfg).parse_args()
 
     if args.cmd == "status":
         return cmd_status(cfg, args.label)
@@ -522,80 +648,11 @@ def main() -> int:
         marker = os.path.join(evidence_dir, ".running")
 
         def abort(code: ExitCode, err_msg: str) -> int:
-            log(err_msg)
-            if os.path.exists(marker):
-                # A live run's marker must survive an early abort of a
-                # concurrent launch attempt: remove it only when the
-                # recorded process is dead (or the marker is unparseable).
-                live = False
-                try:
-                    with open(marker, encoding="utf-8") as f:
-                        pid = int(f.read().split()[-1])
-                    live = _pid_alive(pid)
-                except (OSError, ValueError):
-                    pass
-                if not live:
-                    try:
-                        os.remove(marker)
-                    except OSError:
-                        pass
-            os.makedirs(evidence_dir, exist_ok=True)
-            sum_path = os.path.join(evidence_dir, "summary.json")
-            if not os.path.exists(sum_path):
-                job = {
-                    "label": args.label,
-                    "ticket": args.ticket,
-                    "rc": int(code),
-                    "verifier": "FAIL",
-                    "probe_result": "EARLY-ABORT",
-                    "turns": 0,
-                    "error": err_msg,
-                }
-                with open(sum_path, "w", encoding="utf-8") as f:
-                    json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
-            return int(code)
+            return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket, code, err_msg)
 
-        if validate_label(args.label):
-            return abort(ExitCode.BAD_LABEL, f"ERROR: Invalid label {args.label}")
-
-        # A stale summary.json from an earlier run of this label must not
-        # survive: abort writes only when the file is absent, so the
-        # supervisor could otherwise read a verdict from the previous run.
-        _rotate_stale_summary(cfg, args.label)
-
-        # ROLE-LEAK (rc=24): a parent CLAUDE.md above the repo would be auto-loaded
-        # into the machine session (cwd = REPO_ROOT) -> role leak. Fail-closed before
-        # reset/lock/preflight, no side effects.
-        parent_claude = os.path.join(os.path.dirname(cfg.repo_root), "CLAUDE.md")
-        if os.path.isfile(parent_claude):
-            return abort(ExitCode.ROLE_LEAK, f"ERROR: ROLE-LEAK: parent CLAUDE.md above the repo: {parent_claude}")
-
-        args.ticket_path = _resolve_ticket(cfg, args.ticket)
-        if not os.path.isfile(args.ticket_path):
-            return abort(ExitCode.TICKET, f"ERROR: Ticket not found: {args.ticket_path}")
-
-        if dirty_tree_gate(cfg):
-            return abort(ExitCode.DIRTY_TREE, "ERROR: the machine repo contains uncommitted changes (rc=22)")
-
-        # W4 hygiene gate (rc=26): hidden/TEMP leftovers in src/tests/docs/scripts
-        # leak into the machine's context and slip past dirty_tree_gate.
-        if hidden_files_gate(cfg):
-            return abort(ExitCode.HIDDEN_FILES, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
-
-        # W6 verdict-subversion gate (rc=27): pytest config files under tests/
-        # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
-        if check_test_config(cfg):
-            return abort(ExitCode.TEST_CONFIG, "ERROR: pytest config files in tests/ (rc=27)")
-
-        # W7 sandbox-config gate (rc=28): a sandbox.filesystem deny entry that
-        # resolves (against the settings dir, per cli.js) to a non-existent
-        # path makes bwrap EROFS-kill every Bash call in the session (CC-107).
-        # The abort message carries the offending entries + fix (CC-157).
-        sandbox_problems = sandbox_config_gate(cfg)
-        if sandbox_problems:
-            return abort(
-                ExitCode.SANDBOX_CONFIG, "ERROR: sandbox.filesystem deny entry invalid (rc=28): "
-                + "; ".join(sandbox_problems))
+        refused = _launch_gates(cfg, args)
+        if refused is not None:
+            return abort(*refused)
 
         # R2: launch orchestration (the former launch.sh branches, in Python).
         in_container = os.environ.get("STANOK_IN_CONTAINER") == "1"
@@ -620,30 +677,6 @@ def main() -> int:
                 return abort(ExitCode.LOCK, f"LOCK: the repo is already busy with another run ({lock_path})")
             return cmd_run(cfg, args)
 
-        # Host sync: supervise the Docker container (launcher/sandbox.py).
-        # The container-side Runner re-runs the gates and takes the lock.
-        # CC-106: the image digest/runner preflight no longer blocks the
-        # launch path — it lives in doctor
-        # (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
-        if shutil.which("docker") is None:
-            return abort(ExitCode.DEFECT, "ERROR: docker not found on PATH")
-        # T4 (CC-135): the container's rw carve-outs must be fixed BEFORE
-        # `docker run`, but the SessionPlan is built later, inside the
-        # container — so the host derives them from the same ticket text with
-        # the same parser and the same rule (declared_carveout). A header the
-        # parser refuses (including a create-declared path that already exists,
-        # CC-133) is rc=13 here, before any container starts.
-        try:
-            with open(args.ticket_path, encoding="utf-8") as f:
-                declared, edit_paths, _ = parse_ticket_header(cfg, f.read())
-            assert_create_paths_are_new(cfg, declared, edit_paths)
-            # CC-206: same gate as cmd_run — the host must not start a
-            # container for a ticket that edits a protected file.
-            assert_edit_paths_are_not_protected(cfg, edit_paths)
-        except (OSError, ValueError) as e:
-            return abort(ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
-        rw_paths = host_rw_paths(cfg, declared)
-        ro_paths = host_ro_paths(cfg, rw_paths)
-        return run_sandboxed(cfg, args, rw_paths, ro_paths)
+        return _host_launch(cfg, args, evidence_dir, marker)
 
     return 0
