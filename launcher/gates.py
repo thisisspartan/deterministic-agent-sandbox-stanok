@@ -15,7 +15,7 @@ import os
 import re
 import subprocess
 import sys
-import urllib
+import urllib.request
 import tomllib
 import sandbox
 from stanok import log
