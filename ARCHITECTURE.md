@@ -44,6 +44,11 @@ gates re-run + lock (rc=21) -> session.run_continuous_session:
 
 - TDD red phase: the in-process PostToolUse hook `session._verifier_hook`.
 - Circuit breaker: the loop-guard hook (N=5) -> `session._loop_trap_verdict`.
+- Lock key (D2, plan 2026-10-08): `cli._lock_key` = the shared GIT COMMON DIR
+  (`git rev-parse --git-common-dir`, abspath-normalized) — computed on the HOST,
+  exported via `STANOK_LOCK_KEY` (the STANOK_* passthrough); the container never
+  runs git. Two worktrees of one repo share the lock (second run gets rc=21);
+  a missing key aborts the run — no silent md5(repo_root) fallback.
 
 VERDICT:
 
