@@ -21,8 +21,9 @@ Tests:
      run_sandboxed (the worker creates the file mid-run and claims PASS) ->
      published CONTRACT-FAIL, fresh check skipped
   2  a declared new test file -> no violation; end-to-end the PASS stands
-  3  new files OUTSIDE tests/ (src/, docs/) are normal deliverables — not
-     flagged
+  3  new files OUTSIDE src/ and tests/ (docs/) are normal deliverables —
+     not flagged. T3-10 moved the src/ half into test_stage3_src_tree.py:
+     src/ is now IN the rule.
   4  the worker-side _check_contract_lock flags an undeclared new tests/ file
      with the same mechanism (declared exemption works)
   5  __pycache__ files are not flagged (interpreter cache, not contract)
@@ -153,12 +154,13 @@ def test_declared_new_test_end_to_end_keeps_pass(tmp_path, monkeypatch):
     assert "fresh" in calls  # the fresh check ran over an intact tree
 
 
-# --- 3: the rule is scoped to tests/ ----------------------------------------------
+# --- 3: the rule is scoped to src/ + tests/ (T3-10) ------------------------------
 
-def test_new_files_outside_tests_are_not_flagged(tmp_path):
+def test_new_files_outside_src_and_tests_are_not_flagged(tmp_path):
+    # docs/ is a normal deliverable zone: a new undeclared docs/ file is not
+    # a substitution. The src/ half of the scope is test_stage3_src_tree.py.
     repo, cfg = _repo(tmp_path)
     before = verify.contract_snapshot(cfg)
-    (repo / "src" / "helper.py").write_text("x = 1\n", encoding="utf-8")
     (repo / "docs" / "note.md").write_text("notes\n", encoding="utf-8")
     assert verify.host_contract_check(cfg, before, ()) == []
 

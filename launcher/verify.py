@@ -236,6 +236,29 @@ def _protected_files(cfg) -> list[str]:
     return protected
 
 
+def _src_files(cfg) -> list[str]:
+    """T3-10 (operator 2026-10-09): the src/ file listing for the after-only
+    half of the structural rule. NOT protected files: existing src/ files are
+    the machine's normal implementation surface (MODIFIED/DELETED stays scoped
+    to _protected_files), and src/ must NOT enter _protected_files — that list
+    is also the host's :ro bind list (host_ro_paths), and binding src/ :ro
+    would make the machine unable to implement anything. The hole this closes
+    (proven live on the public code): a new src/colorsys.py shadows the stdlib
+    `colorsys` a reference test imports (src is on sys.path via
+    pythonpath=src); the test passes against the fake, W12 only sees test-like
+    names, the fresh check re-runs the same tree. __pycache__ is skipped for
+    the same reason as in _protected_files."""
+    src_dir = os.path.join(cfg.repo_root, "src")
+    listing: list[str] = []
+    if os.path.isdir(src_dir):
+        for root, dirs, files in os.walk(src_dir):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for name in files:
+                listing.append(os.path.relpath(os.path.join(root, name),
+                                               cfg.repo_root))
+    return listing
+
+
 def contract_snapshot(cfg) -> dict[str, str]:
     """Stage 3 (T3-1): the HOST-side entry point for the pre-run contract
     snapshot — the same manifest as _tests_manifest (the one protected-files
@@ -249,9 +272,13 @@ def contract_snapshot(cfg) -> dict[str, str]:
 
 def _tests_manifest(cfg) -> dict[str, str]:
     """Snapshot {rel_path: sha256} of the protected files (contract_lock,
-    W2.5 + P2) — see _protected_files for which files and why."""
+    W2.5 + P2) — see _protected_files for which files and why — plus the
+    src/ listing (T3-10): src/ entries exist in the snapshot ONLY for the
+    after-only UNDECLARED half of the structural rule; _compare_manifests
+    skips them in the MODIFIED/DELETED loop (existing src/ files are the
+    machine's implementation surface)."""
     manifest: dict[str, str] = {}
-    for rel in _protected_files(cfg):
+    for rel in _protected_files(cfg) + _src_files(cfg):
         try:
             with open(os.path.join(cfg.repo_root, rel), "rb") as f:
                 manifest[rel] = hashlib.sha256(f.read()).hexdigest()
@@ -270,14 +297,23 @@ def _compare_manifests(before: dict[str, str], after: dict[str, str],
     name. The substitution hole (live on the public main): a helper module
     tests/colorsys.py shadows the stdlib `colorsys` a reference test imports,
     the test passes against the fake; the name gate (run.sh list, W12) only
-    sees test-like names, so this is the structural half. The rule is scoped
-    to tests/: new files elsewhere (a bootstrap scripts/run.sh, src/
-    deliverables) are ticket output, not substitutions. Used by the
+    sees test-like names, so this is the structural half. T3-10 (operator,
+    same day): the same hole exists on the other side of the import path —
+    src/ is on sys.path (pythonpath=src), so the after-only scope is
+    tests/ + src/: any new undeclared file there is a substitution. The
+    asymmetry is deliberate: the MODIFIED/DELETED half stays scoped to the
+    protected files — existing src/ files are the machine's normal
+    implementation surface (the src/ entries in the snapshot exist only for
+    the after-only half, see _src_files). New files elsewhere (a bootstrap
+    scripts/run.sh, docs/) are ticket output, not substitutions. Used by the
     worker-side _check_contract_lock and by the host-side host_contract_check
     with the same declared context — the two cannot drift."""
     violations = []
     for rel, digest in before.items():
-        if rel in declared:
+        if rel in declared or rel.startswith("src/"):
+            # T3-10: src/ entries are in the snapshot for the after-only
+            # half only; editing/deleting an existing src/ file is normal
+            # implementation work, not a contract violation.
             continue
         if rel not in after:
             violations.append(f"DELETED: {rel}")
@@ -286,7 +322,7 @@ def _compare_manifests(before: dict[str, str], after: dict[str, str],
     for rel in after:
         if rel in before or rel in declared:
             continue
-        if rel.startswith("tests/"):
+        if rel.startswith("tests/") or rel.startswith("src/"):
             violations.append(f"UNDECLARED: {rel}")
     return violations
 
@@ -299,9 +335,9 @@ def host_contract_check(cfg, before: dict[str, str], declared) -> list[str]:
     summary (trust boundary, SPEC-VERDICT-INTEGRITY §1). No job/turn
     context; a PRE-EXISTING protected file has no exemption (CC-206 rejects
     tickets that edit one, so an exemption would only hide tampering).
-    T3-9: `declared` is the ticket's declared-path list — the only allowed
-    addition to tests/; without it a ticket's declared new tests would be
-    indistinguishable from a substitution."""
+    T3-9/T3-10: `declared` is the ticket's declared-path list — the only
+    allowed addition to tests/ or src/; without it a ticket's declared new
+    tests would be indistinguishable from a substitution."""
     return _compare_manifests(before, _tests_manifest(cfg), declared)
 
 
@@ -309,9 +345,10 @@ def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
                          plan: "SessionPlan") -> None:
     """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
     that was MODIFIED or DELETED is a contract_lock violation (replaces the
-    chmod a-w freeze, W2.5). A new file under tests/ that the ticket did not
-    declare is an UNDECLARED violation (T3-9, structural tests/ rule); a
-    declared new test is allowed (a ticket may declare several). A declared
+    chmod a-w freeze, W2.5). A new file under tests/ or src/ that the ticket
+    did not declare is an UNDECLARED violation (T3-9/T3-10, structural tree
+    rule); a declared new test or impl file is allowed (a ticket may declare
+    several). A declared
     path is exempt (runner-update ticket, P2;
     behavior-identical to the old scripts/run.sh exemption, since the
     manifest is snapshotted AFTER quarantine and a declared path is
