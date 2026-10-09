@@ -202,6 +202,16 @@ cannot be PASS without the artifacts it is built from. Pinned by
 GAP test, flipped green in T3-7: a forged clean summary over a tampered tree
 is rejected as CONTRACT-FAIL).
 
+**What PASS means (the boundary of the verdict, operator 2026-10-09).** The verdict is a
+statement about the TREE, not about the correctness of the code: `verifier=PASS` means the
+reference test suite is green on the final tree (`run.sh test --all` in the fresh container)
+and the tree matches the ticket's declared contract. It does NOT mean the implementation is
+correct — the model may hardcode expected values or fit the implementation to the tests.
+Closing that gap is the ticket's acceptance criteria (a human concern), not a mechanism the
+launcher can provide. The end-to-end scenario tests (`test_scenarios_verdict.py`) assert only
+the observable verdict (rc / verifier / probe_result / contract_lock_violations) and never
+promise code correctness.
+
 ## Module map — the owner of each contract
 
 | File | Owns |
