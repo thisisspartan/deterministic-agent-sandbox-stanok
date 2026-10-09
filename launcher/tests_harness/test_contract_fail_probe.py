@@ -191,7 +191,11 @@ def test_contract_fail_outranks_loop_trap_written_second():
 # marker cannot be forgotten (same pattern as the closed zone-symlink GAPs in
 # test_ticket_zone.py).
 
-@pytest.mark.xfail(strict=True, reason="GAP: host trusts the container's "
+# raises=AssertionError (operator review 2026-10-09): the marker absorbs ONLY
+# the expected gap — a bug in the test itself (typo, signature mismatch) must
+# error, not hide as xfailed, or the marker would never flip at stage 3.
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="GAP: host trusts the container's "
                    "summary; no host-side contract recompute until stage 3")
 def test_host_detects_forged_clean_summary_over_tampered_tree_GAP(tmp_path):
     # The tree was tampered: a protected file modified after the manifest
