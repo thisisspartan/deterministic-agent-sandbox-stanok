@@ -99,10 +99,11 @@ def hidden_files_gate(cfg) -> bool:
 
 
 def zone_symlinks(cfg) -> list[str]:
-    """All symlinks under the writable zones — the ONE scanner shared by the
-    launch gate (zone_symlink_gate) and the post-turn check
-    (verify._check_zone_symlinks). The rule (cc217 review follow-up, operator
+    """All symlinks under the writable zones — the ONE scanner behind the
+    launch gate (zone_symlink_gate). The rule (cc217 review follow-up, operator
     decision 2026-10-09): in src/tests/docs/scripts symlinks do not exist.
+    S3 (PLAN-SIMPLIFY-2026-10-09): the post-turn scan was removed — the
+    launch ban is the only enforcement point.
 
     lstat semantics: os.walk with followlinks=False (a symlinked directory is
     LISTED, never descended into) and os.path.islink on every entry — file
@@ -138,8 +139,10 @@ def zone_symlink_gate(cfg) -> list[str]:
     (`src/link -> launcher/` — proven by test_docker_bind_resolves_symlink_source).
     The ban covers UNDECLARED links (the declared-path rule inspects only
     declared paths) and links under tests/ (host_ro_paths would bind them
-    :ro verbatim and Docker would resolve them to their targets). The
-    post-run counterpart is verify._check_zone_symlinks (CONTRACT-FAIL).
+    :ro verbatim and Docker would resolve them to their targets). S3
+    (PLAN-SIMPLIFY-2026-10-09): this launch gate is the ONLY enforcement
+    point — the post-turn scan was removed; a mid-run new file under tests/
+    or src/ is caught by the structural rules (T3-9/T3-10).
 
     Returns the problem list (empty = OK); each problem names the path, its
     target and the fix — an accidental operator-side symlink must come with

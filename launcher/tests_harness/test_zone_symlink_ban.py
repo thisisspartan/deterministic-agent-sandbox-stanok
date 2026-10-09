@@ -1,23 +1,22 @@
 """Zone-symlink ban (cc217 review follow-up, operator decision 2026-10-09).
 
 The unified rule: in the writable zones (src/tests/docs/scripts) symlinks do
-not exist. Two enforcement points, ONE scanner (gates.zone_symlinks):
+not exist. ONE enforcement point, ONE scanner (gates.zone_symlinks):
 
-  1. LAUNCH (gates.zone_symlink_gate, wired into cli._launch_gates after the
-     hidden-files gate, rc=13): any symlink — file, directory, dangling, or
-     the zone directory itself — refuses the launch, with the path list and
-     the fix. The container mounts the repo :ro and derives rw carve-outs
-     only inside the zones; Docker resolves a bind source's realpath, so a
-     link hands its TARGET rw access (the `src/link -> launcher/` incident,
-     proven by test_docker_bind_resolves_symlink_source). The ban covers
-     UNDECLARED links (the declared-path rule inspects only declared paths)
-     and links under tests/ (the protected-file location — host_ro_paths
-     would otherwise bind them :ro verbatim and Docker would resolve them).
-  2. POST-TURN (verify._check_zone_symlinks, called from
-     session._post_turn_decision): a symlink created by the model during the
-     run is a contract_lock violation -> the existing forced-FAIL path
-     (CONTRACT-FAIL, no retry). Compared against the session-start snapshot,
-     NOT the ticket — a ticket never declares arbitrary links.
+  LAUNCH (gates.zone_symlink_gate, wired into cli._launch_gates after the
+  hidden-files gate, rc=13): any symlink — file, directory, dangling, or
+  the zone directory itself — refuses the launch, with the path list and
+  the fix. The container mounts the repo :ro and derives rw carve-outs
+  only inside the zones; Docker resolves a bind source's realpath, so a
+  link hands its TARGET rw access (the `src/link -> launcher/` incident,
+  proven by test_docker_bind_resolves_symlink_source). The ban covers
+  UNDECLARED links (the declared-path rule inspects only declared paths)
+  and links under tests/ (the protected-file location — host_ro_paths
+  would otherwise bind them :ro verbatim and Docker would resolve them).
+
+S3 (PLAN-SIMPLIFY-2026-10-09): the post-turn scan (verify._check_zone_symlinks)
+was REMOVED — the launch ban remains; a mid-run new file under tests/ or src/
+is caught by the structural rules (T3-9/T3-10, worker + host echelons).
 
 Tests:
   1  symlink file in src/ -> gate names it
@@ -27,12 +26,7 @@ Tests:
   5  the zone directory itself is a symlink -> gate names it
   6  clean zones (regular files/dirs) -> gate returns []
   7  full path: committed symlink in src/ -> launch rc=13, EARLY-ABORT summary
-  8  post-turn: new symlink after the snapshot -> contract_lock violation ->
-     forced FAIL (the existing _contract_lock_forced_fail path)
-  9  post-turn: link present in the baseline snapshot -> no violation
- 10  post-turn: clean -> no violation
- 11  wiring: _post_turn_decision runs the scan and returns the forced rc=1
- 12  hard links: ln() from a zone to a repo file fails in Docker (EXDEV) —
+  8  hard links: ln() from a zone to a repo file fails in Docker (EXDEV) —
      the scanner does not look for hard links because they cannot escape a
      zone: base repo :ro + per-zone rw binds are separate mounts
 
@@ -47,9 +41,8 @@ from pathlib import Path
 
 import pytest
 
-from launcher import gates, session, verify
+from launcher import gates
 from launcher.config import Config
-from launcher.plan import SessionPlan
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER_DIR = REPO_ROOT / "launcher"
@@ -158,67 +151,7 @@ def test_full_path_rc13(tmp_path):
     assert data["rc"] == 13
 
 
-# --- 8-10: post-turn scan -> the existing forced-FAIL path ------------------------
-
-def test_new_symlink_after_snapshot_forces_contract_fail(tmp_path):
-    repo, cfg = _repo(tmp_path)
-    before = gates.zone_symlinks(cfg)  # the session-start snapshot: clean
-    assert before == []
-    # Simulate the model creating a link between turns.
-    (repo / "src" / "link").symlink_to("../launcher/target.txt")
-    job = {}
-    verify._check_zone_symlinks(cfg, before, job, 1)
-    assert job["contract_lock_violations"] == ["turn 1: NEW-SYMLINK: src/link"]
-    assert verify._contract_lock_forced_fail(job, 1) == 1
-    assert job["verifier"] == "FAIL"
-
-
-def test_baseline_symlink_not_flagged(tmp_path):
-    # Compared against the snapshot, not the ticket: a link that already
-    # existed at session start is not a NEW one (the launch gate is what
-    # refuses it there — the post-turn rule only bans links created mid-run).
-    repo, cfg = _repo(tmp_path)
-    (repo / "src" / "link").symlink_to("../launcher/target.txt")
-    before = gates.zone_symlinks(cfg)
-    assert before == ["src/link"]
-    job = {}
-    verify._check_zone_symlinks(cfg, before, job, 2)
-    assert "contract_lock_violations" not in job
-    assert verify._contract_lock_forced_fail(job, 2) is None
-
-
-def test_clean_turn_no_violation(tmp_path):
-    repo, cfg = _repo(tmp_path)
-    before = gates.zone_symlinks(cfg)
-    (repo / "src" / "mod.py").write_text("x = 1\n")
-    job = {}
-    verify._check_zone_symlinks(cfg, before, job, 1)
-    assert "contract_lock_violations" not in job
-
-
-# --- 11: wiring — _post_turn_decision runs the scan -------------------------------
-
-def test_post_turn_decision_forces_fail_on_new_symlink(tmp_path, monkeypatch):
-    repo, cfg = _repo(tmp_path)
-    before = gates.zone_symlinks(cfg)
-    (repo / "src" / "link").symlink_to("../launcher/target.txt")
-    # With the order contract (forced FAIL before verify_gate, operator
-    # review 2026-10-09) verify_gate is never reached — the stub is only a
-    # guard: the test pins that the scan feeds the forced-FAIL path BEFORE
-    # any test execution.
-    monkeypatch.setattr(session, "verify_gate", lambda cfg, plan: (True, [], False))
-    plan = SessionPlan(declared_paths=(), edit_paths=())
-    result = session.TurnResult(usage={}, live_window={}, writes=1, error="",
-                                loop_trap=None)
-    job = {"turn_telemetry": [{"input_tokens": 100}]}
-    rc, next_prompt = session._post_turn_decision(
-        cfg, job, 1, 3, plan, result, {}, before, 100, 100)
-    assert rc == 1
-    assert job["verifier"] == "FAIL"
-    assert any("NEW-SYMLINK: src/link" in msg for _, msg in job["failures"])
-
-
-# --- 12: hard links cannot escape a zone (the scanner's deliberate gap) ---------
+# --- 8: hard links cannot escape a zone (the scanner's deliberate gap) ---------
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
 def test_docker_hardlink_across_mounts_fails(tmp_path):

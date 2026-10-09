@@ -18,8 +18,8 @@ import time
 import uuid
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
-from launcher.gates import context_rot_threshold, zone_symlinks
-from launcher.verify import _check_contract_lock, _check_zone_symlinks, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
+from launcher.gates import context_rot_threshold
+from launcher.verify import _check_contract_lock, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
 
 
 def _safe_json_default(obj):
@@ -439,14 +439,13 @@ def _fix_prompt(failures, turn: int) -> str:
 
 def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "SessionPlan",
                        result: TurnResult, tests_manifest_before: dict,
-                       zone_symlinks_before: list[str],
                        inp: int, live_context: int) -> tuple[int | None, str]:
     """Decide what happens after a completed turn (the verdict pipeline).
 
     Returns (rc, next_prompt): rc is not None -> the run ends with that exit
     code; rc is None -> continue the loop with next_prompt ("" on retry
     exhaustion). The order below is the verdict contract (do not reorder):
-    dead-session stop -> contract_lock diff (protected files + zone symlinks)
+    dead-session stop -> contract_lock diff (protected files)
     -> observability warnings -> contract_lock forced FAIL -> verify_gate ->
     ENV-FAIL stop -> NO-OP/PASS verdict -> FAIL fix prompt.
     """
@@ -466,10 +465,6 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
     # contract_lock (W2.5 + P2): did the turn touch pre-existing
     # tests/ or scripts/run.sh?
     _check_contract_lock(cfg, tests_manifest_before, job, turn, plan)
-
-    # Zone-symlink ban: a symlink CREATED in a writable zone during the run
-    # is a contract_lock violation (forced FAIL below).
-    _check_zone_symlinks(cfg, zone_symlinks_before, job, turn)
 
     _observability_warnings(job, turn, inp, live_context)
 
@@ -673,12 +668,6 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
     # still catches a deletion, i.e. a write to the parent dir).
     tests_manifest_before = _tests_manifest(cfg)
 
-    # Zone-symlink ban (cc217 review follow-up): snapshot the zone symlinks
-    # at session start; a link CREATED during the run is a contract_lock
-    # violation (verify._check_zone_symlinks) — compared against this
-    # snapshot, not the ticket: a ticket never declares arbitrary links.
-    zone_symlinks_before = zone_symlinks(cfg)
-
     with open(stream_out_path, "a", encoding="utf-8") as stream_f:
         async with ClaudeSDKClient(options=options) as client:
             for turn in range(1, max_turns + 1):
@@ -721,7 +710,7 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
                 # the order contract.
                 rc, next_prompt = _post_turn_decision(
                     cfg, job, turn, max_turns, plan, result, tests_manifest_before,
-                    zone_symlinks_before, inp, live_context)
+                    inp, live_context)
                 if rc is not None:
                     return rc
                 current_prompt = next_prompt

@@ -20,8 +20,9 @@ Tests:
   1  _contract_lock_forced_fail sets probe_result CONTRACT-FAIL
   2  clean run: no probe_result set
   3  build_summary keeps the override (not VERIFY-FAIL)
-  4  wiring: _post_turn_decision with a new zone symlink -> rc=1 AND
-     probe_result CONTRACT-FAIL (the end-to-end path)
+  4  wiring: _post_turn_decision with a MODIFIED protected file -> rc=1 AND
+     probe_result CONTRACT-FAIL (the end-to-end path; S3 removed the
+     post-turn zone-symlink scan — the contract_lock diff is the trigger)
   5  priority: contract_lock_violations outrank a LOOP-TRAP override written
      FIRST (operator review 2026-10-09: integrity of the verdict beats model
      behavior)
@@ -40,7 +41,6 @@ import json
 
 from launcher import session, summary, verify
 from launcher.config import Config
-from launcher.gates import zone_symlinks
 from launcher.plan import SessionPlan
 
 
@@ -81,8 +81,11 @@ def test_build_summary_keeps_contract_fail_override():
 
 def test_post_turn_decision_sets_contract_fail_probe_result(tmp_path, monkeypatch):
     repo, cfg = _repo(tmp_path)
-    before = zone_symlinks(cfg)
-    (repo / "src" / "link").symlink_to("../launcher/target.txt")
+    (repo / "tests" / "t_test.py").write_text("def test_x():\n    pass\n",
+                                              encoding="utf-8")
+    before = verify._tests_manifest(cfg)
+    # The machine rewrites a pre-existing protected file mid-run.
+    (repo / "tests" / "t_test.py").write_text("tampered\n", encoding="utf-8")
     # verify_gate must never run on a tampered tree — the stub is a guard.
     monkeypatch.setattr(session, "verify_gate", lambda cfg, plan: (True, [], False))
     plan = SessionPlan(declared_paths=(), edit_paths=())
@@ -90,7 +93,7 @@ def test_post_turn_decision_sets_contract_fail_probe_result(tmp_path, monkeypatc
                                 loop_trap=None)
     job = {"turn_telemetry": [{"input_tokens": 100}]}
     rc, _ = session._post_turn_decision(
-        cfg, job, 1, 3, plan, result, {}, before, 100, 100)
+        cfg, job, 1, 3, plan, result, before, 100, 100)
     assert rc == 1
     assert job["probe_result"] == "CONTRACT-FAIL"
     assert job["verifier"] == "FAIL"

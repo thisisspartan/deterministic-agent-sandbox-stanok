@@ -678,9 +678,10 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
     # no symlink in src/tests/docs/scripts — the zones are the only rw mounts
     # and Docker resolves a bind source's realpath, so a link hands rw access
     # to its target. Undeclared links and links under tests/ are in scope
-    # (the declared-path rule inspects only declared paths). The post-turn
-    # counterpart is verify._check_zone_symlinks (CONTRACT-FAIL). The abort
-    # message names each path, its target and the fix (CC-157-style).
+    # (the declared-path rule inspects only declared paths). S3
+    # (PLAN-SIMPLIFY-2026-10-09): this is the ONLY enforcement point — the
+    # post-turn scan was removed. The abort message names each path, its
+    # target and the fix (CC-157-style).
     try:
         zone_links = zone_symlink_gate(cfg)
     except OSError as e:

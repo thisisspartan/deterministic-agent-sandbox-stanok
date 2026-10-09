@@ -50,8 +50,10 @@ The image preflight is NOT on this path (doctor-only, CC-106).
   `launcher/tests_harness/test_ticket_zone.py`.
 
 - Zone-symlink ban (cc217 review follow-up, operator decision 2026-10-09):
-  in the writable zones (src/tests/docs/scripts) symlinks do not exist. Two
-  enforcement points, ONE scanner (`gates.zone_symlinks`):
+  in the writable zones (src/tests/docs/scripts) symlinks do not exist. ONE
+  enforcement point, ONE scanner (`gates.zone_symlinks`) — S3
+  (PLAN-SIMPLIFY-2026-10-09) removed the post-turn scan, the launch ban
+  remains:
   1. LAUNCH — `gates.zone_symlink_gate` in `cli._launch_gates` after the
      hidden-files gate: any symlink in a zone — file, directory, dangling, or
      the zone directory itself — refuses the launch (rc=13) with the path list
@@ -66,15 +68,13 @@ The image preflight is NOT on this path (doctor-only, CC-106).
      across the zone boundary is EXDEV (proven by
      `test_docker_hardlink_across_mounts_fails`); a link inside one zone
      stays inside it.
-  2. POST-TURN — `verify._check_zone_symlinks` from
-     `session._post_turn_decision` (after `_check_contract_lock`, and the
-     forced FAIL runs BEFORE `verify_gate` — the suite never executes on a
-     tree already declared tampered): a symlink CREATED in a zone during the
-     run is a contract_lock violation -> the existing forced-FAIL path
-     (CONTRACT-FAIL, no retry). Compared against
-     the session-start snapshot, NOT the ticket — a ticket never declares
-     arbitrary links. Tests: `launcher/tests_harness/test_zone_symlink_ban.py`
-     (the two former GAP tests in test_ticket_zone.py are green with the ban).
+  A mid-run created symlink is no longer scanned post-turn (S3): a new FILE
+  under tests/ or src/ (symlinked files included — os.walk lists them) is
+  caught by the structural rules (T3-9/T3-10, worker + host echelons);
+  directory links and links under docs//scripts/ are not — accepted gap, the
+  launch ban covers the session-start state. Tests:
+  `launcher/tests_harness/test_zone_symlink_ban.py` (the two former GAP
+  tests in test_ticket_zone.py are green with the ban).
 
 CONTAINER (the same `cli.main` re-runs inside the image):
 
@@ -82,7 +82,6 @@ CONTAINER (the same `cli.main` re-runs inside the image):
 gates re-run + lock (rc=21) -> session.run_continuous_session:
   per turn: session._execute_turn (the agent via the SDK)
   -> verify._check_contract_lock (SHA256 manifest diff)
-  -> verify._check_zone_symlinks (new zone symlink -> contract_lock)
   -> verify.verify_gate: scripts/run.sh test --all
   -> on FAIL: a retry turn with the failure block (--local-retries)
 ```
