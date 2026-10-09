@@ -186,6 +186,7 @@ def test_pre_existing_test_is_erofs_new_sibling_creatable(tmp_path):
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     finally:
         sandbox.docker_stop(name)
+        sandbox.docker_rm_force(name)  # T3-4: no --rm — the host removes it
     assert "OLD-DENIED" in proc.stdout, proc
     assert "NEW-OK" in proc.stdout, proc
     # The host copy is untouched (the mount refused the write, it did not
@@ -235,6 +236,7 @@ def test_hardlink_escape_is_closed_by_the_mount_topology(tmp_path):
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     finally:
         sandbox.docker_stop(name)
+        sandbox.docker_rm_force(name)  # T3-4: no --rm — the host removes it
     assert "HARDLINK-SAME-DIR-EXDEV" in proc.stdout, proc
     assert "HARDLINK-CROSS-ZONE-EXDEV" in proc.stdout, proc
     assert "SYMLINK-DENIED" in proc.stdout, proc
@@ -278,6 +280,7 @@ def test_host_hardlink_escapes_ro_bind_contract_lock_detects(tmp_path):
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     finally:
         sandbox.docker_stop(name)
+        sandbox.docker_rm_force(name)  # T3-4: no --rm — the host removes it
     # The write through the shared inode SUCCEEDS (the residual is real).
     assert "HARDLINK-WRITTEN" in proc.stdout, proc
 
@@ -330,6 +333,7 @@ def test_stack_manifest_is_erofs_under_a_scripts_carve_out(repo, tmp_path):
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     finally:
         sandbox.docker_stop(name)
+        sandbox.docker_rm_force(name)  # T3-4: no --rm — the host removes it
     assert "PYTOML-DENIED" in proc.stdout, proc
     assert "PROBE-OK" in proc.stdout, proc
     # The host manifest is untouched (the mount refused the write) and the

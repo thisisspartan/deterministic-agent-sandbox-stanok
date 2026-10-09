@@ -3,8 +3,11 @@
 Single source of the `docker run` argv: mounts, env passthrough, resource
 limits, hardening. The caller (cli.py run_sandboxed) runs the returned
 argv as a supervised child inside a try/finally that guarantees
-`docker stop` + marker cleanup on every exit path (normal, crash, signal) —
-the bash reaper trap's guarantee, now structural.
+`docker stop` -> `docker cp` (retrieve the worker's summary from the
+container's writable layer, T3-4) -> `docker rm -f` + marker cleanup on
+every exit path (normal, crash, signal) — the bash reaper trap's
+guarantee, now structural. The worker container runs WITHOUT `--rm`
+(T3-4): it must survive its exit so the summary can be retrieved.
 
 Transcribed 1:1 from sandbox-run.sh (deleted in R2): same volume set, same
 STANOK_* env passthrough, same limits, same seccomp/apparmor unconfined
@@ -25,10 +28,12 @@ import subprocess
 #
 # CC-134 removed the former "evidence" carve-out: evidence/ is read-only in
 # the container (still reachable through the repo :ro mount, so an in-container
-# write is an EROFS refusal, not "not found"). The container writes the verdict
-# (summary.json, launcher.stdout.log, the .running marker) into the rw
-# LOG_DIR/<label>; the HOST publishes it into evidence/<label> after the
-# container exits (summary._publish_evidence).
+# write is an EROFS refusal, not "not found"). The container writes the
+# streaming log and the marker into the rw LOG_DIR/<label>; the verdict
+# (summary.json) goes to the container's writable layer
+# (config.CONTAINER_SUMMARY_ROOT, T3-4 — survives `docker stop`, dies with
+# `docker rm`). The HOST retrieves it with `docker cp` after the container
+# exits and publishes it into evidence/<label> (summary._publish_evidence).
 WRITABLE_ZONES = ("src", "tests", "docs", "scripts")
 
 
@@ -127,7 +132,10 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     claude_tmp = f"/tmp/claude-{uid}"
 
     argv = [
-        "docker", "run", "--rm", "--name", name, "--init",
+        # T3-4: NO `--rm` — the container must survive its exit so the host
+        # can retrieve the summary from its writable layer (docker cp) and
+        # only then remove it (docker rm -f, run_sandboxed's finally).
+        "docker", "run", "--name", name, "--init",
         # --network=host: loopback reachability to the local llama-server
         # (STANOK_SERVER_URL). No network isolation — same trust boundary as
         # the bwrap era, different mechanism.
@@ -233,5 +241,58 @@ def docker_stop(name: str) -> None:
         subprocess.run(["docker", "stop", "-t", "5", name],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def docker_cp(name: str, container_path: str, host_path: str) -> tuple[int, str]:
+    """Stage 3 (T3-4): `docker cp name:path host_path` — retrieve the
+    worker's summary from the STOPPED container's writable layer (works on a
+    stopped container — verified by test_stage3_worker_lifecycle, the plan's
+    stop-condition). Returns (rc, stderr): a non-zero rc is an ENV-FAIL at
+    the call site — the verdict cannot be PASS without the summary it was
+    built from."""
+    try:
+        sp = subprocess.run(["docker", "cp", f"{name}:{container_path}", host_path],
+                            capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return (1, str(e))
+    return (sp.returncode, (sp.stderr or "").strip())
+
+
+def docker_rm_force(name: str) -> None:
+    """Stage 3 (T3-4): `docker rm -f` — the `--rm` replacement: the host
+    removes the container only after retrieving the summary. Best-effort like
+    docker_stop: a failed rm leaves a stopped container for the reaper,
+    never a hang."""
+    try:
+        subprocess.run(["docker", "rm", "-f", name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def reap_stopped() -> None:
+    """Stage 3 (T3-4) reaper: remove STOPPED containers with the `stanok-`
+    prefix — crash leftovers from earlier runs (a host killed between stop
+    and rm). Running containers are NOT touched: the status filter admits only
+    exited/created. Called at the start of a host run (cli.run_sandboxed),
+    not cmd_run: cmd_run executes inside the container, where the docker CLI
+    is absent. Best-effort: a reaper failure must not block a new run."""
+    try:
+        sp = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=stanok-",
+             "--filter", "status=exited", "--filter", "status=created", "-q"],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return
+    ids = [x for x in sp.stdout.split() if x]
+    if not ids:
+        return
+    try:
+        subprocess.run(["docker", "rm", *ids],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=60)
     except (OSError, subprocess.SubprocessError):
         pass

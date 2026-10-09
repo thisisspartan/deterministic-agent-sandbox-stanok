@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 from launcher import logs, sandbox, stanok, verify
-from launcher.config import Config, RunState
+from launcher.config import CONTAINER_SUMMARY_ROOT, Config, RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.plan import SessionPlan
@@ -32,7 +32,10 @@ from launcher.gates import (
 )
 from launcher.opik import _opik_trace_count
 from launcher.session import _install_signal_handlers, run_continuous_session
-from launcher.summary import _publish_evidence, _rotate_stale_summary, build_summary, write_summary
+from launcher.summary import (
+    _publish_evidence, _rotate_stale_summary, build_summary,
+    write_cp_fail_summary, write_summary,
+)
 from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
     host_ro_paths, host_rw_paths, parse_ticket_header, prepare_workspace,
@@ -61,7 +64,7 @@ def _fail_early(cfg, run_state, job: dict, start_ts: int, code: int, error: str)
     """
     job["rc"] = int(code)
     job["error"] = error
-    write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+    write_summary(cfg, job, int(time.time()) - start_ts)
     if os.path.exists(run_state.marker_path):
         try:
             os.remove(run_state.marker_path)
@@ -154,7 +157,7 @@ def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: i
         else:
             job["opik_traces"] = opik_after
             log(f"OPIK: project trace count after run = {opik_after}")
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+        write_summary(cfg, job, int(time.time()) - start_ts)
         if os.path.exists(run_state.marker_path):
             try:
                 os.remove(run_state.marker_path)
@@ -339,9 +342,29 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
     rw_paths are the per-ticket rw carve-outs (T4/CC-135, derived in main()
     from the same ticket text the container will parse); ro_paths are the
     protected files re-bound :ro over a carve-out dir (T4b/CC-136). The base
-    repo mount is always :ro (CC-154)."""
+    repo mount is always :ro (CC-154).
+
+    Stage 3 (T3-4): the container runs WITHOUT `--rm`; the finally retrieves
+    the worker's summary from the container's writable layer (`docker cp`)
+    before removing the container (`docker rm -f`). Order: wait -> cp -> rm.
+    A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS."""
     evidence_dir, live_dir = cfg.label_paths(args.label)
     os.makedirs(evidence_dir, exist_ok=True)
+
+    # T3-4 reaper: remove stopped `stanok-` leftovers (crash remnants of
+    # earlier runs) before this run starts. Running containers are untouched.
+    sandbox.reap_stopped()
+
+    # T3-4: a stale summary.json in LOG_DIR/<label> from an earlier run must
+    # not survive: the worker no longer writes there (its summary lives on the
+    # container layer), the host writes it only via docker cp — a failed cp
+    # would otherwise re-publish the previous run's verdict.
+    stale = os.path.join(live_dir, "summary.json")
+    if os.path.isfile(stale):
+        try:
+            os.replace(stale, stale + ".prev")
+        except OSError:
+            pass
 
     run_state = RunState(evidence_dir=evidence_dir, live_dir=live_dir,
                          marker_path=os.path.join(evidence_dir, ".running"))
@@ -381,16 +404,30 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
         rc = run_state.interrupted_rc or 130
     finally:
         sandbox.docker_stop(name)
-        # CC-134: the container wrote the verdict into LOG_DIR (evidence/ is
-        # read-only there); publish it to the host-owned evidence/<label> now
-        # that the container is gone. BEFORE the marker removal, so the
-        # supervisor never sees "not running" with the summary still missing.
+        # Stage 3 (T3-4): the container survived its exit (no --rm) — retrieve
+        # the worker's summary from its writable layer into LOG_DIR/<label>
+        # (the publish source), then remove the container. Order: cp -> rm.
+        # A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS
+        # without the summary it was built from.
+        cp_rc, cp_err = sandbox.docker_cp(
+            name, f"{CONTAINER_SUMMARY_ROOT}/{args.label}/summary.json",
+            os.path.join(live_dir, "summary.json"))
+        sandbox.docker_rm_force(name)
+        # CC-134: publish the retrieved verdict to the host-owned
+        # evidence/<label>. BEFORE the marker removal, so the supervisor never
+        # sees "not running" with the summary still missing.
         # Stage 3 (T3-2): recompute the host-side contract AFTER the
         # container exits — the host's independent check of the tree the
         # verdict was computed against; violations force CONTRACT-FAIL at
         # publish, regardless of the worker summary.
         _publish_evidence(cfg, args.label, rc,
                           verify.host_contract_check(cfg, before_manifest))
+        if cp_rc != 0:
+            rc = int(ExitCode.ENV_FAIL)
+            write_cp_fail_summary(
+                cfg, args.label,
+                f"docker cp failed (rc={cp_rc}): the worker summary could not "
+                f"be retrieved from the container layer — {cp_err or 'no such file'}")
         try:
             os.remove(marker)
         except OSError:
@@ -516,10 +553,14 @@ def _build_parser(cfg) -> argparse.ArgumentParser:
     return p
 
 
-def _early_abort(cfg, evidence_dir: str, marker: str, label: str, ticket: str,
+def _early_abort(cfg, marker: str, label: str, ticket: str,
                  code: ExitCode, err_msg: str) -> int:
     """Launch-level refusal: log, clean a dead marker, write the EARLY-ABORT
-    summary (only when absent — a fresh verdict must not be overwritten)."""
+    summary (only when absent — a fresh verdict must not be overwritten).
+
+    T3-4: the summary goes to cfg.summary_dir(label) — inside the container
+    the writable-layer path the host retrieves with docker cp; on the host
+    the evidence dir (the host is the publisher, unchanged)."""
     log(err_msg)
     if os.path.exists(marker):
         # A live run's marker must survive an early abort of a
@@ -537,8 +578,9 @@ def _early_abort(cfg, evidence_dir: str, marker: str, label: str, ticket: str,
                 os.remove(marker)
             except OSError:
                 pass
-    os.makedirs(evidence_dir, exist_ok=True)
-    sum_path = os.path.join(evidence_dir, "summary.json")
+    summary_dir = cfg.summary_dir(label)
+    os.makedirs(summary_dir, exist_ok=True)
+    sum_path = os.path.join(summary_dir, "summary.json")
     if not os.path.exists(sum_path):
         job = {
             "label": label,
@@ -666,7 +708,7 @@ def _lock_key(cfg) -> "str | None":
         return None
 
 
-def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
+def _host_launch(cfg, args, marker: str) -> int:
     """Host sync: supervise the Docker container (launcher/sandbox.py).
 
     The container-side Runner re-runs the gates and takes the lock.
@@ -675,7 +717,7 @@ def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
     (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
     """
     if shutil.which("docker") is None:
-        return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket,
+        return _early_abort(cfg, marker, args.label, args.ticket,
                             ExitCode.DEFECT, "ERROR: docker not found on PATH")
     # T4 (CC-135): the container's rw carve-outs must be fixed BEFORE
     # `docker run`, but the SessionPlan is built later, inside the
@@ -691,7 +733,7 @@ def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
         # container for a ticket that edits a protected file.
         assert_edit_paths_are_not_protected(cfg, edit_paths)
     except (OSError, ValueError) as e:
-        return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket,
+        return _early_abort(cfg, marker, args.label, args.ticket,
                             ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
     rw_paths = host_rw_paths(cfg, declared)
     ro_paths = host_ro_paths(cfg, rw_paths)
@@ -715,7 +757,7 @@ def main() -> int:
         marker = os.path.join(evidence_dir, ".running")
 
         def abort(code: ExitCode, err_msg: str) -> int:
-            return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket, code, err_msg)
+            return _early_abort(cfg, marker, args.label, args.ticket, code, err_msg)
 
         # W2.6 provenance: capture HEAD on the HOST before anything launches
         # (gates, container, child) — the container-side build_summary reads
@@ -767,6 +809,6 @@ def main() -> int:
                 return abort(ExitCode.LOCK, f"LOCK: the repo is already busy with another run ({lock_path})")
             return cmd_run(cfg, args)
 
-        return _host_launch(cfg, args, evidence_dir, marker)
+        return _host_launch(cfg, args, marker)
 
     return 0

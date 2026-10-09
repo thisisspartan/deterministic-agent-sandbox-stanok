@@ -1,7 +1,9 @@
 """summary — the verdict artifacts: summary.json, evidence publishing, rotation.
 
-build_summary/write_summary (the typed contract), _publish_evidence (CC-134,
-I5 integrity check), _rotate_stale_summary, the status-field table. Static
+build_summary/write_summary (the typed contract, T3-4 summary routing),
+write_cp_fail_summary (T3-4: docker cp failure -> ENV-FAIL),
+_publish_evidence (CC-134, I5 integrity check), _rotate_stale_summary, the
+status-field table. Static
 config arrives as the passed-in Config; the per-run evidence dir as the
 passed-in RunState (C).
 """
@@ -9,6 +11,7 @@ passed-in RunState (C).
 import json
 import os
 import shutil
+from launcher.exitcodes import ExitCode
 from launcher.logs import log
 
 
@@ -220,8 +223,28 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
     }
 
 
-def write_summary(cfg, run_state, job: dict, elapsed_s: int) -> None:
-    """Writes the exact summary.json contract expected by the L1 Supervisor."""
-    with open(os.path.join(run_state.evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
+def write_summary(cfg, job: dict, elapsed_s: int) -> None:
+    """Writes the exact summary.json contract expected by the L1 Supervisor.
+
+    Stage 3 (T3-4): the path is cfg.summary_dir(label) — inside the container
+    the writable-layer path the host retrieves with `docker cp` after the
+    container exits; on the host (no-sandbox) the evidence dir. The summary
+    is no longer a file shared through a mount the worker can rewrite."""
+    d = cfg.summary_dir(job["label"])
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(build_summary(cfg, job, elapsed_s), f, ensure_ascii=False, indent=2)
+
+
+def write_cp_fail_summary(cfg, label: str, error: str) -> None:
+    """Stage 3 (T3-4): `docker cp` failed — the worker's summary could not be
+    retrieved from the container's writable layer. The verdict cannot be PASS:
+    the host writes an ENV-FAIL summary (rc=16) with the error text directly
+    into the evidence dir (there is nothing retrieved to publish)."""
+    evidence_dir, _ = cfg.label_paths(label)
+    os.makedirs(evidence_dir, exist_ok=True)
+    job = {"label": label, "rc": int(ExitCode.ENV_FAIL), "verifier": "FAIL",
+           "probe_result": "ENV-FAIL", "turns": 0, "error": error}
+    with open(os.path.join(evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
+        json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
 
