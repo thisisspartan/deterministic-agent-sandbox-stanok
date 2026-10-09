@@ -80,7 +80,7 @@ def _mock_run(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "docker_stop", lambda name: None)
     # T3-4: run_sandboxed now also calls the reaper, cp and rm -f — mocked so
     # this T3-1 test keeps observing only its own boundary (the snapshot).
-    monkeypatch.setattr(sandbox, "reap_stopped", lambda: None)
+    monkeypatch.setattr(sandbox, "reap_stopped", lambda *a: None)
     monkeypatch.setattr(sandbox, "docker_cp", lambda *a: (0, ""))
     monkeypatch.setattr(sandbox, "docker_rm_force", lambda name: None)
     monkeypatch.setattr(cli, "_install_signal_handlers", lambda rs: None)

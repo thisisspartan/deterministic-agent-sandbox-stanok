@@ -118,7 +118,7 @@ def _mock_run(tmp_path, monkeypatch, cp_result=(0, ""), container_rc=0):
                            "errors": [], "failures": []}, f)
         return (rc, err)
 
-    monkeypatch.setattr(sandbox, "reap_stopped", lambda: calls.append("reap"))
+    monkeypatch.setattr(sandbox, "reap_stopped", lambda *a: calls.append("reap"))
     monkeypatch.setattr(sandbox, "sandbox_argv", spy_argv)
     monkeypatch.setattr(cli.subprocess, "Popen", lambda argv, **kw: FakePopen(argv))
     monkeypatch.setattr(sandbox, "docker_stop", lambda name: calls.append("stop"))
@@ -145,7 +145,7 @@ def test_cp_failure_is_env_fail(tmp_path, monkeypatch):
     assert any("docker cp" in e for e in s["errors"])
 
 
-def test_reaper_removes_only_stopped_prefixed(monkeypatch):
+def test_reaper_removes_only_stopped_prefixed(monkeypatch, tmp_path):
     calls = []
 
     class R:
@@ -161,10 +161,15 @@ def test_reaper_removes_only_stopped_prefixed(monkeypatch):
         return R()
 
     monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
-    sandbox.reap_stopped()
+    sandbox.reap_stopped(str(tmp_path / "myrepo"))
     ps = calls[0]
     assert ps[:2] == ["docker", "ps"]
-    assert "name=stanok-" in ps          # the prefix
+    # Operator condition 1 (2026-10-09): the filter is narrowed to THIS repo's
+    # name prefix `stanok-{basename}-` — a foreign repo's stopped containers
+    # are not this run's leftovers. The trailing dash prevents substring bleed
+    # (a repo named "repo" must not match "stanok-repoA-...").
+    assert "name=stanok-myrepo-" in ps
+    assert "name=stanok-" not in ps      # the generic prefix is gone
     assert "status=exited" in ps         # stopped only — running untouched
     assert "-q" in ps
     rm = calls[1]
@@ -172,7 +177,7 @@ def test_reaper_removes_only_stopped_prefixed(monkeypatch):
     assert set(rm[2:]) == {"aaa111", "bbb222"}
 
 
-def test_reaper_noop_when_nothing_stopped(monkeypatch):
+def test_reaper_noop_when_nothing_stopped(monkeypatch, tmp_path):
     calls = []
 
     class R:
@@ -185,8 +190,45 @@ def test_reaper_noop_when_nothing_stopped(monkeypatch):
         return R()
 
     monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
-    sandbox.reap_stopped()
+    sandbox.reap_stopped(str(tmp_path / "myrepo"))
     assert len(calls) == 1 and "ps" in calls[0]  # no `docker rm` without ids
+
+
+def _container_exists(name: str) -> bool:
+    ps = subprocess.run(["docker", "ps", "-a", "--filter", f"name={name}", "-q"],
+                        capture_output=True, text=True, timeout=30)
+    return ps.stdout.strip() != ""
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
+def test_reaper_leaves_foreign_repo_container(tmp_path):
+    """Operator condition 1, real docker: a STOPPED container of ANOTHER repo
+    (a worktree run, a different checkout) is not this run's leftover. Two
+    stopped containers with different repo prefixes; reap_stopped(<repo>)
+    removes only the `stanok-repo-` one. The pair `repo`/`repoA` also pins
+    the trailing dash: docker's name filter is a substring match, so a
+    dashless `stanok-repo` would bleed into `stanok-repoA-`."""
+    pid = os.getpid()
+    mine = f"stanok-repo-{pid}"
+    foreign = f"stanok-repoA-{pid}"
+    try:
+        for n in (mine, foreign):
+            p = subprocess.run(["docker", "run", "-d", "--name", n, IMAGE, "true"],
+                               capture_output=True, text=True, timeout=120)
+            assert p.returncode == 0, p.stderr
+        # both must be STOPPED before the reaper runs
+        w = subprocess.run(["docker", "wait", mine, foreign],
+                           capture_output=True, text=True, timeout=120)
+        assert w.returncode == 0, w.stderr
+        # the repo basename must match the container prefix: `repo` here,
+        # so the filter is `stanok-repo-` — mine matches, foreign bleeds?
+        # No: `stanok-repo-` is not a substring of `stanok-repoA-...`.
+        sandbox.reap_stopped(str(tmp_path / "repo"))
+        assert not _container_exists(mine)    # this repo's leftover: reaped
+        assert _container_exists(foreign)     # foreign: untouched
+    finally:
+        sandbox.docker_rm_force(mine)
+        sandbox.docker_rm_force(foreign)
 
 
 def test_successful_cycle_cp_then_rm_rc_preserved(tmp_path, monkeypatch):
@@ -201,6 +243,35 @@ def test_successful_cycle_cp_then_rm_rc_preserved(tmp_path, monkeypatch):
     s = json.loads((repo / "evidence" / "lbl" / "summary.json")
                    .read_text(encoding="utf-8"))
     assert s["verifier"] == "PASS" and s["probe_result"] == "CLEAN-FIRST"
+
+
+def test_status_and_wait_see_final_summary_after_cp(tmp_path, monkeypatch, capsys):
+    """Operator condition 2 (2026-10-09): after the host cycle (cp -> publish
+    -> marker removal) `cmd_status` and `cmd_wait` must report the FINAL
+    verdict — the published summary.json, not `missing`, not a stale one.
+    The readers of summary.json: `_publish_evidence` is the ONLY reader of the
+    LOG_DIR copy (the docker cp target); `_status_dict` (cmd_status/cmd_wait)
+    reads the published evidence/<label>/summary.json; the supervisor reads the
+    same published file."""
+    repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
+                                       cp_result=(0, ""), container_rc=0)
+    assert cli.run_sandboxed(cfg, args, (), ()) == 0
+    st = cli._status_dict(cfg, "lbl")
+    assert st["state"] == "done"
+    assert st["rc"] == 0 and st["verifier"] == "PASS"
+    assert st["probe_result"] == "CLEAN-FIRST"
+
+    capsys.readouterr()  # drain run_sandboxed's log lines
+    assert cli.cmd_status(cfg, "lbl") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["state"] == "done" and out["rc"] == 0
+    assert out["verifier"] == "PASS" and out["probe_result"] == "CLEAN-FIRST"
+
+    # terminal state already reached: cmd_wait returns immediately (no polling)
+    assert cli.cmd_wait(cfg, "lbl") == 0
+    out2 = json.loads(capsys.readouterr().out)
+    assert out2["state"] == "done" and out2["rc"] == 0
+    assert out2["verifier"] == "PASS" and out2["probe_result"] == "CLEAN-FIRST"
 
 
 # --- 6: real docker — the plan's stop-condition ---------------------------------

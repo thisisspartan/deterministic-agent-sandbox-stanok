@@ -273,16 +273,24 @@ def docker_rm_force(name: str) -> None:
         pass
 
 
-def reap_stopped() -> None:
-    """Stage 3 (T3-4) reaper: remove STOPPED containers with the `stanok-`
-    prefix — crash leftovers from earlier runs (a host killed between stop
-    and rm). Running containers are NOT touched: the status filter admits only
-    exited/created. Called at the start of a host run (cli.run_sandboxed),
-    not cmd_run: cmd_run executes inside the container, where the docker CLI
-    is absent. Best-effort: a reaper failure must not block a new run."""
+def reap_stopped(repo_root: str) -> None:
+    """Stage 3 (T3-4) reaper: remove STOPPED containers of THIS repo — crash
+    leftovers from earlier runs (a host killed between stop and rm). Running
+    containers are NOT touched: the status filter admits only exited/created.
+    Called at the start of a host run (cli.run_sandboxed), not cmd_run:
+    cmd_run executes inside the container, where the docker CLI is absent.
+    Best-effort: a reaper failure must not block a new run.
+
+    Operator condition 1 (2026-10-09): the name filter is narrowed to
+    `stanok-{basename(repo_root)}-` — the exact prefix sandbox_argv gives
+    this repo's containers. A generic `stanok-` would reap a foreign repo's
+    stopped container (another checkout, a worktree run): not our leftover.
+    The trailing dash prevents substring bleed: `name=stanok-repo-` does not
+    match `stanok-repoA-...` (docker's name filter is a substring match)."""
+    prefix = f"stanok-{os.path.basename(repo_root)}-"
     try:
         sp = subprocess.run(
-            ["docker", "ps", "-a", "--filter", "name=stanok-",
+            ["docker", "ps", "-a", "--filter", f"name={prefix}",
              "--filter", "status=exited", "--filter", "status=created", "-q"],
             capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):

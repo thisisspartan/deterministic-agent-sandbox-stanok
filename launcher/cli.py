@@ -351,9 +351,10 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
     evidence_dir, live_dir = cfg.label_paths(args.label)
     os.makedirs(evidence_dir, exist_ok=True)
 
-    # T3-4 reaper: remove stopped `stanok-` leftovers (crash remnants of
-    # earlier runs) before this run starts. Running containers are untouched.
-    sandbox.reap_stopped()
+    # T3-4 reaper: remove stopped leftovers of THIS repo (crash remnants of
+    # earlier runs) before this run starts. Running containers are untouched;
+    # a foreign repo's containers are not this run's leftovers (condition 1).
+    sandbox.reap_stopped(cfg.repo_root)
 
     # T3-4: a stale summary.json in LOG_DIR/<label> from an earlier run must
     # not survive: the worker no longer writes there (its summary lives on the
