@@ -12,7 +12,8 @@ import shutil
 from launcher.logs import log
 
 
-def _publish_evidence(cfg, label: str, container_rc: int) -> None:
+def _publish_evidence(cfg, label: str, container_rc: int,
+                      contract_violations: list[str] = ()) -> None:
     """Copy the container-written verdict from the rw LOG_DIR/<label> into the
     host-owned evidence/<label> (CC-134).
 
@@ -36,7 +37,14 @@ def _publish_evidence(cfg, label: str, container_rc: int) -> None:
     CONTRACT-FAIL exemption: a contract violation outranks the integrity
     label (spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL) — the
     violation is recorded and the rc fixed, but probe_result stays
-    CONTRACT-FAIL."""
+    CONTRACT-FAIL.
+
+    Stage 3 (T3-2) `contract_violations`: the host's own recompute of the
+    protected-files manifest (verify.host_contract_check against the pre-run
+    snapshot). Non-empty means the tree the verdict was computed against was
+    tampered with — the host forces verifier=FAIL + probe_result=CONTRACT-FAIL
+    regardless of what the worker summary claims (the judge is not the
+    defendant). This outranks the I5 check: the I5 block is skipped."""
     src = os.path.join(cfg.log_dir, label)
     files = ("summary.json", "launcher.stdout.log")
     if not any(os.path.isfile(os.path.join(src, f)) for f in files):
@@ -56,6 +64,25 @@ def _publish_evidence(cfg, label: str, container_rc: int) -> None:
     except (OSError, json.JSONDecodeError):
         return
     if not isinstance(summary, dict):
+        return
+    if contract_violations:
+        # Stage 3 (T3-2): the host's recompute outranks the worker's verdict
+        # (spec priority CONTRACT-FAIL > everything): the tree was tampered
+        # with after the pre-run snapshot — the verdict was computed against
+        # modified protected files. Force the FAIL; the I5 block below cannot
+        # add signal the host already has.
+        summary["verifier"] = "FAIL"
+        summary["rc"] = container_rc
+        summary["probe_result"] = "CONTRACT-FAIL"
+        summary.setdefault("contract_lock_violations", []).extend(
+            contract_violations)
+        summary["error"] = (
+            "HOST CONTRACT-LOCK: the tree was tampered with after the "
+            "pre-run snapshot — the verdict was computed against modified "
+            "protected files")
+        with open(sum_dst, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        log(f"CONTRACT-LOCK: {label}: host recompute: {contract_violations}")
         return
     violations = []
     # A NO-OP run intentionally returns rc=1 with verifier=PASS (the machine

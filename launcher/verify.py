@@ -238,6 +238,37 @@ def _tests_manifest(cfg) -> dict[str, str]:
     return manifest
 
 
+def _compare_manifests(before: dict[str, str], after: dict[str, str],
+                       declared) -> list[str]:
+    """The ONE comparison of two protected-file manifests (T3-2): a
+    pre-existing protected file that is DELETED or MODIFIED is a violation.
+    New files are never violations (a ticket may declare new tests). Used by
+    the worker-side _check_contract_lock (with the declared exemption) and by
+    the host-side host_contract_check (without job context) — the two cannot
+    drift."""
+    violations = []
+    for rel, digest in before.items():
+        if rel in declared:
+            continue
+        if rel not in after:
+            violations.append(f"DELETED: {rel}")
+        elif after[rel] != digest:
+            violations.append(f"MODIFIED: {rel}")
+    return violations
+
+
+def host_contract_check(cfg, before: dict[str, str]) -> list[str]:
+    """Stage 3 (T3-2): the host recomputes the protected-files manifest AFTER
+    the container exits and compares it with the pre-run snapshot (T3-1).
+    Any violation means the tree the verdict was computed against was
+    tampered with — the caller forces CONTRACT-FAIL regardless of the worker
+    summary (trust boundary, SPEC-VERDICT-INTEGRITY §1). No job/turn
+    context, no declared-path exemption: the host's independent second check;
+    a ticket may never edit a pre-existing protected file (CC-206 rejects
+    such tickets at launch), so the exemption would only hide tampering."""
+    return _compare_manifests(before, _tests_manifest(cfg), ())
+
+
 def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
                          plan: "SessionPlan") -> None:
     """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
@@ -248,14 +279,7 @@ def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
     manifest is snapshotted AFTER quarantine and a declared path is
     therefore never in the manifest)."""
     after = _tests_manifest(cfg)
-    violations = []
-    for rel, digest in before.items():
-        if rel in plan.declared_paths:
-            continue
-        if rel not in after:
-            violations.append(f"DELETED: {rel}")
-        elif after[rel] != digest:
-            violations.append(f"MODIFIED: {rel}")
+    violations = _compare_manifests(before, after, plan.declared_paths)
     if violations:
         job.setdefault("contract_lock_violations", []).extend(
             f"turn {turn}: {v}" for v in violations

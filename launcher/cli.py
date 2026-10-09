@@ -385,7 +385,12 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
         # read-only there); publish it to the host-owned evidence/<label> now
         # that the container is gone. BEFORE the marker removal, so the
         # supervisor never sees "not running" with the summary still missing.
-        _publish_evidence(cfg, args.label, rc)
+        # Stage 3 (T3-2): recompute the host-side contract AFTER the
+        # container exits — the host's independent check of the tree the
+        # verdict was computed against; violations force CONTRACT-FAIL at
+        # publish, regardless of the worker summary.
+        _publish_evidence(cfg, args.label, rc,
+                          verify.host_contract_check(cfg, before_manifest))
         try:
             os.remove(marker)
         except OSError:
