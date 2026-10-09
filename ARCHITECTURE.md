@@ -98,22 +98,21 @@ gates re-run + lock (rc=21) -> session.run_continuous_session:
 VERDICT (Stage 3, SPEC-VERDICT-INTEGRITY-2026-10-08):
 
 ```
-CONTAINER: summary.write_summary -> summary.json on the container's WRITABLE
-LAYER (CONTAINER_SUMMARY_ROOT=/var/tmp/stanok-evidence/<label> — survives
-`docker stop`, dies with `docker rm`; NOT tmpfs, NOT a mount; the worker no
-longer writes the shared LOG_DIR, so the verdict file is not a file the
-worker can rewrite after the run; commit_sha is captured on the HOST by
-cli._capture_start_commit before any launch and passed via the
+CONTAINER: summary.write_summary -> summary.json into the rw LOG_DIR/<label>
+mount (S1, 2026-10-09: rollback of T3-4 — the worker writes where
+cfg.label_paths already routes every other writer; commit_sha is captured on
+the HOST by cli._capture_start_commit before any launch and passed via the
 STANOK_START_COMMIT env — the container never runs git, plan 2026-10-08)
 
 HOST (cli.run_sandboxed, one finally): reap_stopped -> verify.contract_snapshot
-(pre-run, host process MEMORY only) -> docker run (NO --rm) -> wait
-(container_rc = ground truth) -> stop -> docker cp (worker summary ->
-LOG_DIR/<label>, the publish source) -> docker rm -f ->
+(pre-run, host process MEMORY only) -> docker run (--rm) -> wait
+(container_rc = ground truth) -> stop (abnormal-path trap) -> summary-presence
+check (no summary = aborted run: nothing published, status `missing`) ->
 verify.host_contract_check (recompute vs the snapshot) -> verify.fresh_verify
-(fresh container, T3-3; runs ONLY when the summary was retrieved AND the
+(fresh container, T3-3; runs ONLY when the summary exists AND the
 contract is intact — spec §1.6) -> summary._publish_evidence (the HOST issues
-the final verdict, Authority below) -> marker removal
+the final verdict, Authority below; publishes nothing when the files are
+absent) -> marker removal
 
 -> evidence/<label>/summary.json is read exactly once by the supervisor
 (CLAUDE.supervisor.md §3)
@@ -193,9 +192,11 @@ Priority at publish (spec §3): **CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL
 `worker_rc`/`worker_verifier`, written ONLY when the host overrides the
 verdict (the clean path stays byte-identical); the I5 detector compares
 `worker_rc` with the container exit, never the host's own final write. A
-failed `docker cp` or an unavailable fresh check writes an ENV-FAIL summary
+an unavailable fresh check writes an ENV-FAIL summary
 (`write_env_fail_summary`, rc=16) directly into evidence/ — the verdict
-cannot be PASS without the artifacts it is built from. Pinned by
+cannot be PASS without the artifacts it is built from. No summary at all
+(worker died before writing) publishes nothing: `status` reports `missing`
+(S1). Pinned by
 `test_stage3_host_snapshot.py`, `test_stage3_worker_lifecycle.py`,
 `test_stage3_fresh_verify.py`, `test_stage3_fresh_wiring.py`,
 `test_verdict_fresh.py` and `test_contract_fail_probe.py` test 9 (the former
@@ -224,7 +225,7 @@ promise code correctness.
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
 | `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
-| `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker lifecycle (no `--rm`, stop/cp/rm, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
+| `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker lifecycle (`--rm`, the stop trap, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
 | `launcher/session.py` | the one Claude session: turns, TDD hook, retry prompt, loop-guard |
 | `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts); host trust boundary: `contract_snapshot`/`host_contract_check` (T3-1/T3-2) + structural tests/+src/ rule (T3-9/T3-10), `fresh_verify` (T3-3) |
 | `launcher/summary.py` | the summary.json schema (`decide`/`_status_fields`), host-issued verdict priority + `write_env_fail_summary` (T3-5/T3-6), evidence publishing, rotation |

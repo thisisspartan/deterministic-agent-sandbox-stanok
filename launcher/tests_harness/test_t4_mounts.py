@@ -176,8 +176,7 @@ def test_declared_file_rw_sibling_erofs(tmp_path):
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     finally:
-        sandbox.docker_stop(name)
-        sandbox.docker_rm_force(name)  # T3-4: no --rm — the host removes it
+        sandbox.docker_stop(name)  # hang-safety net; --rm removes the container
     assert "FILE-RW-OK" in proc.stdout, proc
     assert "SIBLING-DENIED" in proc.stdout, proc
     assert "PARENT-RW-OK" in proc.stdout, proc

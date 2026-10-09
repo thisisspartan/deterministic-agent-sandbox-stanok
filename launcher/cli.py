@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 from launcher import logs, sandbox, stanok, verify
-from launcher.config import CONTAINER_SUMMARY_ROOT, Config, RunState
+from launcher.config import Config, RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.plan import SessionPlan
@@ -348,13 +348,16 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
     plus these paths under tests/ — an undeclared new file is a
     CONTRACT-FAIL (structural tests/ rule).
 
-    Stage 3 (T3-4): the container runs WITHOUT `--rm`; the finally retrieves
-    the worker's summary from the container's writable layer (`docker cp`)
-    before removing the container (`docker rm -f`). Order: wait -> cp -> rm.
-    A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS.
+    S1 (2026-10-09, rollback of T3-4): the container runs WITH `--rm`; the
+    worker writes its summary into the rw LOG_DIR/<label> mount, so the host
+    never retrieves anything from the container layer. The finally: stop
+    (abnormal-path trap) -> summary presence check -> contract recompute ->
+    fresh check -> publish. No summary = the worker died before writing:
+    nothing is published, `status` reports `missing` — an aborted run per the
+    supervisor protocol, not a verdict (no ENV-FAIL branch).
 
     Stage 3 (T3-6): after the contract recompute the host runs the fresh
-    check (verify.fresh_verify, T3-3) when the summary was retrieved and the
+    check (verify.fresh_verify, T3-3) when the summary exists and the
     contract is intact, and passes its result to _publish_evidence — the
     final verdict is host-issued (spec §1.1, priority §3). The returned rc
     equals the published verdict's rc."""
@@ -366,10 +369,10 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
     # a foreign repo's containers are not this run's leftovers (condition 1).
     sandbox.reap_stopped(cfg.repo_root)
 
-    # T3-4: a stale summary.json in LOG_DIR/<label> from an earlier run must
-    # not survive: the worker no longer writes there (its summary lives on the
-    # container layer), the host writes it only via docker cp — a failed cp
-    # would otherwise re-publish the previous run's verdict.
+    # S1: the worker writes its summary into LOG_DIR/<label> (the rw mount).
+    # A stale summary.json from an earlier run must not survive: if this
+    # worker crashes before writing, the stale file would otherwise be
+    # re-published as this run's verdict.
     stale = os.path.join(live_dir, "summary.json")
     if os.path.isfile(stale):
         try:
@@ -414,27 +417,23 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
     except KeyboardInterrupt:
         rc = run_state.interrupted_rc or 130
     finally:
+        # S1 (rollback of T3-4): the container ran WITH `--rm` — the daemon
+        # removed it on a normal exit; this stop is the abnormal-path trap
+        # (a real stop after a signal/crash, a no-op after a normal exit).
         sandbox.docker_stop(name)
-        # Stage 3 (T3-4): the container survived its exit (no --rm) — retrieve
-        # the worker's summary from its writable layer into LOG_DIR/<label>
-        # (the publish source), then remove the container. Order: cp -> rm.
-        # A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS
-        # without the summary it was built from.
-        cp_rc, cp_err = sandbox.docker_cp(
-            name, f"{CONTAINER_SUMMARY_ROOT}/{args.label}/summary.json",
-            os.path.join(live_dir, "summary.json"))
-        sandbox.docker_rm_force(name)
-        # CC-134: publish the retrieved verdict to the host-owned
-        # evidence/<label>. BEFORE the marker removal, so the supervisor never
-        # sees "not running" with the summary still missing.
+        # The worker wrote its summary into the rw LOG_DIR/<label> mount.
+        # No summary = the worker died before writing (crash/kill): nothing
+        # is published, `status` reports `missing` — an aborted run per the
+        # supervisor protocol, not a verdict.
+        summary_present = os.path.isfile(os.path.join(live_dir, "summary.json"))
         # Stage 3 (T3-2): recompute the host-side contract AFTER the
         # container exits — the host's independent check of the tree the
         # verdict was computed against; violations force CONTRACT-FAIL at
         # publish, regardless of the worker summary.
         # Stage 3 (T3-6): the fresh check (T3-3) runs ONLY when the summary
-        # was retrieved AND the contract is intact — a fresh run over a
-        # tampered tree is uninformative (spec §1.6); it is NOT gated on the
-        # worker's claims (§1.1: the host's check is the verdict authority).
+        # exists AND the contract is intact — a fresh run over a tampered
+        # tree is uninformative (spec §1.6); it is NOT gated on the worker's
+        # claims (§1.1: the host's check is the verdict authority).
         # A fresh infra failure (EXEC_ERROR tail) is rc=16 ENV-FAIL — not a
         # verdict (call the human). A fresh suite failure overrides the
         # worker's claim at publish (FRESH-FAIL, §3); the run's exit rc is
@@ -447,20 +446,18 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
             cfg, before_manifest, declared)
         fresh_check = None
         fresh_infra_error = None
-        if cp_rc == 0 and not contract_violations:
+        if summary_present and not contract_violations:
             fresh_rc, fresh_tail = verify.fresh_verify(cfg)
             if fresh_tail.startswith("EXEC_ERROR:"):
                 fresh_infra_error = fresh_tail
             else:
                 fresh_check = (fresh_rc, fresh_tail)
+        # CC-134: publish to the host-owned evidence/<label> BEFORE removing
+        # the marker, so the supervisor never sees "not running" with the
+        # summary still missing. _publish_evidence publishes nothing when the
+        # files are absent — an aborted run stays aborted.
         _publish_evidence(cfg, args.label, rc, contract_violations, fresh_check)
-        if cp_rc != 0:
-            rc = int(ExitCode.ENV_FAIL)
-            write_env_fail_summary(
-                cfg, args.label,
-                f"docker cp failed (rc={cp_rc}): the worker summary could not "
-                f"be retrieved from the container layer — {cp_err or 'no such file'}")
-        elif fresh_infra_error is not None:
+        if fresh_infra_error is not None:
             rc = int(ExitCode.ENV_FAIL)
             write_env_fail_summary(
                 cfg, args.label,
@@ -602,9 +599,9 @@ def _early_abort(cfg, marker: str, label: str, ticket: str,
     """Launch-level refusal: log, clean a dead marker, write the EARLY-ABORT
     summary (only when absent — a fresh verdict must not be overwritten).
 
-    T3-4: the summary goes to cfg.summary_dir(label) — inside the container
-    the writable-layer path the host retrieves with docker cp; on the host
-    the evidence dir (the host is the publisher, unchanged)."""
+    S1: the summary goes to cfg.summary_dir(label) — inside the container the
+    rw LOG_DIR/<label> mount; on the host the evidence dir (the host is the
+    publisher)."""
     log(err_msg)
     if os.path.exists(marker):
         # A live run's marker must survive an early abort of a

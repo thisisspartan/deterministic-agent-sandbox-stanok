@@ -1,10 +1,11 @@
 """Stage 3 T3-6 — wiring fresh_verify into run_sandboxed (SPEC-VERDICT-INTEGRITY §1.1, §3).
 
-The host order pinned (plan 2026-10-08): snapshot -> docker run (no --rm) ->
-wait -> stop -> cp -> rm -f -> contract recompute -> fresh check ->
+The host order pinned (S1 rollback, PLAN-SIMPLIFY-2026-10-09): snapshot ->
+docker run (--rm) -> wait -> stop -> contract recompute -> fresh check ->
 _publish_evidence. Rules the wiring must enforce:
-  - the fresh check runs ONLY when the summary was retrieved (cp ok) AND the
-    contract is intact — a tampered tree makes a fresh run over it
+  - the fresh check runs ONLY when the worker summary is present (the worker
+    wrote it into the rw LOG_DIR mount) AND the contract is intact — a
+    tampered tree makes a fresh run over it
     uninformative (spec §1.6: "контракт нарушен → fresh-прогон по
     испорченному дереву неинформативен"); it is NOT gated on the worker's
     claims (the host's check is unconditional authority, §1.1);
@@ -16,7 +17,7 @@ _publish_evidence. Rules the wiring must enforce:
     must not contradict the summary the supervisor reads.
 
 Tests:
-  1  call order: snapshot < run < wait < cp < rm < contract recompute <
+  1  call order: snapshot < run < wait < stop < contract recompute <
      fresh check < publish
   2  fresh FAIL at worker PASS -> end-to-end FRESH-FAIL: published rc=fresh
      rc + worker claims preserved + run rc = fresh rc (R4)
@@ -24,7 +25,8 @@ Tests:
      = container rc
   4  contract violations -> fresh NOT run (uninformative), CONTRACT-FAIL
      published
-  5  cp failure -> fresh NOT run; ENV-FAIL (T3-4 behavior preserved)
+  5  no worker summary -> fresh NOT run; nothing published (aborted run,
+     status `missing`) — no fake verdict
   6  fresh infra failure (EXEC_ERROR) -> rc=16 ENV-FAIL summary, NOT
      FRESH-FAIL; run rc=16
   7  fresh runs after an honest worker FAIL (not gated on worker_verifier);
@@ -60,12 +62,14 @@ def _repo(tmp_path):
     return repo, Config(repo_root=str(repo), log_dir=str(logdir))
 
 
-def _mock_run(tmp_path, monkeypatch, *, container_rc=0, cp_result=(0, ""),
+def _mock_run(tmp_path, monkeypatch, *, container_rc=0, write_summary=True,
               fresh_result=(0, ""), worker_summary=None, tamper_after_run=False):
     """run_sandboxed with the docker cycle mocked; the REAL contract snapshot
     and recompute run — the boundary under test is the wiring (order, gating,
     verdict routing), not the contract math (pinned in T3-1/T3-2 tests).
-    Returns (repo, cfg, calls, args)."""
+    The fake worker writes its summary into LOG_DIR/<label> (the rw mount —
+    what the real container does with `--rm`); write_summary=False simulates a
+    worker that died before writing. Returns (repo, cfg, calls, args)."""
     repo, cfg = _repo(tmp_path)
     calls = []
     if worker_summary is None:
@@ -84,6 +88,13 @@ def _mock_run(tmp_path, monkeypatch, *, container_rc=0, cp_result=(0, ""),
                 # simulate the worker rewriting a protected file mid-run
                 (repo / "tests" / "t_test.py").write_text("tampered\n",
                                                           encoding="utf-8")
+            if write_summary:
+                import os
+                d = os.path.join(cfg.log_dir, "lbl")
+                os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, "summary.json"), "w",
+                          encoding="utf-8") as f:
+                    json.dump(worker_summary, f)
             return container_rc
 
     def spy_snapshot(c):
@@ -93,16 +104,6 @@ def _mock_run(tmp_path, monkeypatch, *, container_rc=0, cp_result=(0, ""),
     def spy_argv(*a, **k):
         calls.append("run")
         return ("stanok-test", ["docker", "run", "img"])
-
-    def spy_cp(name, cpath, hpath):
-        calls.append("cp")
-        rc, err = cp_result
-        if rc == 0:
-            import os
-            os.makedirs(os.path.dirname(hpath), exist_ok=True)
-            with open(hpath, "w", encoding="utf-8") as f:
-                json.dump(worker_summary, f)
-        return (rc, err)
 
     def spy_contract(c, before, declared):
         calls.append("contract")
@@ -123,8 +124,6 @@ def _mock_run(tmp_path, monkeypatch, *, container_rc=0, cp_result=(0, ""),
     monkeypatch.setattr(sandbox, "sandbox_argv", spy_argv)
     monkeypatch.setattr(cli.subprocess, "Popen", lambda argv, **kw: FakePopen(argv))
     monkeypatch.setattr(sandbox, "docker_stop", lambda name: calls.append("stop"))
-    monkeypatch.setattr(sandbox, "docker_cp", spy_cp)
-    monkeypatch.setattr(sandbox, "docker_rm_force", lambda name: calls.append("rm"))
     monkeypatch.setattr(cli, "_publish_evidence", spy_publish)
     monkeypatch.setattr(cli, "_install_signal_handlers", lambda rs: None)
     monkeypatch.setattr(cli.os, "setpgid", lambda *a: None)
@@ -140,19 +139,22 @@ def _published(repo):
 
 # --- 1: the host order -----------------------------------------------------------
 
-def test_host_order_snapshot_run_cp_rm_contract_fresh_publish(tmp_path, monkeypatch):
+def test_host_order_snapshot_run_stop_contract_fresh_publish(tmp_path, monkeypatch):
     repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch)
     assert cli.run_sandboxed(cfg, args, (), (), ()) == 0
-    for step in ("snapshot", "run", "wait", "cp", "rm", "contract", "fresh",
+    for step in ("snapshot", "run", "wait", "stop", "contract", "fresh",
                  "publish"):
         assert step in calls, calls
-    idx = {s: calls.index(s) for s in ("snapshot", "run", "wait", "cp", "rm",
+    idx = {s: calls.index(s) for s in ("snapshot", "run", "wait", "stop",
                                        "contract", "fresh", "publish")}
     # the snapshot precedes the container (T3-1 boundary, re-pinned here);
-    # the contract recompute and the fresh check sit between the container's
-    # removal and the publish — the verdict is issued from the host's view
-    assert (idx["snapshot"] < idx["run"] < idx["wait"] < idx["cp"] <
-            idx["rm"] < idx["contract"] < idx["fresh"] < idx["publish"])
+    # the contract recompute and the fresh check sit after the container is
+    # gone (--rm removed it on exit; the stop-trap is the abnormal-path net)
+    # and before the publish — the verdict is issued from the host's view
+    assert (idx["snapshot"] < idx["run"] < idx["wait"] < idx["stop"] <
+            idx["contract"] < idx["fresh"] < idx["publish"])
+    # S1: the retrieval cycle is gone
+    assert "cp" not in calls and "rm" not in calls
 
 
 # --- 2: fresh FAIL end-to-end (R4) -----------------------------------------------
@@ -196,16 +198,20 @@ def test_fresh_skipped_when_contract_violated(tmp_path, monkeypatch):
     assert "MODIFIED: tests/t_test.py" in dst["contract_lock_violations"]
 
 
-# --- 5: summary not retrieved -> no fresh check, ENV-FAIL (T3-4 preserved) ------
+# --- 5: no worker summary -> no fresh check, nothing published ------------------
 
-def test_fresh_skipped_when_summary_not_retrieved(tmp_path, monkeypatch):
+def test_fresh_skipped_when_no_summary(tmp_path, monkeypatch):
+    """S1: the worker died before writing its summary. No summary -> the fresh
+    check is pointless (there is no run to certify) and nothing is published:
+    the run is an aborted run, `status` reports `missing` — not a verdict."""
     repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
-                                       cp_result=(1, "Error: No such file"))
+                                       container_rc=1, write_summary=False)
     rc = cli.run_sandboxed(cfg, args, (), (), ())
-    assert rc == 16
+    assert rc == 1  # the container rc is the run rc; no fake verdict
     assert "fresh" not in calls
-    dst = _published(repo)
-    assert dst["probe_result"] == "ENV-FAIL"
+    assert "publish" in calls  # publish runs but finds nothing to copy
+    assert not (repo / "evidence" / "lbl" / "summary.json").exists()
+    assert cli._status_dict(cfg, "lbl")["state"] == "missing"
 
 
 # --- 6: fresh infra failure -> ENV-FAIL, never FRESH-FAIL -----------------------

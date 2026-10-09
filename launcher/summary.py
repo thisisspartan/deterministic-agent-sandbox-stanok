@@ -1,8 +1,8 @@
 """summary — the verdict artifacts: summary.json, evidence publishing, rotation.
 
-build_summary/write_summary (the typed contract, T3-4 summary routing),
-write_env_fail_summary (T3-4/T3-6: docker cp failure or fresh-check infra
-failure -> ENV-FAIL),
+build_summary/write_summary (the typed contract, S1 summary routing:
+container -> rw LOG_DIR/<label>),
+write_env_fail_summary (T3-6: fresh-check infra failure -> ENV-FAIL),
 _publish_evidence (CC-134, I5 integrity check; T3-5 host-issued verdict
 priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL), _rotate_stale_summary,
 the status-field table. Static
@@ -274,10 +274,10 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
 def write_summary(cfg, job: dict, elapsed_s: int) -> None:
     """Writes the exact summary.json contract expected by the L1 Supervisor.
 
-    Stage 3 (T3-4): the path is cfg.summary_dir(label) — inside the container
-    the writable-layer path the host retrieves with `docker cp` after the
-    container exits; on the host (no-sandbox) the evidence dir. The summary
-    is no longer a file shared through a mount the worker can rewrite."""
+    S1 (rollback of T3-4): the path is cfg.summary_dir(label) — inside the
+    container the rw LOG_DIR/<label> mount (the host publishes it into
+    evidence/<label> after the container exits); on the host (no-sandbox) the
+    evidence dir."""
     d = cfg.summary_dir(job["label"])
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, "summary.json"), "w", encoding="utf-8") as f:
@@ -285,11 +285,10 @@ def write_summary(cfg, job: dict, elapsed_s: int) -> None:
 
 
 def write_env_fail_summary(cfg, label: str, error: str) -> None:
-    """Stage 3 (T3-4, generalized by T3-6): a host-side infrastructure
-    failure — `docker cp` could not retrieve the worker's summary, or the
-    fresh check could not run (EXEC_ERROR). The verdict cannot be issued:
-    the host writes an ENV-FAIL summary (rc=16) with the error text directly
-    into the evidence dir — not a verdict, call the human."""
+    """Stage 3 (T3-6): a host-side infrastructure failure — the fresh check
+    could not run (EXEC_ERROR). The verdict cannot be issued: the host writes
+    an ENV-FAIL summary (rc=16) with the error text directly into the
+    evidence dir — not a verdict, call the human."""
     evidence_dir, _ = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
     job = {"label": label, "rc": int(ExitCode.ENV_FAIL), "verifier": "FAIL",

@@ -31,6 +31,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_stage3_src_tree.py 
 """
 import argparse
 import json
+import os
 
 from launcher import cli, sandbox, summary, verify
 from launcher.config import Config
@@ -74,27 +75,23 @@ def _mock_run(tmp_path, monkeypatch, *, create_during_run=None):
             if create_during_run is not None:
                 (repo / create_during_run).write_text(
                     "def rgb(*a):\n    return (0, 0, 0)\n", encoding="utf-8")
+            # S1: the worker writes its summary into the rw LOG_DIR mount
+            d = os.path.join(cfg.log_dir, "lbl")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "summary.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(CLEAN_WORKER, f)
             return 0
 
     def spy_argv(*a, **k):
         calls.append("run")
         return ("stanok-test", ["docker", "run", "img"])
 
-    def spy_cp(name, cpath, hpath):
-        calls.append("cp")
-        import os
-        os.makedirs(os.path.dirname(hpath), exist_ok=True)
-        with open(hpath, "w", encoding="utf-8") as f:
-            json.dump(CLEAN_WORKER, f)
-        return (0, "")
-
     monkeypatch.setattr(sandbox, "reap_stopped", lambda *a: None)
     monkeypatch.setattr(sandbox, "sandbox_argv", spy_argv)
     monkeypatch.setattr(verify, "fresh_verify", lambda c: calls.append("fresh") or (0, ""))
     monkeypatch.setattr(cli.subprocess, "Popen", lambda argv, **kw: FakePopen(argv))
     monkeypatch.setattr(sandbox, "docker_stop", lambda name: calls.append("stop"))
-    monkeypatch.setattr(sandbox, "docker_cp", spy_cp)
-    monkeypatch.setattr(sandbox, "docker_rm_force", lambda name: calls.append("rm"))
     monkeypatch.setattr(cli, "_install_signal_handlers", lambda rs: None)
     monkeypatch.setattr(cli.os, "setpgid", lambda *a: None)
     args = argparse.Namespace(label="lbl", ticket="t.md",
