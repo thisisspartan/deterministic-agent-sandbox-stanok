@@ -1,35 +1,37 @@
-"""Stage 3 T3-5 — the host issues the final verdict (SPEC-VERDICT-INTEGRITY §2).
+"""Stage 3 T3-5 — the host issues the final verdict (SPEC-VERDICT-INTEGRITY §2),
+S2-simplified (PLAN-SIMPLIFY-2026-10-09): the I5 detector, the worker_*
+fields and the INTEGRITY-FAIL value are REMOVED. The host's authority is its
+two independent checks only: the contract recompute and the fresh check.
 
 `_publish_evidence(cfg, label, container_rc, contract_violations=(),
 fresh_check=None)`: the final verifier/rc/probe_result are issued by the HOST
-with the spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL > worker
-override:
+with the priority CONTRACT-FAIL > FRESH-FAIL > the worker's claims (which
+pass through untouched when neither host check fires):
   - `fresh_check=(rc, tail)` is `verify.fresh_verify`'s result — the host's
     independent re-run of the suite in a fresh container the worker never
     touched (T3-3). A non-zero fresh rc forces verifier=FAIL +
     probe_result=FRESH-FAIL + rc=fresh rc; the tail is appended to errors.
-    fresh_check=None = not run: T3-5 does NOT wire fresh_verify into
-    run_sandboxed yet (T3-6 does) — with None the behavior is today's.
-  - the worker's claims are preserved in worker_rc/worker_verifier — written
-    ONLY when the host overrides the verdict: the clean path stays
-    byte-identical (test_verdict_safety.py strict equality).
-  - the I5 detector compares worker_rc with the container exit, NOT the
-    final rc: the host's own final write is never taken for a forgery.
-decide()/_status_fields/test_verdict_table.py unchanged.
+    fresh_check=None = not run.
+  - the worker's summary is published as-is when no host check fires — the
+    host never cross-checks the worker's rc against the container exit
+    (sanctioned gap, S2): the verdict is a statement about the TREE
+    (suite green + tree = declared), not about the worker's self-report.
+decide()/_status_fields unchanged.
 
 Tests:
   1  CONTRACT-FAIL beats a worker PASS even when the fresh check passes
   2  CONTRACT-FAIL beats FRESH-FAIL (spec priority)
   3  FRESH-FAIL at worker PASS -> final FAIL + probe FRESH-FAIL + rc=fresh
-     rc + tail in errors + worker claims preserved
-  4  FRESH-FAIL beats INTEGRITY-FAIL (forged worker + fresh fails)
+     rc + tail in errors
+  4  FRESH-FAIL fires on a forged worker (claims PASS, container exited 1)
   5  FRESH-FAIL outranks the worker's own honest FAIL (priority over the
-     worker override)
-  6  forged worker_rc with fresh PASS -> INTEGRITY-FAIL, worker claims kept
+     worker's claims)
+  6  pure forgery (claims PASS, container exited 1) with clean tree + fresh
+     PASS -> published unchanged — the S2-sanctioned gap: no I5 check
   7  clean path (worker PASS, container 0, fresh PASS) -> summary unchanged,
      no worker_* fields (CLEAN-FIRST)
   8  same for PASS-AFTER-LOCAL-RETRY (turns=2)
-  9  fresh_check=None (not wired yet) -> today's behavior unchanged
+  9  fresh_check=None (not run) -> the worker's claims pass through
   10 CONTRACT-FAIL overrides the NO-OP-PASS session-override label (spec R2)
   11 FRESH-FAIL overrides the NO-OP-PASS label (spec §3 priority, R2)
 
@@ -71,8 +73,6 @@ def test_contract_fail_beats_worker_pass_even_with_fresh_pass(tmp_path):
     dst = _published(repo, "lbl")
     assert dst["verifier"] == "FAIL"
     assert dst["probe_result"] == "CONTRACT-FAIL"
-    assert dst["worker_rc"] == 0
-    assert dst["worker_verifier"] == "PASS"
 
 
 def test_contract_fail_beats_fresh_fail(tmp_path):
@@ -96,14 +96,12 @@ def test_fresh_fail_overrides_worker_pass(tmp_path):
     # the final rc is the fresh check's own exit — the host's measurement
     assert dst["rc"] == 1
     assert any("1 == 2" in e for e in dst["errors"])
-    # the worker's claim is preserved for the record, not as the verdict
-    assert dst["worker_rc"] == 0
-    assert dst["worker_verifier"] == "PASS"
 
 
-def test_fresh_fail_beats_integrity_fail(tmp_path):
-    # forged worker (claims rc=0/PASS while the container exited 1) AND the
-    # fresh check fails: FRESH-FAIL outranks INTEGRITY-FAIL (spec priority).
+def test_fresh_fail_fires_on_forged_worker(tmp_path):
+    # S2: the worker claims rc=0/PASS while the container exited 1, and the
+    # fresh check fails — the host's fresh check is the only override and it
+    # fires regardless of the worker's claim.
     repo, logdir = _publish_tree(tmp_path, "lbl", dict(CLEAN_WORKER))
     summary._publish_evidence(_cfg(repo, logdir), "lbl", 1, (),
                              (1, "FAILED tests/t_test.py::test_x"))
@@ -122,22 +120,22 @@ def test_fresh_fail_outranks_worker_own_fail(tmp_path):
                              (1, "FAILED tests/t_test.py::test_x"))
     dst = _published(repo, "lbl")
     assert dst["probe_result"] == "FRESH-FAIL"
-    assert dst["worker_rc"] == 1
-    assert dst["worker_verifier"] == "FAIL"
 
 
-# --- 6: the I5 detector works against worker_rc, with the fresh check present ---
+# --- 6: the S2-sanctioned gap: a pure forgery is no longer caught ---------------
 
-def test_forged_worker_rc_is_integrity_fail_with_fresh_pass(tmp_path):
+def test_forged_worker_not_caught_after_s2(tmp_path):
+    # S2 (PLAN-SIMPLIFY-2026-10-09): the host's authority is its two checks
+    # only. A worker claiming rc=0/PASS while the container exited 1, over a
+    # clean contract with a GREEN fresh check, is published unchanged — the
+    # I5 rc cross-check is gone. The verdict is a statement about the tree
+    # (suite green + tree = declared), not about the worker's self-report.
     repo, logdir = _publish_tree(tmp_path, "lbl", dict(CLEAN_WORKER))
     summary._publish_evidence(_cfg(repo, logdir), "lbl", 1, (), (0, ""))
     dst = _published(repo, "lbl")
-    assert dst["verifier"] == "FAIL"
-    assert dst["probe_result"] == "INTEGRITY-FAIL"
-    assert dst["rc"] == 1
-    assert "integrity_violation" in dst
-    assert dst["worker_rc"] == 0
-    assert dst["worker_verifier"] == "PASS"
+    assert dst == CLEAN_WORKER
+    assert "integrity_violation" not in dst
+    assert "worker_rc" not in dst
 
 
 # --- 7-9: the clean path stays byte-identical ------------------------------------
@@ -161,8 +159,8 @@ def test_pass_after_local_retry_unchanged(tmp_path):
 
 
 def test_fresh_check_absent_keeps_today_behavior(tmp_path):
-    # T3-5 does not wire fresh_verify into run_sandboxed (T3-6 does): with
-    # fresh_check=None the behavior is today's (test_verdict_safety.py).
+    # fresh_check=None (not run): with no host check firing, the worker's
+    # claims pass through untouched.
     repo, logdir = _publish_tree(tmp_path, "lbl", dict(CLEAN_WORKER))
     summary._publish_evidence(_cfg(repo, logdir), "lbl", 0)
     assert _published(repo, "lbl") == CLEAN_WORKER
@@ -184,8 +182,6 @@ def test_contract_fail_overrides_noop_pass(tmp_path):
     dst = _published(repo, "lbl")
     assert dst["probe_result"] == "CONTRACT-FAIL"
     assert dst["verifier"] == "FAIL"
-    assert dst["worker_rc"] == 1
-    assert dst["worker_verifier"] == "PASS"
 
 
 def test_fresh_fail_overrides_noop_pass(tmp_path):
@@ -199,5 +195,3 @@ def test_fresh_fail_overrides_noop_pass(tmp_path):
     assert dst["probe_result"] == "FRESH-FAIL"
     assert dst["verifier"] == "FAIL"
     assert dst["rc"] == 1
-    assert dst["worker_rc"] == 1
-    assert dst["worker_verifier"] == "PASS"

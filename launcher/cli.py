@@ -466,8 +466,8 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
             rc = fresh_check[0]
         elif contract_violations and rc == 0:
             # T3-9: the exit equals the published verdict's rc (T3-6
-            # principle) — a host-issued CONTRACT-FAIL never exits 0; the
-            # container's 0 is preserved in the summary as worker_rc.
+            # principle) — a host-issued CONTRACT-FAIL never exits 0;
+            # _publish_evidence forces the summary rc to DEFECT too.
             rc = int(ExitCode.DEFECT)
         try:
             os.remove(marker)

@@ -7,19 +7,14 @@ failure, and the acceptance ("live negative expects CONTRACT-FAIL") could
 not be met.
 
 The mechanism (by the NO-OP-PASS / LOOP-TRAP pattern — an override, the
-decide() table is UNCHANGED, test_verdict_table.py untouched):
+decide() table is UNCHANGED):
   1. _contract_lock_forced_fail sets job["probe_result"] = "CONTRACT-FAIL".
-  2. _publish_evidence must NOT downgrade CONTRACT-FAIL to INTEGRITY-FAIL:
-     the spec priority is CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL. The
-     I5 check still records the violation and keeps the container rc as
-     ground truth, but the probe_result label stays CONTRACT-FAIL.
-  3. Override priority (operator review 2026-10-09): probe_result is ONE key,
+  2. Override priority (operator review 2026-10-09): probe_result is ONE key,
      so without an explicit rule the later write wins. decide() states the
      rule: non-empty contract_lock_violations -> CONTRACT-FAIL, outranking
      every behavioral override (LOOP-TRAP, NO-OP-PASS) regardless of write
      order — CONTRACT-FAIL describes verdict integrity, LOOP-TRAP only model
-     behavior. test_verdict_table.py is unaffected (its jobs carry no
-     violations) and passes UNCHANGED.
+     behavior.
 
 Tests:
   1  _contract_lock_forced_fail sets probe_result CONTRACT-FAIL
@@ -27,17 +22,13 @@ Tests:
   3  build_summary keeps the override (not VERIFY-FAIL)
   4  wiring: _post_turn_decision with a new zone symlink -> rc=1 AND
      probe_result CONTRACT-FAIL (the end-to-end path)
-  5  _publish_evidence: CONTRACT-FAIL is NOT downgraded to INTEGRITY-FAIL
-     (violation recorded, rc = container ground truth)
-  6  control: a VERIFY-FAIL summary with a violation still becomes
-     INTEGRITY-FAIL (the exemption is CONTRACT-FAIL-only)
-  7  priority: contract_lock_violations outrank a LOOP-TRAP override written
+  5  priority: contract_lock_violations outrank a LOOP-TRAP override written
      FIRST (operator review 2026-10-09: integrity of the verdict beats model
      behavior)
-  8  priority: same when LOOP-TRAP is written SECOND (_loop_trap_verdict
+  6  priority: same when LOOP-TRAP is written SECOND (_loop_trap_verdict
      overwrites the probe_result key — decide()'s rule, not the write order,
      decides)
-  9  trust boundary (GAP closed by stage 3, T3-1/T3-2): the host snapshots
+  7  trust boundary (GAP closed by stage 3, T3-1/T3-2): the host snapshots
      the protected files before the run and recomputes after it
      (verify.contract_snapshot + host_contract_check — the run_sandboxed call
      site); a forged clean summary (rc=0, PASS, empty violations) over a
@@ -123,32 +114,7 @@ def _published(repo, label):
         (repo / "evidence" / label / "summary.json").read_text(encoding="utf-8"))
 
 
-def test_publish_evidence_keeps_contract_fail(tmp_path):
-    # A violation is present (rc field disagrees with the container exit) —
-    # the I5 check records it and fixes the rc, but the verdict CLASS stays
-    # CONTRACT-FAIL: CONTRACT-FAIL > INTEGRITY-FAIL in the spec priority.
-    repo, logdir = _publish_tree(tmp_path, "lbl", {
-        "rc": 1, "verifier": "FAIL", "probe_result": "CONTRACT-FAIL"})
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 2)
-    dst = _published(repo, "lbl")
-    assert dst["probe_result"] == "CONTRACT-FAIL"
-    assert dst["rc"] == 2
-    assert "integrity_violation" in dst
-
-
-def test_publish_evidence_still_forces_integrity_fail_for_verify_fail(tmp_path):
-    # Control: the exemption is CONTRACT-FAIL-only — every other verdict is
-    # still overridden by the I5 check (test_verdict_safety.py behaviour).
-    repo, logdir = _publish_tree(tmp_path, "lbl", {
-        "rc": 1, "verifier": "FAIL", "probe_result": "VERIFY-FAIL"})
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 2)
-    dst = _published(repo, "lbl")
-    assert dst["probe_result"] == "INTEGRITY-FAIL"
-
-
-# --- 7-8: override priority — violations beat LOOP-TRAP in BOTH write orders ----
+# --- 5-6: override priority — violations beat LOOP-TRAP in BOTH write orders ----
 
 _LOOP = {"tool": "Bash", "hash": "abc", "n": 5}
 
@@ -176,7 +142,7 @@ def test_contract_fail_outranks_loop_trap_written_second():
     assert s["contract_lock_violations"] == ["turn 1: MODIFIED: tests/t_test.py"]
 
 
-# --- 9: the trust boundary — GAP closed by stage 3 (T3-1/T3-2/T3-6) ------------
+# --- 7: the trust boundary — GAP closed by stage 3 (T3-1/T3-2/T3-6) ------------
 # The gap (operator review 2026-10-09): the host trusted the container's
 # summary — a worker that rewrote summary.json after the run (rc=0, PASS,
 # empty violations) over a tree where a protected file was actually modified

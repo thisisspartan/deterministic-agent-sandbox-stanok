@@ -12,7 +12,7 @@ _publish_evidence. Rules the wiring must enforce:
   - a fresh infra failure (tail "EXEC_ERROR:") is rc=16 ENV-FAIL — not a
     verdict (call the human), never FRESH-FAIL;
   - a fresh suite failure overrides the worker's claim at publish:
-    probe_result FRESH-FAIL, rc = fresh rc, worker claims preserved (§3, R4);
+    probe_result FRESH-FAIL, rc = fresh rc (§3, R4);
   - the run's exit rc equals the published verdict's rc — the process exit
     must not contradict the summary the supervisor reads.
 
@@ -20,7 +20,7 @@ Tests:
   1  call order: snapshot < run < wait < stop < contract recompute <
      fresh check < publish
   2  fresh FAIL at worker PASS -> end-to-end FRESH-FAIL: published rc=fresh
-     rc + worker claims preserved + run rc = fresh rc (R4)
+     rc + run rc = fresh rc (R4)
   3  fresh PASS clean path -> summary unchanged (no worker_* fields), run rc
      = container rc
   4  contract violations -> fresh NOT run (uninformative), CONTRACT-FAIL
@@ -29,8 +29,9 @@ Tests:
      status `missing`) — no fake verdict
   6  fresh infra failure (EXEC_ERROR) -> rc=16 ENV-FAIL summary, NOT
      FRESH-FAIL; run rc=16
-  7  fresh runs after an honest worker FAIL (not gated on worker_verifier);
-     a fresh PASS does not fabricate a PASS — the honest verdict stands
+  7  fresh runs after an honest worker FAIL (not gated on the worker's
+     claims); a fresh PASS does not fabricate a PASS — the honest verdict
+     stands
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_stage3_fresh_wiring.py -q
 """
@@ -170,7 +171,6 @@ def test_fresh_fail_end_to_end(tmp_path, monkeypatch):
     assert dst["probe_result"] == "FRESH-FAIL"
     assert dst["verifier"] == "FAIL"
     assert dst["rc"] == 1  # the fresh rc, not the container's 0
-    assert dst["worker_rc"] == 0 and dst["worker_verifier"] == "PASS"
     assert any("1 == 2" in e for e in dst["errors"])
 
 
@@ -236,7 +236,7 @@ def test_fresh_runs_after_honest_worker_fail(tmp_path, monkeypatch):
                                        worker_summary=dict(HONEST_FAIL_WORKER),
                                        fresh_result=(0, ""))
     rc = cli.run_sandboxed(cfg, args, (), (), ())
-    assert "fresh" in calls  # unconditional authority: no worker_verifier gate
+    assert "fresh" in calls  # unconditional authority: no gate on the worker's claims
     assert rc == 1
     dst = _published(repo)
     # a fresh PASS does not fabricate a PASS: the worker's honest FAIL stands

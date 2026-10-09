@@ -117,7 +117,8 @@ in the container (the repo `:ro` plus per-ticket `:rw` carve-outs, the
 pre-existing contract files re-bound `:ro`), the TDD red phase is
 harness-provided by the in-process verifier hook, on verifier FAIL the
 Runner appends an in-session retry turn (`--local-retries`), and the host
-re-checks the container's verdict (I5) before publishing it to
+issues the final verdict — recomputing the protected-files contract and
+re-running the suite in a fresh container — before publishing it to
 `evidence/<label>/summary.json`.
 
 ## Commits

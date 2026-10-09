@@ -120,7 +120,7 @@ absent) -> marker removal
 
 `probe_result` values: `CLEAN-FIRST | PASS-AFTER-LOCAL-RETRY | VERIFY-FAIL |
 EARLY-ABORT | NO-OP-PASS | ENV-FAIL | LOOP-TRAP | CONTRACT-FAIL |
-FRESH-FAIL | INTEGRITY-FAIL` — derived by `summary.decide` (priority, operator
+FRESH-FAIL` — derived by `summary.decide` (priority, operator
 review 2026-10-09: non-empty `contract_lock_violations` wins over every
 behavioral override — verdict integrity beats model behavior, and probe_result
 is one key so the rule must be explicit, not write-order luck; then the
@@ -129,11 +129,12 @@ in-container (first echelon, an override like NO-OP-PASS/LOOP-TRAP — without
 it a contract violation reads as VERIFY-FAIL) and by the HOST recompute
 (Authority below); FRESH-FAIL and the host CONTRACT-FAIL/ENV-FAIL are issued
 only by `_publish_evidence` — never by the container; pinned by
-`launcher/tests_harness/test_verdict_table.py` (the table, unchanged) and
+`launcher/tests_harness/test_scenarios_verdict.py` (the verdict scenarios),
 `test_contract_fail_probe.py` (the override, the violations-beat-overrides
-rule in both write orders, and the host exemption: `_publish_evidence`
-records an I5 violation but never downgrades CONTRACT-FAIL to INTEGRITY-FAIL
-— spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL).
+rule in both write orders) and `test_verdict_fresh.py` (the publish
+priority CONTRACT-FAIL > FRESH-FAIL > the worker's claims — S2,
+PLAN-SIMPLIFY-2026-10-09: the I5 rc cross-check, the worker_* fields and
+INTEGRITY-FAIL are removed).
 
 **Authority of the verdict (Stage 3, SPEC-VERDICT-INTEGRITY-2026-10-08;
 closes the trust boundary opened by `b7ae392`).** The final
@@ -187,19 +188,21 @@ independent host checks, both against state the worker cannot rewrite:
    the host-backstop TIMEOUT flows as FRESH-FAIL (run.sh self-limits per
    file, so a host overrun is a pathological tree, not an infra refusal).
 
-Priority at publish (spec §3): **CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL
-> worker override**. The worker's claims are diagnostic-only: preserved in
-`worker_rc`/`worker_verifier`, written ONLY when the host overrides the
-verdict (the clean path stays byte-identical); the I5 detector compares
-`worker_rc` with the container exit, never the host's own final write. A
-an unavailable fresh check writes an ENV-FAIL summary
+Priority at publish (spec §3, S2-simplified per PLAN-SIMPLIFY-2026-10-09):
+**CONTRACT-FAIL > FRESH-FAIL > the worker's claims**. The host's authority
+is its two independent checks only; the worker's summary passes through
+untouched when neither fires (the clean path stays byte-identical).
+Sanctioned gap: a pure forgery (claims PASS while the container exited
+non-zero) over a clean contract with a green fresh check is no longer
+caught — the verdict is a statement about the TREE (suite green + tree =
+declared), not about the worker's self-report. An unavailable fresh check writes an ENV-FAIL summary
 (`write_env_fail_summary`, rc=16) directly into evidence/ — the verdict
 cannot be PASS without the artifacts it is built from. No summary at all
 (worker died before writing) publishes nothing: `status` reports `missing`
 (S1). Pinned by
 `test_stage3_host_snapshot.py`, `test_stage3_worker_lifecycle.py`,
 `test_stage3_fresh_verify.py`, `test_stage3_fresh_wiring.py`,
-`test_verdict_fresh.py` and `test_contract_fail_probe.py` test 9 (the former
+`test_verdict_fresh.py` and `test_contract_fail_probe.py` test 7 (the former
 GAP test, flipped green in T3-7: a forged clean summary over a tampered tree
 is rejected as CONTRACT-FAIL).
 
@@ -293,7 +296,7 @@ COPY).
   `test_docker_image_digest_matches` fails until the image is rebuilt
   (CC-106: a stale image is a doctor failure, never a mid-run ENV-FAIL).
 - A new summary.json outcome -> `summary.py decide`/`_status_fields`;
-  `test_verdict_table.py` must pass unchanged.
+  `test_scenarios_verdict.py` + `test_verdict_fresh.py` must pass unchanged.
 - Agent behavior / retry semantics -> `session.py`.
 - Mount or boundary rule -> `sandbox.py` + `ticket.py` path validation
   (the same rule derives both — CC-135).
