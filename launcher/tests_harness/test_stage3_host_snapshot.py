@@ -76,6 +76,9 @@ def _mock_run(tmp_path, monkeypatch):
 
     monkeypatch.setattr(verify, "contract_snapshot", spy_snapshot)
     monkeypatch.setattr(sandbox, "sandbox_argv", spy_argv)
+    # T3-6: run_sandboxed now runs the fresh check — mocked PASS here; the
+    # wiring itself is pinned in test_stage3_fresh_wiring.py.
+    monkeypatch.setattr(verify, "fresh_verify", lambda cfg: (0, ""))
     monkeypatch.setattr(cli.subprocess, "Popen", spy_popen)
     monkeypatch.setattr(sandbox, "docker_stop", lambda name: None)
     # T3-4: run_sandboxed now also calls the reaper, cp and rm -f — mocked so

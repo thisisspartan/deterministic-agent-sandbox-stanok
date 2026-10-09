@@ -30,6 +30,8 @@ Tests:
      no worker_* fields (CLEAN-FIRST)
   8  same for PASS-AFTER-LOCAL-RETRY (turns=2)
   9  fresh_check=None (not wired yet) -> today's behavior unchanged
+  10 CONTRACT-FAIL overrides the NO-OP-PASS session-override label (spec R2)
+  11 FRESH-FAIL overrides the NO-OP-PASS label (spec §3 priority, R2)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_verdict_fresh.py -q
 """
@@ -164,3 +166,38 @@ def test_fresh_check_absent_keeps_today_behavior(tmp_path):
     repo, logdir = _publish_tree(tmp_path, "lbl", dict(CLEAN_WORKER))
     summary._publish_evidence(_cfg(repo, logdir), "lbl", 0)
     assert _published(repo, "lbl") == CLEAN_WORKER
+
+
+# --- 10-11: the host overrides beat the session-override labels (spec R2) ------
+
+NOOP_WORKER = {"rc": 1, "verifier": "PASS", "probe_result": "NO-OP-PASS",
+               "contract_lock_violations": [], "errors": [], "failures": []}
+
+
+def test_contract_fail_overrides_noop_pass(tmp_path):
+    # Spec §3: CONTRACT-FAIL outranks every behavioral override — NO-OP-PASS
+    # describes the model's behavior, the contract violation the integrity of
+    # the verdict. The intentional rc=1+PASS of a NO-OP does not save it.
+    repo, logdir = _publish_tree(tmp_path, "lbl", dict(NOOP_WORKER))
+    summary._publish_evidence(_cfg(repo, logdir), "lbl", 1,
+                             ["MODIFIED: tests/t_test.py"], (0, ""))
+    dst = _published(repo, "lbl")
+    assert dst["probe_result"] == "CONTRACT-FAIL"
+    assert dst["verifier"] == "FAIL"
+    assert dst["worker_rc"] == 1
+    assert dst["worker_verifier"] == "PASS"
+
+
+def test_fresh_fail_overrides_noop_pass(tmp_path):
+    # Spec §3: FRESH-FAIL outranks the session-override label — a NO-OP claim
+    # ("the artifacts pre-existed and really pass") refuted by the host's
+    # independent fresh run is a defect, not a NO-OP.
+    repo, logdir = _publish_tree(tmp_path, "lbl", dict(NOOP_WORKER))
+    summary._publish_evidence(_cfg(repo, logdir), "lbl", 1, (),
+                             (1, "FAILED tests/t_test.py::test_x - 1 == 2"))
+    dst = _published(repo, "lbl")
+    assert dst["probe_result"] == "FRESH-FAIL"
+    assert dst["verifier"] == "FAIL"
+    assert dst["rc"] == 1
+    assert dst["worker_rc"] == 1
+    assert dst["worker_verifier"] == "PASS"

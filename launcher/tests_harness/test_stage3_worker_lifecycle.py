@@ -31,7 +31,7 @@ import subprocess
 
 import pytest
 
-from launcher import cli, sandbox, summary
+from launcher import cli, sandbox, summary, verify
 from launcher import config as launcher_config
 from launcher.config import Config, RunState
 
@@ -120,6 +120,9 @@ def _mock_run(tmp_path, monkeypatch, cp_result=(0, ""), container_rc=0):
 
     monkeypatch.setattr(sandbox, "reap_stopped", lambda *a: calls.append("reap"))
     monkeypatch.setattr(sandbox, "sandbox_argv", spy_argv)
+    # T3-6: run_sandboxed now runs the fresh check — mocked PASS here; the
+    # wiring itself is pinned in test_stage3_fresh_wiring.py.
+    monkeypatch.setattr(verify, "fresh_verify", lambda cfg: (0, ""))
     monkeypatch.setattr(cli.subprocess, "Popen", lambda argv, **kw: FakePopen(argv))
     monkeypatch.setattr(sandbox, "docker_stop", lambda name: calls.append("stop"))
     monkeypatch.setattr(sandbox, "docker_cp", lambda *a: spy_cp(*a))

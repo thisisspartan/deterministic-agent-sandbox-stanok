@@ -34,7 +34,7 @@ from launcher.opik import _opik_trace_count
 from launcher.session import _install_signal_handlers, run_continuous_session
 from launcher.summary import (
     _publish_evidence, _rotate_stale_summary, build_summary,
-    write_cp_fail_summary, write_summary,
+    write_env_fail_summary, write_summary,
 )
 from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
@@ -347,7 +347,13 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
     Stage 3 (T3-4): the container runs WITHOUT `--rm`; the finally retrieves
     the worker's summary from the container's writable layer (`docker cp`)
     before removing the container (`docker rm -f`). Order: wait -> cp -> rm.
-    A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS."""
+    A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS.
+
+    Stage 3 (T3-6): after the contract recompute the host runs the fresh
+    check (verify.fresh_verify, T3-3) when the summary was retrieved and the
+    contract is intact, and passes its result to _publish_evidence — the
+    final verdict is host-issued (spec §1.1, priority §3). The returned rc
+    equals the published verdict's rc."""
     evidence_dir, live_dir = cfg.label_paths(args.label)
     os.makedirs(evidence_dir, exist_ok=True)
 
@@ -421,14 +427,38 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
         # container exits — the host's independent check of the tree the
         # verdict was computed against; violations force CONTRACT-FAIL at
         # publish, regardless of the worker summary.
-        _publish_evidence(cfg, args.label, rc,
-                          verify.host_contract_check(cfg, before_manifest))
+        # Stage 3 (T3-6): the fresh check (T3-3) runs ONLY when the summary
+        # was retrieved AND the contract is intact — a fresh run over a
+        # tampered tree is uninformative (spec §1.6); it is NOT gated on the
+        # worker's claims (§1.1: the host's check is the verdict authority).
+        # A fresh infra failure (EXEC_ERROR tail) is rc=16 ENV-FAIL — not a
+        # verdict (call the human). A fresh suite failure overrides the
+        # worker's claim at publish (FRESH-FAIL, §3); the run's exit rc is
+        # then set to the published verdict's rc — the process exit must not
+        # contradict the summary the supervisor reads.
+        contract_violations = verify.host_contract_check(cfg, before_manifest)
+        fresh_check = None
+        fresh_infra_error = None
+        if cp_rc == 0 and not contract_violations:
+            fresh_rc, fresh_tail = verify.fresh_verify(cfg)
+            if fresh_tail.startswith("EXEC_ERROR:"):
+                fresh_infra_error = fresh_tail
+            else:
+                fresh_check = (fresh_rc, fresh_tail)
+        _publish_evidence(cfg, args.label, rc, contract_violations, fresh_check)
         if cp_rc != 0:
             rc = int(ExitCode.ENV_FAIL)
-            write_cp_fail_summary(
+            write_env_fail_summary(
                 cfg, args.label,
                 f"docker cp failed (rc={cp_rc}): the worker summary could not "
                 f"be retrieved from the container layer — {cp_err or 'no such file'}")
+        elif fresh_infra_error is not None:
+            rc = int(ExitCode.ENV_FAIL)
+            write_env_fail_summary(
+                cfg, args.label,
+                f"fresh check unavailable — {fresh_infra_error}")
+        elif fresh_check is not None and fresh_check[0] != 0:
+            rc = fresh_check[0]
         try:
             os.remove(marker)
         except OSError:

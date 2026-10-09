@@ -1,7 +1,8 @@
 """summary — the verdict artifacts: summary.json, evidence publishing, rotation.
 
 build_summary/write_summary (the typed contract, T3-4 summary routing),
-write_cp_fail_summary (T3-4: docker cp failure -> ENV-FAIL),
+write_env_fail_summary (T3-4/T3-6: docker cp failure or fresh-check infra
+failure -> ENV-FAIL),
 _publish_evidence (CC-134, I5 integrity check; T3-5 host-issued verdict
 priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL), _rotate_stale_summary,
 the status-field table. Static
@@ -279,11 +280,12 @@ def write_summary(cfg, job: dict, elapsed_s: int) -> None:
         json.dump(build_summary(cfg, job, elapsed_s), f, ensure_ascii=False, indent=2)
 
 
-def write_cp_fail_summary(cfg, label: str, error: str) -> None:
-    """Stage 3 (T3-4): `docker cp` failed — the worker's summary could not be
-    retrieved from the container's writable layer. The verdict cannot be PASS:
+def write_env_fail_summary(cfg, label: str, error: str) -> None:
+    """Stage 3 (T3-4, generalized by T3-6): a host-side infrastructure
+    failure — `docker cp` could not retrieve the worker's summary, or the
+    fresh check could not run (EXEC_ERROR). The verdict cannot be issued:
     the host writes an ENV-FAIL summary (rc=16) with the error text directly
-    into the evidence dir (there is nothing retrieved to publish)."""
+    into the evidence dir — not a verdict, call the human."""
     evidence_dir, _ = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
     job = {"label": label, "rc": int(ExitCode.ENV_FAIL), "verifier": "FAIL",
