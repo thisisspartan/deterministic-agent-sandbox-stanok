@@ -8,7 +8,7 @@ repo root come from the passed-in Config (C).
 import hashlib
 import os
 import subprocess
-from launcher import gates
+from launcher import gates, sandbox
 from launcher.logs import log
 
 
@@ -135,6 +135,28 @@ def verify_gate(cfg, plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], 
     failures.sort(key=lambda x: x[0])
     env_fail = any(msg.startswith("ENV-FAIL:") for _, msg in failures)
     return (len(failures) == 0, failures, env_fail)
+
+
+def fresh_verify(cfg) -> tuple[int, str]:
+    """Stage 3 (T3-3): run the fresh verification container (sandbox.
+    fresh_verify_argv — whole repo :ro, --network=none, no unconfined) and
+    return (rc, tail): the host's independent re-run of the suite, the
+    verdict input the T3-6 wiring consumes (FRESH-FAIL when rc != 0).
+
+    The host timeout is a BACKSTOP only — run.sh self-limits per file
+    (rc=124). docker_stop covers the killed-client case: a docker CLI killed
+    by the timeout leaves the container running (--rm removes it only on a
+    normal exit)."""
+    name, argv = sandbox.fresh_verify_argv(cfg.repo_root, cfg.docker_image)
+    try:
+        sp = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        sandbox.docker_stop(name)
+        return (124, "TIMEOUT: the fresh verification exceeded the host limit")
+    except Exception as e:
+        return (1, f"EXEC_ERROR: {e}")
+    return (sp.returncode,
+            _tail_output(cfg, (sp.stderr or "") + "\n" + (sp.stdout or "")))
 
 
 def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:

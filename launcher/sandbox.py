@@ -172,6 +172,61 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     return name, argv
 
 
+def fresh_verify_argv(repo_root: str, image: str) -> tuple:
+    """Stage 3 (T3-3, SPEC-VERDICT-INTEGRITY §2): the argv of the FRESH
+    verification container — the host's independent re-run of the suite in a
+    container the worker never touched, after the worker's container is gone.
+
+    Hardening is STRICTER than the worker's (sandbox_argv), because the fresh
+    check runs only `bash scripts/run.sh` — no claude-code, no nested bwrap:
+      - `--network=none`: the check must not reach the inference server or
+        anything else (the worker's --network=host is for the model, not for
+        the tests);
+      - NO seccomp/apparmor `unconfined`: that trade exists only so bwrap
+        can run inside the worker's container;
+      - the WHOLE repo `:ro`, no rw carve-outs, no LOG_DIR bind: the check
+        sees the tree exactly as the host sees it and cannot change it;
+      - no STANOK_* env passthrough: the model's environment is not part of
+        the verification.
+    Same image, `--rm`, cap-drop=ALL + no-new-privileges, `--user`, tmpfs
+    home + tmp (hermetic scratch, dies with the container), workdir = repo.
+
+    Inner command: `bash scripts/run.sh list` then `bash scripts/run.sh test
+    --all` — the same pair verify_gate runs. A `list` failure (W12: an
+    unclaimed test-like file) fails the check even if the suite would pass.
+    run.sh self-limits per file (rc=124); the host backstop is in
+    verify.fresh_verify. Returns (container_name, docker_argv)."""
+    uid, gid = os.getuid(), os.getgid()
+    name = f"stanok-fresh-{os.path.basename(repo_root)}-{os.getpid()}"
+
+    argv = [
+        "docker", "run", "--rm", "--name", name, "--init",
+        "--network=none",
+        "--tmpfs", f"/home/stanok:uid={uid},gid={gid},mode=700",
+        "--tmpfs", f"/tmp:uid={uid},gid={gid},mode=700,exec",
+        "-w", repo_root,
+        "-v", f"{repo_root}:{repo_root}:ro",
+        "-e", "PATH=/usr/local/bin:/usr/bin:/bin",
+        "-e", "HOME=/home/stanok",
+        "-e", "PYTHONDONTWRITEBYTECODE=1",
+        # Same resource limits as the worker (defense in depth against a
+        # runaway suite in the host's fresh-check container).
+        f"--memory={os.environ.get('STANOK_CONTAINER_MEM', '4g')}",
+        f"--pids-limit={os.environ.get('STANOK_CONTAINER_PIDS', '512')}",
+        f"--cpus={os.environ.get('STANOK_CONTAINER_CPUS', '2')}",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--user", f"{uid}:{gid}",
+        image,
+        "bash", "-c",
+        "bash scripts/run.sh list; list_rc=$?; "
+        "bash scripts/run.sh test --all; test_rc=$?; "
+        'if [ "$list_rc" -ne 0 ]; then exit "$list_rc"; fi; '
+        'exit "$test_rc"',
+    ]
+    return name, argv
+
+
 def docker_stop(name: str) -> None:
     """Best-effort `docker stop -t 5` — the reaper's cleanup call."""
     try:
