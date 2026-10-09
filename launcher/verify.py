@@ -214,6 +214,17 @@ def _protected_files(cfg) -> list[str]:
     return protected
 
 
+def contract_snapshot(cfg) -> dict[str, str]:
+    """Stage 3 (T3-1): the HOST-side entry point for the pre-run contract
+    snapshot — the same manifest as _tests_manifest (the one protected-files
+    source, CC-136), exposed publicly so run_sandboxed can take it BEFORE
+    `docker run` and keep it in the host process memory. Memory, not a file:
+    a file in LOG_DIR lives in the container's rw mount and the worker could
+    rewrite it (trust boundary, SPEC-VERDICT-INTEGRITY §1). T3-2 recomputes
+    after the container exits and compares."""
+    return _tests_manifest(cfg)
+
+
 def _tests_manifest(cfg) -> dict[str, str]:
     """Snapshot {rel_path: sha256} of the protected files (contract_lock,
     W2.5 + P2) — see _protected_files for which files and why."""

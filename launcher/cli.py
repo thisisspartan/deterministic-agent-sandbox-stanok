@@ -21,7 +21,7 @@ import signal
 import subprocess
 import sys
 import time
-from launcher import logs, sandbox, stanok
+from launcher import logs, sandbox, stanok, verify
 from launcher.config import Config, RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
@@ -364,6 +364,10 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
     # the host venv python is only for the host-side gates.
     # T4 (CC-135): the rw carve-outs come from the ticket's declared paths,
     # derived by main() with the same rule the container-side validation uses.
+    # Stage 3 (T3-1): host-side contract snapshot BEFORE `docker run`. Kept
+    # in this process's memory only (a LOG_DIR file could be rewritten by the
+    # worker); T3-2 recomputes after the container exits and compares.
+    before_manifest = verify.contract_snapshot(cfg)
     name, argv = sandbox.sandbox_argv(
         cfg.repo_root, cfg.log_dir, image,
         ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(cfg, args),
