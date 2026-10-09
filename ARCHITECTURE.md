@@ -124,6 +124,22 @@ rule in both write orders, and the host exemption: `_publish_evidence`
 records an I5 violation but never downgrades CONTRACT-FAIL to INTEGRITY-FAIL
 — spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL).
 
+**Trust boundary of the verdict (operator review 2026-10-09).** The
+CONTRACT-FAIL priority is authoritative ONLY for a summary the container
+honestly wrote. `_publish_evidence` does not recompute the contract lock: it
+checks only the `rc` field against the container exit and PASS-after-nonzero.
+A worker that rewrites summary.json after the run (rc=0, PASS, empty
+violations) over a tree where a protected file was actually modified is
+accepted today — nothing in `launcher/` recomputes the manifest diff on the
+host. What holds this hole now is a sandbox side effect (the log dir under
+tmpfs from the nested bwrap, diagnostic cc216), not a guarantee: with the
+sandbox disabled the dir is writable and the protection is gone. Closing it
+is Stage 3 (docker cp + host-side contract recompute + fresh-check) — until
+then the host-side verdict is trusted, not verified. Pinned as
+`test_host_detects_forged_clean_summary_over_tampered_tree_GAP`
+(xfail strict: stage 3 turning it XPASS forces the marker off, same pattern
+as the closed zone-symlink GAPs in test_ticket_zone.py).
+
 ## Module map — the owner of each contract
 
 | File | Owns |

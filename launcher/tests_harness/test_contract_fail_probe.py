@@ -37,10 +37,18 @@ Tests:
   8  priority: same when LOOP-TRAP is written SECOND (_loop_trap_verdict
      overwrites the probe_result key — decide()'s rule, not the write order,
      decides)
+  9  GAP (xfail strict): trust boundary — the priority only protects a summary
+     the container honestly wrote. A worker that rewrites summary.json after
+     the run (rc=0, PASS, no violations) over a tampered tree is NOT caught:
+     the host checks only rc-vs-container-exit and PASS-after-nonzero, it does
+     not recompute the contract lock. Stage 3 (host-side recompute) must flip
+     this test to XPASS — strict xfail makes forgetting impossible.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_contract_fail_probe.py -q
 """
 import json
+
+import pytest
 
 from launcher import session, summary, verify
 from launcher.config import Config
@@ -169,3 +177,35 @@ def test_contract_fail_outranks_loop_trap_written_second():
     assert s["probe_result"] == "CONTRACT-FAIL"  # ...the verdict is not
     assert job["loop_trap"] == _LOOP  # the loop detail survives alongside
     assert s["contract_lock_violations"] == ["turn 1: MODIFIED: tests/t_test.py"]
+
+
+# --- 9: GAP — the trust boundary (operator review 2026-10-09) -------------------
+# The CONTRACT-FAIL priority is authoritative only for a summary the container
+# honestly wrote. The host (_publish_evidence) does NOT recompute the contract
+# lock: it checks only rc-vs-container-exit and PASS-after-nonzero. A worker
+# that rewrites summary.json after the run — rc=0, PASS, empty violations —
+# over a tree where a protected file was actually modified, is accepted today.
+# Stage 3 (docker cp + host-side recompute + fresh-check) must close this:
+# then the host recomputes the manifest diff and FAILs the forged verdict.
+# strict=True: when stage 3 lands the test XPASSes and pytest errors — the
+# marker cannot be forgotten (same pattern as the closed zone-symlink GAPs in
+# test_ticket_zone.py).
+
+@pytest.mark.xfail(strict=True, reason="GAP: host trusts the container's "
+                   "summary; no host-side contract recompute until stage 3")
+def test_host_detects_forged_clean_summary_over_tampered_tree_GAP(tmp_path):
+    # The tree was tampered: a protected file modified after the manifest
+    # snapshot. The published summary claims a clean first-pass run.
+    repo, logdir = _publish_tree(tmp_path, "lbl", {
+        "rc": 0, "verifier": "PASS", "probe_result": "CLEAN-FIRST",
+        "contract_lock_violations": []})
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "t_test.py").write_text("tampered after snapshot\n")
+    summary._publish_evidence(
+        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 0)
+    dst = _published(repo, "lbl")
+    # Desired (stage 3): the host recomputes the contract and rejects the
+    # forged verdict. Today: the host sees rc==container_rc and no
+    # PASS-after-nonzero, and publishes the forgery untouched.
+    assert dst["verifier"] == "FAIL"
+    assert dst["probe_result"] == "CONTRACT-FAIL"
