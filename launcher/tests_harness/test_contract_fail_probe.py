@@ -37,18 +37,15 @@ Tests:
   8  priority: same when LOOP-TRAP is written SECOND (_loop_trap_verdict
      overwrites the probe_result key — decide()'s rule, not the write order,
      decides)
-  9  GAP (xfail strict): trust boundary — the priority only protects a summary
-     the container honestly wrote. A worker that rewrites summary.json after
-     the run (rc=0, PASS, no violations) over a tampered tree is NOT caught:
-     the host checks only rc-vs-container-exit and PASS-after-nonzero, it does
-     not recompute the contract lock. Stage 3 (host-side recompute) must flip
-     this test to XPASS — strict xfail makes forgetting impossible.
+  9  trust boundary (GAP closed by stage 3, T3-1/T3-2): the host snapshots
+     the protected files before the run and recomputes after it
+     (verify.contract_snapshot + host_contract_check — the run_sandboxed call
+     site); a forged clean summary (rc=0, PASS, empty violations) over a
+     tampered tree is rejected: _publish_evidence forces CONTRACT-FAIL.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_contract_fail_probe.py -q
 """
 import json
-
-import pytest
 
 from launcher import session, summary, verify
 from launcher.config import Config
@@ -179,37 +176,39 @@ def test_contract_fail_outranks_loop_trap_written_second():
     assert s["contract_lock_violations"] == ["turn 1: MODIFIED: tests/t_test.py"]
 
 
-# --- 9: GAP — the trust boundary (operator review 2026-10-09) -------------------
-# The CONTRACT-FAIL priority is authoritative only for a summary the container
-# honestly wrote. The host (_publish_evidence) does NOT recompute the contract
-# lock: it checks only rc-vs-container-exit and PASS-after-nonzero. A worker
-# that rewrites summary.json after the run — rc=0, PASS, empty violations —
-# over a tree where a protected file was actually modified, is accepted today.
-# Stage 3 (docker cp + host-side recompute + fresh-check) must close this:
-# then the host recomputes the manifest diff and FAILs the forged verdict.
-# strict=True: when stage 3 lands the test XPASSes and pytest errors — the
-# marker cannot be forgotten (same pattern as the closed zone-symlink GAPs in
-# test_ticket_zone.py).
+# --- 9: the trust boundary — GAP closed by stage 3 (T3-1/T3-2/T3-6) ------------
+# The gap (operator review 2026-10-09): the host trusted the container's
+# summary — a worker that rewrote summary.json after the run (rc=0, PASS,
+# empty violations) over a tree where a protected file was actually modified
+# was published untouched. Stage 3 closed it: run_sandboxed snapshots the
+# protected files BEFORE `docker run` (T3-1, host process memory only),
+# recomputes after the container exits (T3-2, host_contract_check) and hands
+# the violations to _publish_evidence, which forces CONTRACT-FAIL regardless
+# of the worker's claims. The end-to-end path through run_sandboxed is
+# pinned in test_stage3_fresh_wiring.py::test_fresh_skipped_when_contract_
+# violated; this test pins the unit boundary of the host call site.
 
-# raises=AssertionError (operator review 2026-10-09): the marker absorbs ONLY
-# the expected gap — a bug in the test itself (typo, signature mismatch) must
-# error, not hide as xfailed, or the marker would never flip at stage 3.
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="GAP: host trusts the container's "
-                   "summary; no host-side contract recompute until stage 3")
-def test_host_detects_forged_clean_summary_over_tampered_tree_GAP(tmp_path):
-    # The tree was tampered: a protected file modified after the manifest
-    # snapshot. The published summary claims a clean first-pass run.
+def test_host_detects_forged_clean_summary_over_tampered_tree(tmp_path):
     repo, logdir = _publish_tree(tmp_path, "lbl", {
         "rc": 0, "verifier": "PASS", "probe_result": "CLEAN-FIRST",
         "contract_lock_violations": []})
+    cfg = Config(repo_root=str(repo), log_dir=str(logdir))
+    # T3-1: the pre-run snapshot — the protected file must EXIST at snapshot
+    # time (a NEW file is never a violation: _compare_manifests).
     (repo / "tests").mkdir(parents=True)
-    (repo / "tests" / "t_test.py").write_text("tampered after snapshot\n")
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 0)
+    (repo / "tests" / "t_test.py").write_text("def test_x():\n    pass\n",
+                                              encoding="utf-8")
+    before = verify.contract_snapshot(cfg)
+    # The worker tampers with the tree and claims a clean first-pass run.
+    (repo / "tests" / "t_test.py").write_text("tampered after snapshot\n",
+                                              encoding="utf-8")
+    # T3-2: the host's independent recompute (the run_sandboxed call site).
+    violations = verify.host_contract_check(cfg, before)
+    assert violations == ["MODIFIED: tests/t_test.py"]
+    summary._publish_evidence(cfg, "lbl", 0, violations)
     dst = _published(repo, "lbl")
-    # Desired (stage 3): the host recomputes the contract and rejects the
-    # forged verdict. Today: the host sees rc==container_rc and no
-    # PASS-after-nonzero, and publishes the forgery untouched.
+    # The forged verdict is rejected: the host's recompute outranks the
+    # worker's claims (spec priority CONTRACT-FAIL > everything).
     assert dst["verifier"] == "FAIL"
     assert dst["probe_result"] == "CONTRACT-FAIL"
+    assert dst["contract_lock_violations"] == ["MODIFIED: tests/t_test.py"]
