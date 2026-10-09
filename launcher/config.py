@@ -20,6 +20,12 @@ LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 # If STANOK_REPO is not set, we go up one level (stanok/launcher -> stanok)
 DEFAULT_REPO = os.path.abspath(os.path.join(LAUNCHER_DIR, ".."))
 DEFAULT_MODEL = "qwen3.8-flash-next-iq3_xxs"
+# S4 (SPEC-NETWORK-2026-10-09): the worker's dedicated bridge network. The
+# iptables policy (infra/stanok-net.sh) is installed ON THIS network only —
+# on `bridge`/`host` it would filter the whole docker traffic. Read at call
+# time via STANOK_DOCKER_NETWORK (sandbox.py, gates.py) — a runtime knob,
+# not a Config field (the argv builders do not take cfg).
+DEFAULT_DOCKER_NETWORK = "stanok-net"
 
 @dataclass(frozen=True)
 class Config:

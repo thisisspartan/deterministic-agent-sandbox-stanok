@@ -18,9 +18,11 @@ The ticket is self-contained — everything needed is described in the first mes
    at the OS level (container): any write attempt there fails with a
    `Read-only file system` error.
 2. Available tools: **Read, Write, Edit, Grep, Glob, Bash**. Bash is UNRESTRICTED inside
-   this container — install packages, run any build tool, use whatever language and
+   this container — run any build tool, use whatever language and
    framework this project's existing code already uses. There is no per-command allowlist;
-   the boundary is the container, not the command.
+   the boundary is the container, not the command. The network, however, is closed except
+   for the model server: packages from the internet are NOT installable — work with what
+   the image already provides.
 3. Do NOT commit and do not touch the `.git` directory (mounted read-only; `git log`/
    `git blame`/`git diff` work for context, writes fail at the filesystem level).
 4. Create only what the ticket explicitly requires (no extra files, no unrequested

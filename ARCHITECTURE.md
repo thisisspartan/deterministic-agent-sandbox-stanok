@@ -27,10 +27,28 @@ label guard (rc=15) -> role-leak (rc=24) -> ticket resolution (rc=13)
 -> dirty-tree gate (rc=22) -> [--follow: detached self-run | sync]
 -> ticket header + declared-path validation (rc=13)
 -> server /props preflight (rc=20)
+-> network preflight (rc=16; rc=20 only when the server is down for the host too)
 -> run_sandboxed -> sandbox.sandbox_argv -> docker run
 ```
 
 The image preflight is NOT on this path (doctor-only, CC-106).
+
+- Network policy (S4, SPEC-NETWORK-2026-10-09): the worker runs on the
+  dedicated bridge `stanok-net` (172.28.0.0/16, `config.DEFAULT_DOCKER_NETWORK`,
+  env override `STANOK_DOCKER_NETWORK`), NOT on `host`. The iptables chain
+  STANOK-NET (jumps at DOCKER-USER 1 + INPUT 1, installed by
+  `infra/stanok-net.sh` + `stanok-net.service` — supervisor prepares, operator
+  installs) allows ONLY the model server (`STANOK_SERVER_URL`): external
+  internet and host services are closed (E2 policy). Enforcement:
+  `gates.network_preflight` runs HOST-side in `cli._host_launch` before
+  `run_sandboxed` (covers sync and the --follow child; NOT in `_launch_gates`
+  — those re-run inside the container, where the docker CLI is absent): a
+  probe container (`sandbox.probe_argv`, same image, script via stdin) reports
+  `{model, external, host}`; a missing network or a policy leak is rc=16,
+  the model down for the host too is rc=20. The fresh-check container stays
+  `--network=none`. In-container `summary.opik_traces` is the literal
+  "disabled" (`opik.opik_traces_field`) — the bridge closes the host Opik by
+  design. Tests: `launcher/tests_harness/test_network_preflight.py`.
 
 - Zone rule (cc217-impl incident + review, 2026-10-09): `ticket.declared_carveout`
   requires (a) NO component of a declared path (impl/test/docs/edit) to be a
@@ -225,13 +243,13 @@ promise code correctness.
 | `launcher/plan.py` | `SessionPlan` (the file-policy object, the single source — I1) |
 | `launcher/logs.py` | logging (`log()`; the per-run sink `_stdout_log_f` assigned by `cli.cmd_run`) |
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
-| `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight |
+| `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight, network preflight (S4: probe classification, host-only) |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
-| `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker lifecycle (`--rm`, the stop trap, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
+| `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker network (`--network=stanok-net`, S4) + `probe_argv` (the policy probe container); worker lifecycle (`--rm`, the stop trap, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
 | `launcher/session.py` | the one Claude session: turns, TDD hook, retry prompt, loop-guard |
 | `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts); host trust boundary: `contract_snapshot`/`host_contract_check` (T3-1/T3-2) + structural tests/+src/ rule (T3-9/T3-10), `fresh_verify` (T3-3) |
 | `launcher/summary.py` | the summary.json schema (`decide`/`_status_fields`), host-issued verdict priority + `write_env_fail_summary` (T3-5/T3-6), evidence publishing, rotation |
-| `launcher/opik.py` | trace-count check (telemetry only) |
+| `launcher/opik.py` | trace-count check (telemetry only); `opik_traces_field` — "disabled" in-container (S4, the bridge closes host Opik) |
 | `scripts/run.sh` + `scripts/stacks/*.toml` | the run.sh contract + the stack registry (single source) |
 | `CLAUDE.md` | the machine role (auto-loaded in the machine session) |
 | `../CLAUDE.supervisor.md` | the supervisor protocol: verdict reading, stop conditions |

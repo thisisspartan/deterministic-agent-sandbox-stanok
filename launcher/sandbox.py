@@ -13,10 +13,21 @@ the finally is the abnormal-path trap (a no-op after a normal exit).
 Transcribed 1:1 from sandbox-run.sh (deleted in R2): same volume set, same
 STANOK_* env passthrough, same limits, same seccomp/apparmor unconfined
 trade (required for the claude-code native bwrap sandbox inside the
-container), same --network=host (loopback to the local llama-server).
+container). S4 (SPEC-NETWORK-2026-10-09) replaced --network=host with the
+dedicated bridge `stanok-net`: the iptables STANOK-NET chain (infra/
+stanok-net.sh) allows ONLY the model server and drops everything else —
+per-container filtering is impossible on the shared host network.
 """
 import os
 import subprocess
+
+from launcher.config import DEFAULT_DOCKER_NETWORK
+
+
+def _docker_network() -> str:
+    """The worker's network name — env read at call time (runtime knob, same
+    pattern as STANOK_CONTAINER_*), default config.DEFAULT_DOCKER_NETWORK."""
+    return os.environ.get("STANOK_DOCKER_NETWORK", DEFAULT_DOCKER_NETWORK)
 
 # The default project zones — the ONE literal zone list (CC-132). Two
 # consumers: gates.hidden_files_gate (which dirs to scan) and
@@ -138,10 +149,12 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
         # the `docker stop` in run_sandboxed's finally is the abnormal-path
         # trap (a no-op after a normal exit).
         "docker", "run", "--rm", "--name", name, "--init",
-        # --network=host: loopback reachability to the local llama-server
-        # (STANOK_SERVER_URL). No network isolation — same trust boundary as
-        # the bwrap era, different mechanism.
-        "--network=host",
+        # S4 (SPEC-NETWORK-2026-10-09): dedicated bridge, NOT host. The
+        # STANOK-NET iptables chain (infra/stanok-net.sh, DOCKER-USER+INPUT)
+        # allows ONLY the model server (STANOK_SERVER_URL) and drops the rest:
+        # no external internet, no host services. The host verifies this policy
+        # before the worker starts (gates.network_preflight, rc=16).
+        f"--network={_docker_network()}",
         # Ephemeral HOME on a tmpfs: no host coupling, the CLI's ~/.claude
         # and ~/.claude.json live and die with the container.
         "--tmpfs", f"/home/stanok:uid={uid},gid={gid},mode=700",
@@ -190,8 +203,8 @@ def fresh_verify_argv(repo_root: str, image: str) -> tuple:
     Hardening is STRICTER than the worker's (sandbox_argv), because the fresh
     check runs only `bash scripts/run.sh` — no claude-code, no nested bwrap:
       - `--network=none`: the check must not reach the inference server or
-        anything else (the worker's --network=host is for the model, not for
-        the tests);
+        anything else (the worker's stanok-net bridge is for the model, not
+        for the tests);
       - NO seccomp/apparmor `unconfined`: that trade exists only so bwrap
         can run inside the worker's container;
       - the WHOLE repo `:ro`, no rw carve-outs, no LOG_DIR bind: the check
@@ -233,6 +246,24 @@ def fresh_verify_argv(repo_root: str, image: str) -> tuple:
         "bash scripts/run.sh test --all; test_rc=$?; "
         'if [ "$list_rc" -ne 0 ]; then exit "$list_rc"; fi; '
         'exit "$test_rc"',
+    ]
+    return name, argv
+
+
+def probe_argv(repo_root: str, image: str, server_url: str) -> tuple:
+    """S4 (SPEC-NETWORK R4): argv of the network-probe container — the host's
+    pre-launch check that the stanok-net policy is in effect. Same image, the
+    worker's network, NOTHING else: no mounts, no env, no limits — the probe
+    only runs `/usr/bin/python3 -` reading the probe script from stdin with
+    the server URL as argv[1] (gates.NET_PROBE_SCRIPT). The name carries the
+    reap prefix `stanok-{basename(repo_root)}-` so an aborted probe is reaped
+    by the next run's reaper. Returns (container_name, docker_argv)."""
+    name = f"stanok-{os.path.basename(repo_root)}-netprobe-{os.getpid()}"
+    argv = [
+        "docker", "run", "--rm", "--name", name, "--init",
+        f"--network={_docker_network()}",
+        image,
+        "/usr/bin/python3", "-", server_url,
     ]
     return name, argv
 

@@ -205,6 +205,9 @@ def test_host_launch_forwards_declared_to_run_sandboxed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "run_sandboxed", spy_run)
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/docker")
+    # S4: _host_launch now runs network_preflight before run_sandboxed — stub
+    # it (the real one needs the docker CLI + the stanok-net network).
+    monkeypatch.setattr(cli, "network_preflight", lambda cfg: None)
     args = argparse.Namespace(label="lbl", ticket="ticket.md",
                              ticket_path=str(ticket_file),
                              local_retries=cfg.default_retries, extra=[])

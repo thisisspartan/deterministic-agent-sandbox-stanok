@@ -58,14 +58,16 @@ LABEL stanok.digest="${STANOK_DIGEST}"
 #                           work often needs `git log`/`git blame`, and write
 #                           access is blocked at the mount layer (launcher/sandbox.py),
 #                           not by withholding the binary — see SEC-01 note there.
-# ca-certificates, curl   — outbound goes through http(s)_proxy/no_proxy env
-#                           vars set at `docker run`, same policy as before.
-#                           Docker adds no network sandboxing of its own here;
-#                           --network=host is used to preserve loopback
-#                           reachability to the local llama-server, exactly
-#                           matching what bwrap already did (it never
-#                           unshared the network namespace either — see
-#                           launcher/sandbox.py comment on --network).
+# ca-certificates, curl   — HTTPS to the model server (https deployments)
+#                           and in-container debugging. Since S4
+#                           (SPEC-NETWORK-2026-10-09) the worker runs on the
+#                           dedicated bridge `stanok-net` and the STANOK-NET
+#                           iptables chain (infra/stanok-net.sh) allows ONLY
+#                           the model server: no internet, no host services.
+#                           The host verifies this before every launch
+#                           (gates.network_preflight, rc=16). Packages from
+#                           the internet are therefore NOT installable at run
+#                           time — the stack lives in the image.
 # build-essential         — most "curl | sh" language installers and native
 #                           npm/pip packages with C extensions need a compiler.
 # python3/venv            — (a) runs the launcher itself, (b) gives

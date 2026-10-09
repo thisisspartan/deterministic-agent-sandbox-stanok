@@ -106,6 +106,15 @@ The call chain, the module/ownership map, the coupling design and the
 | `STANOK_CONTAINER_MEM` | `4g`                    | container memory limit           |
 | `STANOK_CONTAINER_PIDS`| `512`                   | container pids limit             |
 | `STANOK_CONTAINER_CPUS`| `2`                     | container CPU limit              |
+| `STANOK_DOCKER_NETWORK`| `stanok-net`            | worker bridge network (S4; the iptables policy lives on it) |
+| `STANOK_SKIP_NET_PREFLIGHT` | unset              | `1` — skip the network-policy probe (hosts without the unit) |
+
+Network (S4, SPEC-NETWORK): the worker container runs on the dedicated bridge
+`stanok-net`; the iptables chain STANOK-NET (installed by
+`infra/stanok-net.sh` + `infra/stanok-net.service` — the OPERATOR installs:
+copy both to `/etc/systemd/system/`, adjust ExecStart to the checkout path,
+`systemctl enable --now stanok-net.service`) allows ONLY the model server.
+The launcher probes the policy before every worker start (rc=16 refusal).
 
 ## How it works
 

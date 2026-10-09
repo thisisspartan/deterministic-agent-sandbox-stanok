@@ -18,7 +18,9 @@ class ExitCode(IntEnum):
        zone-symlink ban (symlink in a writable zone);
     14 workspace prep error; 15 invalid label;
     16 ENV-FAIL: test runner unavailable in the image (image defect, not a red test),
-       zone-symlink scan failure (broken filesystem is not a ticket defect);
+       zone-symlink scan failure (broken filesystem is not a ticket defect),
+       network preflight failure (stanok-net missing / policy not installed /
+       model blocked by the policy — the host reaches it; SPEC-NETWORK R4);
     17 background child died before writing the .running marker;
     20 server unavailable / context window fail-closed;
     21 lock held by another run; 22 dirty machine tree;

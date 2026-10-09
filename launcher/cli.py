@@ -27,10 +27,11 @@ from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.plan import SessionPlan
 from launcher.gates import (
-    check_test_config, dirty_tree_gate, hidden_files_gate, preflight_server,
-    root_refusal, sandbox_config_gate, validate_label, zone_symlink_gate,
+    check_test_config, dirty_tree_gate, hidden_files_gate, network_preflight,
+    preflight_server, root_refusal, sandbox_config_gate, validate_label,
+    zone_symlink_gate,
 )
-from launcher.opik import _opik_trace_count
+from launcher.opik import opik_traces_field
 from launcher.session import _install_signal_handlers, run_continuous_session
 from launcher.summary import (
     _publish_evidence, _rotate_stale_summary, build_summary,
@@ -148,10 +149,15 @@ def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: i
         # Post-run Opik check (CC-106): strictly AFTER the verdict is formed,
         # ONE fast best-effort sample of the project trace count. No baseline
         # poll before the session, no sleep/resample loop — Opik latency must
-        # never delay the run. Any network/HTTP/timeout failure ->
-        # opik_traces: null. rc and verifier are never touched here.
-        opik_after = _opik_trace_count()
-        if opik_after is None:
+        # never delay the run. rc and verifier are never touched here.
+        # S4 (SPEC-NETWORK R5): inside the container the field is the literal
+        # "disabled" — the stanok-net bridge makes the host Opik unreachable
+        # BY DESIGN, and the field must be present, not 0/null.
+        opik_after = opik_traces_field()
+        if opik_after == "disabled":
+            job["opik_traces"] = "disabled"
+            log("OPIK: tracing disabled in-container (bridge network)")
+        elif opik_after is None:
             job["opik_traces"] = None
             log("OPIK: post-run trace count unavailable (backend unreachable)")
         else:
@@ -757,6 +763,9 @@ def _host_launch(cfg, args, marker: str) -> int:
     CC-106: the image digest/runner preflight no longer blocks the
     launch path — it lives in doctor
     (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
+    S4 (SPEC-NETWORK): network_preflight runs here, after the ticket parse
+    and before run_sandboxed — it covers the sync path and the --follow
+    child alike (the child re-enters main → _host_launch).
     """
     if shutil.which("docker") is None:
         return _early_abort(cfg, marker, args.label, args.ticket,
@@ -777,6 +786,14 @@ def _host_launch(cfg, args, marker: str) -> int:
     except (OSError, ValueError) as e:
         return _early_abort(cfg, marker, args.label, args.ticket,
                             ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
+    # S4 (SPEC-NETWORK R4): verify the network policy BEFORE the worker
+    # starts — a missing chain would otherwise surface mid-run as an API
+    # stall. Host-only: the container-side gates never see the docker CLI.
+    net_fail = network_preflight(cfg)
+    if net_fail is not None:
+        net_rc, net_msg = net_fail
+        return _early_abort(cfg, marker, args.label, args.ticket,
+                            net_rc, f"ERROR: network preflight: {net_msg}")
     rw_paths = host_rw_paths(cfg, declared)
     ro_paths = host_ro_paths(cfg, rw_paths)
     # T3-9: the declared paths parsed here are the ONLY declared context —
