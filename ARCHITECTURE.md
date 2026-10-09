@@ -157,15 +157,24 @@ independent host checks, both against state the worker cannot rewrite:
    substitution hole: `tests/colorsys.py` shadows the stdlib a reference test
    imports, the test passes against the fake; the W12 name gate sees only
    test-like names and the fresh check re-runs the same tree — this is the
-   structural half). Scoped to `tests/`: new files elsewhere (a bootstrap
-   scripts/run.sh, src/ deliverables) are ticket output. Both echelons share
-   the one `_compare_manifests` with the declared context: worker-side
-   `_check_contract_lock` (plan.declared_paths) and host-side
+   structural half). T3-10 (operator, same day): the same hole exists on the
+   import path's other side — `src/` is on sys.path (`pythonpath=src`), so a
+   new `src/colorsys.py` shadows the stdlib just as well; the after-only
+   scope is `tests/` + `src/`. The asymmetry is deliberate: the
+   MODIFIED/DELETED half stays scoped to the protected files — existing
+   `src/` files are the machine's normal implementation surface, and `src/`
+   is in the snapshot (`_src_files`) only for the after-only half; it must
+   NOT enter `_protected_files` (that list is also the `:ro` bind list —
+   binding src/ :ro would make the machine unable to implement). New files
+   elsewhere (a bootstrap scripts/run.sh, docs/) are ticket output. Both
+   echelons share the one `_compare_manifests` with the declared context:
+   worker-side `_check_contract_lock` (plan.declared_paths) and host-side
    `host_contract_check` (the ticket's declared list, threaded through
    `run_sandboxed`). A host-issued CONTRACT-FAIL never exits rc=0:
    `_publish_evidence` writes `rc = container_rc or DEFECT` and
    `run_sandboxed` aligns the exit rc (the T3-6 exit-equals-verdict
-   principle). Pinned by `test_stage3_tests_tree.py`.
+   principle). Pinned by `test_stage3_tests_tree.py` +
+   `test_stage3_src_tree.py`.
 2. **Fresh check (T3-3/T3-6).** `sandbox.fresh_verify_argv` +
    `verify.fresh_verify`: a NEW container the worker never touched (same
    image, `--rm`, `--network=none`, WHOLE repo `:ro` no carve-outs, no
@@ -207,7 +216,7 @@ is rejected as CONTRACT-FAIL).
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
 | `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker lifecycle (no `--rm`, stop/cp/rm, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
 | `launcher/session.py` | the one Claude session: turns, TDD hook, retry prompt, loop-guard |
-| `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts); host trust boundary: `contract_snapshot`/`host_contract_check` (T3-1/T3-2) + structural tests/ rule (T3-9), `fresh_verify` (T3-3) |
+| `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts); host trust boundary: `contract_snapshot`/`host_contract_check` (T3-1/T3-2) + structural tests/+src/ rule (T3-9/T3-10), `fresh_verify` (T3-3) |
 | `launcher/summary.py` | the summary.json schema (`decide`/`_status_fields`), host-issued verdict priority + `write_env_fail_summary` (T3-5/T3-6), evidence publishing, rotation |
 | `launcher/opik.py` | trace-count check (telemetry only) |
 | `scripts/run.sh` + `scripts/stacks/*.toml` | the run.sh contract + the stack registry (single source) |
