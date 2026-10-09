@@ -104,9 +104,9 @@ def _mock_run(tmp_path, monkeypatch, *, container_rc=0, cp_result=(0, ""),
                 json.dump(worker_summary, f)
         return (rc, err)
 
-    def spy_contract(c, before):
+    def spy_contract(c, before, declared):
         calls.append("contract")
-        return real_contract_check(c, before)
+        return real_contract_check(c, before, declared)
 
     def spy_fresh(c):
         calls.append("fresh")
@@ -142,7 +142,7 @@ def _published(repo):
 
 def test_host_order_snapshot_run_cp_rm_contract_fresh_publish(tmp_path, monkeypatch):
     repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch)
-    assert cli.run_sandboxed(cfg, args, (), ()) == 0
+    assert cli.run_sandboxed(cfg, args, (), (), ()) == 0
     for step in ("snapshot", "run", "wait", "cp", "rm", "contract", "fresh",
                  "publish"):
         assert step in calls, calls
@@ -161,7 +161,7 @@ def test_fresh_fail_end_to_end(tmp_path, monkeypatch):
     repo, cfg, calls, args = _mock_run(
         tmp_path, monkeypatch,
         fresh_result=(1, "FAILED tests/t_test.py::test_x - 1 == 2"))
-    rc = cli.run_sandboxed(cfg, args, (), ())
+    rc = cli.run_sandboxed(cfg, args, (), (), ())
     # the run's exit equals the published verdict (host-issued, §1.1)
     assert rc == 1
     dst = _published(repo)
@@ -176,7 +176,7 @@ def test_fresh_fail_end_to_end(tmp_path, monkeypatch):
 
 def test_fresh_pass_clean_path_unchanged(tmp_path, monkeypatch):
     repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch)
-    assert cli.run_sandboxed(cfg, args, (), ()) == 0
+    assert cli.run_sandboxed(cfg, args, (), (), ()) == 0
     dst = _published(repo)
     assert dst == dict(CLEAN_WORKER, rc=0)
     assert "worker_rc" not in dst and "worker_verifier" not in dst
@@ -187,7 +187,7 @@ def test_fresh_pass_clean_path_unchanged(tmp_path, monkeypatch):
 def test_fresh_skipped_when_contract_violated(tmp_path, monkeypatch):
     repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
                                        tamper_after_run=True)
-    cli.run_sandboxed(cfg, args, (), ())
+    cli.run_sandboxed(cfg, args, (), (), ())
     assert "contract" in calls and "publish" in calls
     assert "fresh" not in calls  # §1.6: never run a fresh check over a
     # tampered tree — the tree the verdict would certify is already broken
@@ -201,7 +201,7 @@ def test_fresh_skipped_when_contract_violated(tmp_path, monkeypatch):
 def test_fresh_skipped_when_summary_not_retrieved(tmp_path, monkeypatch):
     repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
                                        cp_result=(1, "Error: No such file"))
-    rc = cli.run_sandboxed(cfg, args, (), ())
+    rc = cli.run_sandboxed(cfg, args, (), (), ())
     assert rc == 16
     assert "fresh" not in calls
     dst = _published(repo)
@@ -214,7 +214,7 @@ def test_fresh_infra_failure_is_env_fail_not_fresh_fail(tmp_path, monkeypatch):
     repo, cfg, calls, args = _mock_run(
         tmp_path, monkeypatch,
         fresh_result=(1, "EXEC_ERROR: docker: command not found"))
-    rc = cli.run_sandboxed(cfg, args, (), ())
+    rc = cli.run_sandboxed(cfg, args, (), (), ())
     assert rc == 16  # infrastructure failure: not a verdict, call the human
     dst = _published(repo)
     assert dst["probe_result"] == "ENV-FAIL"
@@ -229,7 +229,7 @@ def test_fresh_runs_after_honest_worker_fail(tmp_path, monkeypatch):
                                        container_rc=1,
                                        worker_summary=dict(HONEST_FAIL_WORKER),
                                        fresh_result=(0, ""))
-    rc = cli.run_sandboxed(cfg, args, (), ())
+    rc = cli.run_sandboxed(cfg, args, (), (), ())
     assert "fresh" in calls  # unconditional authority: no worker_verifier gate
     assert rc == 1
     dst = _published(repo)

@@ -138,7 +138,7 @@ def test_cp_failure_is_env_fail(tmp_path, monkeypatch):
     repo, cfg, calls, args = _mock_run(
         tmp_path, monkeypatch,
         cp_result=(1, "Error: No such container: stanok-test"))
-    rc = cli.run_sandboxed(cfg, args, (), ())
+    rc = cli.run_sandboxed(cfg, args, (), (), ())
     assert rc == 16
     s = json.loads((repo / "evidence" / "lbl" / "summary.json")
                    .read_text(encoding="utf-8"))
@@ -237,7 +237,7 @@ def test_reaper_leaves_foreign_repo_container(tmp_path):
 def test_successful_cycle_cp_then_rm_rc_preserved(tmp_path, monkeypatch):
     repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
                                        cp_result=(0, ""), container_rc=0)
-    rc = cli.run_sandboxed(cfg, args, (), ())
+    rc = cli.run_sandboxed(cfg, args, (), (), ())
     assert rc == 0  # the container rc is the run rc (I5 ground truth)
     # the reaper runs before this run's container starts
     assert calls.index("reap") < calls.index("sandbox_argv")
@@ -258,7 +258,7 @@ def test_status_and_wait_see_final_summary_after_cp(tmp_path, monkeypatch, capsy
     same published file."""
     repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
                                        cp_result=(0, ""), container_rc=0)
-    assert cli.run_sandboxed(cfg, args, (), ()) == 0
+    assert cli.run_sandboxed(cfg, args, (), (), ()) == 0
     st = cli._status_dict(cfg, "lbl")
     assert st["state"] == "done"
     assert st["rc"] == 0 and st["verifier"] == "PASS"

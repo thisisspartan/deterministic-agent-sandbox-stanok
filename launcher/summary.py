@@ -95,7 +95,11 @@ def _publish_evidence(cfg, label: str, container_rc: int,
         # modified protected files. Force the FAIL; the I5 block below cannot
         # add signal the host already has.
         summary["verifier"] = "FAIL"
-        summary["rc"] = container_rc
+        # T3-9: a host-issued FAIL cannot carry a success rc — the rc
+        # contract (exitcodes.py: 1 = contract violation) requires 1 when
+        # the container claimed success; the container's non-zero exit
+        # stays ground truth. The worker's claim is preserved in worker_rc.
+        summary["rc"] = container_rc or int(ExitCode.DEFECT)
         summary["probe_result"] = "CONTRACT-FAIL"
         summary["worker_rc"] = worker_rc
         summary["worker_verifier"] = worker_verifier

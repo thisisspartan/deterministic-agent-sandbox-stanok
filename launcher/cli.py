@@ -333,7 +333,8 @@ def _inner_run_argv(cfg, args) -> list:
     return inner
 
 
-def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
+def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
+                  declared: tuple) -> int:
     """Host-side sync run: supervise the Docker container (replaces
     sandbox-run.sh). The marker carries THIS process's pid — cmd_stop's
     killpg lands here, and the try/finally stops the container and removes
@@ -342,7 +343,10 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
     rw_paths are the per-ticket rw carve-outs (T4/CC-135, derived in main()
     from the same ticket text the container will parse); ro_paths are the
     protected files re-bound :ro over a carve-out dir (T4b/CC-136). The base
-    repo mount is always :ro (CC-154).
+    repo mount is always :ro (CC-154). declared is the ticket's declared-path
+    list (T3-9): the host-side contract recompute allows exactly the snapshot
+    plus these paths under tests/ — an undeclared new file is a
+    CONTRACT-FAIL (structural tests/ rule).
 
     Stage 3 (T3-4): the container runs WITHOUT `--rm`; the finally retrieves
     the worker's summary from the container's writable layer (`docker cp`)
@@ -436,7 +440,11 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
         # worker's claim at publish (FRESH-FAIL, §3); the run's exit rc is
         # then set to the published verdict's rc — the process exit must not
         # contradict the summary the supervisor reads.
-        contract_violations = verify.host_contract_check(cfg, before_manifest)
+        # T3-9: the declared context travels with the run — the host's
+        # recompute distinguishes the ticket's declared new tests from a
+        # substitution (an undeclared file under tests/ -> CONTRACT-FAIL).
+        contract_violations = verify.host_contract_check(
+            cfg, before_manifest, declared)
         fresh_check = None
         fresh_infra_error = None
         if cp_rc == 0 and not contract_violations:
@@ -459,6 +467,11 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
                 f"fresh check unavailable — {fresh_infra_error}")
         elif fresh_check is not None and fresh_check[0] != 0:
             rc = fresh_check[0]
+        elif contract_violations and rc == 0:
+            # T3-9: the exit equals the published verdict's rc (T3-6
+            # principle) — a host-issued CONTRACT-FAIL never exits 0; the
+            # container's 0 is preserved in the summary as worker_rc.
+            rc = int(ExitCode.DEFECT)
         try:
             os.remove(marker)
         except OSError:
@@ -768,7 +781,9 @@ def _host_launch(cfg, args, marker: str) -> int:
                             ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
     rw_paths = host_rw_paths(cfg, declared)
     ro_paths = host_ro_paths(cfg, rw_paths)
-    return run_sandboxed(cfg, args, rw_paths, ro_paths)
+    # T3-9: the declared paths parsed here are the ONLY declared context —
+    # forwarded to the host-side contract recompute (structural tests/ rule).
+    return run_sandboxed(cfg, args, rw_paths, ro_paths, tuple(declared))
 
 
 def main() -> int:

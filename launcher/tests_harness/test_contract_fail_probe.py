@@ -194,7 +194,7 @@ def test_host_detects_forged_clean_summary_over_tampered_tree(tmp_path):
         "contract_lock_violations": []})
     cfg = Config(repo_root=str(repo), log_dir=str(logdir))
     # T3-1: the pre-run snapshot — the protected file must EXIST at snapshot
-    # time (a NEW file is never a violation: _compare_manifests).
+    # time (a new file is only allowed if declared: _compare_manifests, T3-9).
     (repo / "tests").mkdir(parents=True)
     (repo / "tests" / "t_test.py").write_text("def test_x():\n    pass\n",
                                               encoding="utf-8")
@@ -203,7 +203,7 @@ def test_host_detects_forged_clean_summary_over_tampered_tree(tmp_path):
     (repo / "tests" / "t_test.py").write_text("tampered after snapshot\n",
                                               encoding="utf-8")
     # T3-2: the host's independent recompute (the run_sandboxed call site).
-    violations = verify.host_contract_check(cfg, before)
+    violations = verify.host_contract_check(cfg, before, ())
     assert violations == ["MODIFIED: tests/t_test.py"]
     summary._publish_evidence(cfg, "lbl", 0, violations)
     dst = _published(repo, "lbl")
