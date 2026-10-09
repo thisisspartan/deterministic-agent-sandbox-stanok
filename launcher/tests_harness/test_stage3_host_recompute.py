@@ -10,12 +10,14 @@ the defendant (GAP test #9 in test_contract_fail_probe.py).
 
 The comparison is the same logic as `_check_contract_lock` (extracted to
 `_compare_manifests`, the one source), but without the job/turn context:
-this is the host's independent second check. New files are NEVER violations
-(a ticket may declare new tests) — the happy path must stay green.
+this is the host's independent second check. T3-9 changed the new-file rule:
+a new file under tests/ is a violation UNLESS the ticket declared it — the
+declared list is passed to `host_contract_check` for exactly that
+distinction (see test_stage3_tests_tree.py for the structural rule).
 
 Tests:
-  1  clean tree: no violations; a new file after the snapshot is not a
-     violation; the published summary is untouched (worker PASS kept)
+  1  clean tree: no violations; a DECLARED new test after the snapshot is
+     not a violation; the published summary is untouched (worker PASS kept)
   2  protected file MODIFIED / DELETED after the snapshot -> violations
   3  worker summary claims PASS (CLEAN-FIRST, rc=0): the host still forces
      verifier=FAIL + probe_result=CONTRACT-FAIL
@@ -60,10 +62,10 @@ def _published(cfg, label):
 def test_clean_tree_no_violations(tmp_path):
     repo, cfg = _tree(tmp_path, "lbl", CLEAN_WORKER)
     before = verify.contract_snapshot(cfg)
-    # A NEW file after the snapshot (a ticket's new test) is not a violation.
+    # A DECLARED new test after the snapshot is not a violation (T3-9).
     (repo / "tests" / "new_test.py").write_text("def test_new():\n    pass\n",
                                                  encoding="utf-8")
-    assert verify.host_contract_check(cfg, before) == []
+    assert verify.host_contract_check(cfg, before, ("tests/new_test.py",)) == []
     summary._publish_evidence(cfg, "lbl", 0, [])
     dst = _published(cfg, "lbl")
     assert dst["verifier"] == "PASS"
@@ -78,7 +80,7 @@ def test_tampered_protected_files_are_violations(tmp_path):
     (repo / "tests" / "t_test.py").write_text("tampered after snapshot\n",
                                                encoding="utf-8")
     (repo / "scripts" / "run.sh").unlink()
-    v = verify.host_contract_check(cfg, before)
+    v = verify.host_contract_check(cfg, before, ())
     assert "MODIFIED: tests/t_test.py" in v
     assert "DELETED: scripts/run.sh" in v
 
@@ -90,7 +92,7 @@ def test_host_forces_fail_over_worker_pass(tmp_path):
     before = verify.contract_snapshot(cfg)
     (repo / "tests" / "t_test.py").write_text("tampered after snapshot\n",
                                                encoding="utf-8")
-    violations = verify.host_contract_check(cfg, before)
+    violations = verify.host_contract_check(cfg, before, ())
     summary._publish_evidence(cfg, "lbl", 0, violations)
     dst = _published(cfg, "lbl")
     assert dst["verifier"] == "FAIL"

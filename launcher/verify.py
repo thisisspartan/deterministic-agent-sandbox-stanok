@@ -264,10 +264,17 @@ def _compare_manifests(before: dict[str, str], after: dict[str, str],
                        declared) -> list[str]:
     """The ONE comparison of two protected-file manifests (T3-2): a
     pre-existing protected file that is DELETED or MODIFIED is a violation.
-    New files are never violations (a ticket may declare new tests). Used by
-    the worker-side _check_contract_lock (with the declared exemption) and by
-    the host-side host_contract_check (without job context) — the two cannot
-    drift."""
+    T3-9 (structural tests/ rule, operator 2026-10-09): after the run the
+    set of files under tests/ must equal the snapshot plus the declared test
+    files — any other file is an UNDECLARED violation regardless of its
+    name. The substitution hole (live on the public main): a helper module
+    tests/colorsys.py shadows the stdlib `colorsys` a reference test imports,
+    the test passes against the fake; the name gate (run.sh list, W12) only
+    sees test-like names, so this is the structural half. The rule is scoped
+    to tests/: new files elsewhere (a bootstrap scripts/run.sh, src/
+    deliverables) are ticket output, not substitutions. Used by the
+    worker-side _check_contract_lock and by the host-side host_contract_check
+    with the same declared context — the two cannot drift."""
     violations = []
     for rel, digest in before.items():
         if rel in declared:
@@ -276,27 +283,36 @@ def _compare_manifests(before: dict[str, str], after: dict[str, str],
             violations.append(f"DELETED: {rel}")
         elif after[rel] != digest:
             violations.append(f"MODIFIED: {rel}")
+    for rel in after:
+        if rel in before or rel in declared:
+            continue
+        if rel.startswith("tests/"):
+            violations.append(f"UNDECLARED: {rel}")
     return violations
 
 
-def host_contract_check(cfg, before: dict[str, str]) -> list[str]:
+def host_contract_check(cfg, before: dict[str, str], declared) -> list[str]:
     """Stage 3 (T3-2): the host recomputes the protected-files manifest AFTER
     the container exits and compares it with the pre-run snapshot (T3-1).
     Any violation means the tree the verdict was computed against was
     tampered with — the caller forces CONTRACT-FAIL regardless of the worker
     summary (trust boundary, SPEC-VERDICT-INTEGRITY §1). No job/turn
-    context, no declared-path exemption: the host's independent second check;
-    a ticket may never edit a pre-existing protected file (CC-206 rejects
-    such tickets at launch), so the exemption would only hide tampering."""
-    return _compare_manifests(before, _tests_manifest(cfg), ())
+    context; a PRE-EXISTING protected file has no exemption (CC-206 rejects
+    tickets that edit one, so an exemption would only hide tampering).
+    T3-9: `declared` is the ticket's declared-path list — the only allowed
+    addition to tests/; without it a ticket's declared new tests would be
+    indistinguishable from a substitution."""
+    return _compare_manifests(before, _tests_manifest(cfg), declared)
 
 
 def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
                          plan: "SessionPlan") -> None:
     """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
     that was MODIFIED or DELETED is a contract_lock violation (replaces the
-    chmod a-w freeze, W2.5). New files are allowed (a ticket may declare
-    several). A declared path is exempt (runner-update ticket, P2;
+    chmod a-w freeze, W2.5). A new file under tests/ that the ticket did not
+    declare is an UNDECLARED violation (T3-9, structural tests/ rule); a
+    declared new test is allowed (a ticket may declare several). A declared
+    path is exempt (runner-update ticket, P2;
     behavior-identical to the old scripts/run.sh exemption, since the
     manifest is snapshotted AFTER quarantine and a declared path is
     therefore never in the manifest)."""

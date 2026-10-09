@@ -97,7 +97,7 @@ def _mock_run(tmp_path, monkeypatch):
 
 def test_snapshot_computed_before_docker_run(tmp_path, monkeypatch):
     repo, cfg, calls, snapshots, args = _mock_run(tmp_path, monkeypatch)
-    assert cli.run_sandboxed(cfg, args, (), ()) == 0
+    assert cli.run_sandboxed(cfg, args, (), (), ()) == 0
     assert "snapshot" in calls and "sandbox_argv" in calls and "popen" in calls
     # The boundary is the docker argv construction: a snapshot taken after
     # sandbox_argv (but before Popen) is NOT "before docker run" — the mutant
@@ -110,7 +110,7 @@ def test_snapshot_computed_before_docker_run(tmp_path, monkeypatch):
 
 def test_snapshot_covers_protected_files(tmp_path, monkeypatch):
     repo, cfg, calls, snapshots, args = _mock_run(tmp_path, monkeypatch)
-    cli.run_sandboxed(cfg, args, (), ())
+    cli.run_sandboxed(cfg, args, (), (), ())
     snap = snapshots[0]
     assert snap["tests/t_test.py"] == hashlib.sha256(
         b"def test_x():\n    pass\n").hexdigest()
@@ -123,7 +123,7 @@ def test_snapshot_covers_protected_files(tmp_path, monkeypatch):
 
 def test_snapshot_not_written_to_log_dir(tmp_path, monkeypatch):
     repo, cfg, calls, snapshots, args = _mock_run(tmp_path, monkeypatch)
-    cli.run_sandboxed(cfg, args, (), ())
+    cli.run_sandboxed(cfg, args, (), (), ())
     assert os.listdir(cfg.log_dir) == []
 
 
