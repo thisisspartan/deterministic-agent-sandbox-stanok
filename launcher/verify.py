@@ -8,7 +8,7 @@ repo root come from the passed-in Config (C).
 import hashlib
 import os
 import subprocess
-from launcher import gates
+from launcher import gates, sandbox
 from launcher.logs import log
 
 
@@ -137,6 +137,28 @@ def verify_gate(cfg, plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], 
     return (len(failures) == 0, failures, env_fail)
 
 
+def fresh_verify(cfg) -> tuple[int, str]:
+    """Stage 3 (T3-3): run the fresh verification container (sandbox.
+    fresh_verify_argv — whole repo :ro, --network=none, no unconfined) and
+    return (rc, tail): the host's independent re-run of the suite, the
+    verdict input the T3-6 wiring consumes (FRESH-FAIL when rc != 0).
+
+    The host timeout is a BACKSTOP only — run.sh self-limits per file
+    (rc=124). docker_stop covers the killed-client case: a docker CLI killed
+    by the timeout leaves the container running (--rm removes it only on a
+    normal exit)."""
+    name, argv = sandbox.fresh_verify_argv(cfg.repo_root, cfg.docker_image)
+    try:
+        sp = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        sandbox.docker_stop(name)
+        return (124, "TIMEOUT: the fresh verification exceeded the host limit")
+    except Exception as e:
+        return (1, f"EXEC_ERROR: {e}")
+    return (sp.returncode,
+            _tail_output(cfg, (sp.stderr or "") + "\n" + (sp.stdout or "")))
+
+
 def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
     """Select the fix-prompt rule block for a verify_gate failure set.
 
@@ -214,6 +236,17 @@ def _protected_files(cfg) -> list[str]:
     return protected
 
 
+def contract_snapshot(cfg) -> dict[str, str]:
+    """Stage 3 (T3-1): the HOST-side entry point for the pre-run contract
+    snapshot — the same manifest as _tests_manifest (the one protected-files
+    source, CC-136), exposed publicly so run_sandboxed can take it BEFORE
+    `docker run` and keep it in the host process memory. Memory, not a file:
+    a file in LOG_DIR lives in the container's rw mount and the worker could
+    rewrite it (trust boundary, SPEC-VERDICT-INTEGRITY §1). T3-2 recomputes
+    after the container exits and compares."""
+    return _tests_manifest(cfg)
+
+
 def _tests_manifest(cfg) -> dict[str, str]:
     """Snapshot {rel_path: sha256} of the protected files (contract_lock,
     W2.5 + P2) — see _protected_files for which files and why."""
@@ -227,6 +260,37 @@ def _tests_manifest(cfg) -> dict[str, str]:
     return manifest
 
 
+def _compare_manifests(before: dict[str, str], after: dict[str, str],
+                       declared) -> list[str]:
+    """The ONE comparison of two protected-file manifests (T3-2): a
+    pre-existing protected file that is DELETED or MODIFIED is a violation.
+    New files are never violations (a ticket may declare new tests). Used by
+    the worker-side _check_contract_lock (with the declared exemption) and by
+    the host-side host_contract_check (without job context) — the two cannot
+    drift."""
+    violations = []
+    for rel, digest in before.items():
+        if rel in declared:
+            continue
+        if rel not in after:
+            violations.append(f"DELETED: {rel}")
+        elif after[rel] != digest:
+            violations.append(f"MODIFIED: {rel}")
+    return violations
+
+
+def host_contract_check(cfg, before: dict[str, str]) -> list[str]:
+    """Stage 3 (T3-2): the host recomputes the protected-files manifest AFTER
+    the container exits and compares it with the pre-run snapshot (T3-1).
+    Any violation means the tree the verdict was computed against was
+    tampered with — the caller forces CONTRACT-FAIL regardless of the worker
+    summary (trust boundary, SPEC-VERDICT-INTEGRITY §1). No job/turn
+    context, no declared-path exemption: the host's independent second check;
+    a ticket may never edit a pre-existing protected file (CC-206 rejects
+    such tickets at launch), so the exemption would only hide tampering."""
+    return _compare_manifests(before, _tests_manifest(cfg), ())
+
+
 def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
                          plan: "SessionPlan") -> None:
     """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
@@ -237,14 +301,7 @@ def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
     manifest is snapshotted AFTER quarantine and a declared path is
     therefore never in the manifest)."""
     after = _tests_manifest(cfg)
-    violations = []
-    for rel, digest in before.items():
-        if rel in plan.declared_paths:
-            continue
-        if rel not in after:
-            violations.append(f"DELETED: {rel}")
-        elif after[rel] != digest:
-            violations.append(f"MODIFIED: {rel}")
+    violations = _compare_manifests(before, after, plan.declared_paths)
     if violations:
         job.setdefault("contract_lock_violations", []).extend(
             f"turn {turn}: {v}" for v in violations

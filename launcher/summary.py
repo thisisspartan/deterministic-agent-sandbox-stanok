@@ -1,7 +1,11 @@
 """summary — the verdict artifacts: summary.json, evidence publishing, rotation.
 
-build_summary/write_summary (the typed contract), _publish_evidence (CC-134,
-I5 integrity check), _rotate_stale_summary, the status-field table. Static
+build_summary/write_summary (the typed contract, T3-4 summary routing),
+write_env_fail_summary (T3-4/T3-6: docker cp failure or fresh-check infra
+failure -> ENV-FAIL),
+_publish_evidence (CC-134, I5 integrity check; T3-5 host-issued verdict
+priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL), _rotate_stale_summary,
+the status-field table. Static
 config arrives as the passed-in Config; the per-run evidence dir as the
 passed-in RunState (C).
 """
@@ -9,10 +13,13 @@ passed-in RunState (C).
 import json
 import os
 import shutil
+from launcher.exitcodes import ExitCode
 from launcher.logs import log
 
 
-def _publish_evidence(cfg, label: str, container_rc: int) -> None:
+def _publish_evidence(cfg, label: str, container_rc: int,
+                      contract_violations: list[str] = (),
+                      fresh_check: tuple | None = None) -> None:
     """Copy the container-written verdict from the rw LOG_DIR/<label> into the
     host-owned evidence/<label> (CC-134).
 
@@ -36,7 +43,26 @@ def _publish_evidence(cfg, label: str, container_rc: int) -> None:
     CONTRACT-FAIL exemption: a contract violation outranks the integrity
     label (spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL) — the
     violation is recorded and the rc fixed, but probe_result stays
-    CONTRACT-FAIL."""
+    CONTRACT-FAIL.
+
+    Stage 3 (T3-2) `contract_violations`: the host's own recompute of the
+    protected-files manifest (verify.host_contract_check against the pre-run
+    snapshot). Non-empty means the tree the verdict was computed against was
+    tampered with — the host forces verifier=FAIL + probe_result=CONTRACT-FAIL
+    regardless of what the worker summary claims (the judge is not the
+    defendant). This outranks the I5 check: the I5 block is skipped.
+
+    Stage 3 (T3-5): the final verifier/rc/probe_result are issued by the HOST
+    with the spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL >
+    worker override. `fresh_check=(rc, tail)` is verify.fresh_verify's result
+    (the host's independent re-run in a fresh container, T3-3); a non-zero
+    fresh rc forces verifier=FAIL + probe_result=FRESH-FAIL + rc=fresh rc,
+    the tail appended to errors. fresh_check=None = not run (T3-5 does not
+    wire it into run_sandboxed yet — T3-6 does). The worker's claims are
+    preserved in worker_rc/worker_verifier — written ONLY when the host
+    overrides the verdict (the clean path stays byte-identical). The I5
+    detector compares worker_rc with the container exit, NOT the final rc:
+    the host's own final write is never taken for a forgery."""
     src = os.path.join(cfg.log_dir, label)
     files = ("summary.json", "launcher.stdout.log")
     if not any(os.path.isfile(os.path.join(src, f)) for f in files):
@@ -57,18 +83,64 @@ def _publish_evidence(cfg, label: str, container_rc: int) -> None:
         return
     if not isinstance(summary, dict):
         return
+    # Stage 3 (T3-5): the worker's claims are captured BEFORE any host write.
+    # The I5 detector compares worker_rc with the container exit — never the
+    # host's own final write: the host's rc=container_rc is not a forgery.
+    worker_rc = summary.get("rc")
+    worker_verifier = summary.get("verifier")
+    if contract_violations:
+        # Stage 3 (T3-2): the host's recompute outranks the worker's verdict
+        # (spec priority CONTRACT-FAIL > everything): the tree was tampered
+        # with after the pre-run snapshot — the verdict was computed against
+        # modified protected files. Force the FAIL; the I5 block below cannot
+        # add signal the host already has.
+        summary["verifier"] = "FAIL"
+        summary["rc"] = container_rc
+        summary["probe_result"] = "CONTRACT-FAIL"
+        summary["worker_rc"] = worker_rc
+        summary["worker_verifier"] = worker_verifier
+        summary.setdefault("contract_lock_violations", []).extend(
+            contract_violations)
+        summary["error"] = (
+            "HOST CONTRACT-LOCK: the tree was tampered with after the "
+            "pre-run snapshot — the verdict was computed against modified "
+            "protected files")
+        with open(sum_dst, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        log(f"CONTRACT-LOCK: {label}: host recompute: {contract_violations}")
+        return
+    if fresh_check is not None and fresh_check[0] != 0:
+        # Stage 3 (T3-5): the host's independent fresh check (T3-3) failed —
+        # the suite does not pass on the tree as the HOST sees it, whatever
+        # the worker's summary claims. Spec priority: FRESH-FAIL outranks the
+        # I5 check and the worker override. The final rc is the fresh
+        # check's own exit code — the host's measurement, not the worker's.
+        fresh_rc, tail = fresh_check
+        summary["verifier"] = "FAIL"
+        summary["rc"] = fresh_rc
+        summary["probe_result"] = "FRESH-FAIL"
+        summary["worker_rc"] = worker_rc
+        summary["worker_verifier"] = worker_verifier
+        summary.setdefault("errors", []).append(
+            f"HOST FRESH-CHECK: the suite failed in a fresh container the "
+            f"worker never touched (rc={fresh_rc}): {tail}")
+        with open(sum_dst, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        log(f"FRESH-CHECK: {label}: fresh verify rc={fresh_rc} — "
+            "verdict FRESH-FAIL")
+        return
     violations = []
     # A NO-OP run intentionally returns rc=1 with verifier=PASS (the machine
     # did no work; the artifacts pre-existed and the verifier really passed).
     # The "claims PASS" check must not fire on that intentional combination —
     # only the rc-field consistency check below still applies.
     is_noop = summary.get("probe_result") == "NO-OP-PASS"
-    if not is_noop and container_rc != 0 and summary.get("verifier") == "PASS":
+    if not is_noop and container_rc != 0 and worker_verifier == "PASS":
         violations.append(
             f"container exited rc={container_rc} but summary claims PASS")
-    if summary.get("rc") != container_rc:
+    if worker_rc != container_rc:
         violations.append(
-            f"summary rc={summary.get('rc')!r} != container rc={container_rc}")
+            f"summary rc={worker_rc!r} != container rc={container_rc}")
     if violations:
         # A forged verdict must not leave any PASS-shaped field behind:
         # override the whole verdict, not just the verifier flag.
@@ -79,6 +151,8 @@ def _publish_evidence(cfg, label: str, container_rc: int) -> None:
         # CLASS is not downgraded.
         summary["verifier"] = "FAIL"
         summary["rc"] = container_rc
+        summary["worker_rc"] = worker_rc
+        summary["worker_verifier"] = worker_verifier
         if summary.get("probe_result") != "CONTRACT-FAIL":
             summary["probe_result"] = "INTEGRITY-FAIL"
         summary["integrity_violation"] = "; ".join(violations)
@@ -193,8 +267,29 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
     }
 
 
-def write_summary(cfg, run_state, job: dict, elapsed_s: int) -> None:
-    """Writes the exact summary.json contract expected by the L1 Supervisor."""
-    with open(os.path.join(run_state.evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
+def write_summary(cfg, job: dict, elapsed_s: int) -> None:
+    """Writes the exact summary.json contract expected by the L1 Supervisor.
+
+    Stage 3 (T3-4): the path is cfg.summary_dir(label) — inside the container
+    the writable-layer path the host retrieves with `docker cp` after the
+    container exits; on the host (no-sandbox) the evidence dir. The summary
+    is no longer a file shared through a mount the worker can rewrite."""
+    d = cfg.summary_dir(job["label"])
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(build_summary(cfg, job, elapsed_s), f, ensure_ascii=False, indent=2)
+
+
+def write_env_fail_summary(cfg, label: str, error: str) -> None:
+    """Stage 3 (T3-4, generalized by T3-6): a host-side infrastructure
+    failure — `docker cp` could not retrieve the worker's summary, or the
+    fresh check could not run (EXEC_ERROR). The verdict cannot be issued:
+    the host writes an ENV-FAIL summary (rc=16) with the error text directly
+    into the evidence dir — not a verdict, call the human."""
+    evidence_dir, _ = cfg.label_paths(label)
+    os.makedirs(evidence_dir, exist_ok=True)
+    job = {"label": label, "rc": int(ExitCode.ENV_FAIL), "verifier": "FAIL",
+           "probe_result": "ENV-FAIL", "turns": 0, "error": error}
+    with open(os.path.join(evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
+        json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
 

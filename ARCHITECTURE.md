@@ -95,50 +95,87 @@ gates re-run + lock (rc=21) -> session.run_continuous_session:
   runs git. Two worktrees of one repo share the lock (second run gets rc=21);
   a missing key aborts the run — no silent md5(repo_root) fallback.
 
-VERDICT:
+VERDICT (Stage 3, SPEC-VERDICT-INTEGRITY-2026-10-08):
 
 ```
-summary.write_summary -> summary.json staged in LOG_DIR/<label>
-(the container cannot write evidence/, CC-134; commit_sha is captured on the
-HOST by cli._capture_start_commit before any launch and passed via the
+CONTAINER: summary.write_summary -> summary.json on the container's WRITABLE
+LAYER (CONTAINER_SUMMARY_ROOT=/var/tmp/stanok-evidence/<label> — survives
+`docker stop`, dies with `docker rm`; NOT tmpfs, NOT a mount; the worker no
+longer writes the shared LOG_DIR, so the verdict file is not a file the
+worker can rewrite after the run; commit_sha is captured on the HOST by
+cli._capture_start_commit before any launch and passed via the
 STANOK_START_COMMIT env — the container never runs git, plan 2026-10-08)
--> host summary._publish_evidence: the I5 check (the container exit is
-ground truth) may overwrite the verdict to INTEGRITY-FAIL — never a
-CONTRACT-FAIL (spec priority, see above)
+
+HOST (cli.run_sandboxed, one finally): reap_stopped -> verify.contract_snapshot
+(pre-run, host process MEMORY only) -> docker run (NO --rm) -> wait
+(container_rc = ground truth) -> stop -> docker cp (worker summary ->
+LOG_DIR/<label>, the publish source) -> docker rm -f ->
+verify.host_contract_check (recompute vs the snapshot) -> verify.fresh_verify
+(fresh container, T3-3; runs ONLY when the summary was retrieved AND the
+contract is intact — spec §1.6) -> summary._publish_evidence (the HOST issues
+the final verdict, Authority below) -> marker removal
+
 -> evidence/<label>/summary.json is read exactly once by the supervisor
 (CLAUDE.supervisor.md §3)
 ```
 
 `probe_result` values: `CLEAN-FIRST | PASS-AFTER-LOCAL-RETRY | VERIFY-FAIL |
 EARLY-ABORT | NO-OP-PASS | ENV-FAIL | LOOP-TRAP | CONTRACT-FAIL |
-INTEGRITY-FAIL` — derived by `summary.decide` (priority, operator review
-2026-10-09: non-empty `contract_lock_violations` wins over every behavioral
-override — verdict integrity beats model behavior, and probe_result is one
-key so the rule must be explicit, not write-order luck; then the override;
-then the table); CONTRACT-FAIL is set by `verify._contract_lock_forced_fail`
-(an override like NO-OP-PASS/LOOP-TRAP — without it a contract violation
-reads as VERIFY-FAIL); pinned by
+FRESH-FAIL | INTEGRITY-FAIL` — derived by `summary.decide` (priority, operator
+review 2026-10-09: non-empty `contract_lock_violations` wins over every
+behavioral override — verdict integrity beats model behavior, and probe_result
+is one key so the rule must be explicit, not write-order luck; then the
+override; then the table); CONTRACT-FAIL is set by `verify._contract_lock_forced_fail`
+in-container (first echelon, an override like NO-OP-PASS/LOOP-TRAP — without
+it a contract violation reads as VERIFY-FAIL) and by the HOST recompute
+(Authority below); FRESH-FAIL and the host CONTRACT-FAIL/ENV-FAIL are issued
+only by `_publish_evidence` — never by the container; pinned by
 `launcher/tests_harness/test_verdict_table.py` (the table, unchanged) and
 `test_contract_fail_probe.py` (the override, the violations-beat-overrides
 rule in both write orders, and the host exemption: `_publish_evidence`
 records an I5 violation but never downgrades CONTRACT-FAIL to INTEGRITY-FAIL
 — spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL).
 
-**Trust boundary of the verdict (operator review 2026-10-09).** The
-CONTRACT-FAIL priority is authoritative ONLY for a summary the container
-honestly wrote. `_publish_evidence` does not recompute the contract lock: it
-checks only the `rc` field against the container exit and PASS-after-nonzero.
-A worker that rewrites summary.json after the run (rc=0, PASS, empty
-violations) over a tree where a protected file was actually modified is
-accepted today — nothing in `launcher/` recomputes the manifest diff on the
-host. What holds this hole now is a sandbox side effect (the log dir under
-tmpfs from the nested bwrap, diagnostic cc216), not a guarantee: with the
-sandbox disabled the dir is writable and the protection is gone. Closing it
-is Stage 3 (docker cp + host-side contract recompute + fresh-check) — until
-then the host-side verdict is trusted, not verified. Pinned as
-`test_host_detects_forged_clean_summary_over_tampered_tree_GAP`
-(xfail strict: stage 3 turning it XPASS forces the marker off, same pattern
-as the closed zone-symlink GAPs in test_ticket_zone.py).
+**Authority of the verdict (Stage 3, SPEC-VERDICT-INTEGRITY-2026-10-08;
+closes the trust boundary opened by `b7ae392`).** The final
+`rc`/`verifier`/`probe_result` are ISSUED BY THE HOST in `_publish_evidence`
+(T3-5/T3-6) — never trusted from the worker's summary (spec §1.1). Two
+independent host checks, both against state the worker cannot rewrite:
+
+1. **Contract recompute (T3-1/T3-2).** `verify.contract_snapshot` snapshots
+   the protected files (`_protected_files`, the one source) BEFORE `docker
+   run`, kept in host process MEMORY only (a LOG_DIR file could be forged);
+   `verify.host_contract_check` recomputes after the container exits.
+   Non-empty violations force `verifier=FAIL` + `probe_result=CONTRACT-FAIL`
+   regardless of the worker's claims — the judge is not the defendant. The
+   fresh check is SKIPPED when the contract is violated (spec §1.6: a fresh
+   run over a tampered tree is uninformative).
+2. **Fresh check (T3-3/T3-6).** `sandbox.fresh_verify_argv` +
+   `verify.fresh_verify`: a NEW container the worker never touched (same
+   image, `--rm`, `--network=none`, WHOLE repo `:ro` no carve-outs, no
+   LOG_DIR bind, no STANOK_* env, tmpfs home+tmp) re-runs `run.sh list` +
+   `test --all` on the final tree. Runs only when the summary was retrieved
+   AND the contract is intact. A fresh suite failure overrides the worker's
+   claim: `probe_result=FRESH-FAIL`, `rc=rc_fresh`; the run's exit rc is set
+   to the published verdict's rc (the process exit must not contradict the
+   summary the supervisor reads). A fresh INFRASTRUCTURE failure (EXEC_ERROR
+   tail) is rc=16 ENV-FAIL — not a verdict, call the human (stop-condition);
+   the host-backstop TIMEOUT flows as FRESH-FAIL (run.sh self-limits per
+   file, so a host overrun is a pathological tree, not an infra refusal).
+
+Priority at publish (spec §3): **CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL
+> worker override**. The worker's claims are diagnostic-only: preserved in
+`worker_rc`/`worker_verifier`, written ONLY when the host overrides the
+verdict (the clean path stays byte-identical); the I5 detector compares
+`worker_rc` with the container exit, never the host's own final write. A
+failed `docker cp` or an unavailable fresh check writes an ENV-FAIL summary
+(`write_env_fail_summary`, rc=16) directly into evidence/ — the verdict
+cannot be PASS without the artifacts it is built from. Pinned by
+`test_stage3_host_snapshot.py`, `test_stage3_worker_lifecycle.py`,
+`test_stage3_fresh_verify.py`, `test_stage3_fresh_wiring.py`,
+`test_verdict_fresh.py` and `test_contract_fail_probe.py` test 9 (the former
+GAP test, flipped green in T3-7: a forged clean summary over a tampered tree
+is rejected as CONTRACT-FAIL).
 
 ## Module map — the owner of each contract
 
@@ -152,10 +189,10 @@ as the closed zone-symlink GAPs in test_ticket_zone.py).
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
 | `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
-| `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits |
+| `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker lifecycle (no `--rm`, stop/cp/rm, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
 | `launcher/session.py` | the one Claude session: turns, TDD hook, retry prompt, loop-guard |
-| `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts) |
-| `launcher/summary.py` | the summary.json schema (`decide`/`_status_fields`), evidence publishing, rotation |
+| `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts); host trust boundary: `contract_snapshot`/`host_contract_check` (T3-1/T3-2), `fresh_verify` (T3-3) |
+| `launcher/summary.py` | the summary.json schema (`decide`/`_status_fields`), host-issued verdict priority + `write_env_fail_summary` (T3-5/T3-6), evidence publishing, rotation |
 | `launcher/opik.py` | trace-count check (telemetry only) |
 | `scripts/run.sh` + `scripts/stacks/*.toml` | the run.sh contract + the stack registry (single source) |
 | `CLAUDE.md` | the machine role (auto-loaded in the machine session) |

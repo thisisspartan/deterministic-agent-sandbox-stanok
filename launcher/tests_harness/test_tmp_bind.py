@@ -71,7 +71,12 @@ def _docker(argv, timeout=180):
     try:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     finally:
-        sandbox.docker_stop(argv[argv.index("--name") + 1])
+        name = argv[argv.index("--name") + 1]
+        sandbox.docker_stop(name)
+        # T3-4: sandbox_argv containers run WITHOUT --rm — the host removes
+        # them after stop (the run_sandboxed finally contract), otherwise the
+        # name collides on the next docker run in this process.
+        sandbox.docker_rm_force(name)
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
@@ -99,6 +104,7 @@ def test_container_tmpdir_exists_before_any_command(tmp_path):
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     finally:
         sandbox.docker_stop(name)
+        sandbox.docker_rm_force(name)  # T3-4: no --rm — the host removes it
     assert "DIR-EXISTS" in proc.stdout, proc
     assert "BWRAP-WRITE-OK" in proc.stdout, proc
     assert "EXEC-OK" in proc.stdout, proc

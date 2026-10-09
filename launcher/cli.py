@@ -21,8 +21,8 @@ import signal
 import subprocess
 import sys
 import time
-from launcher import logs, sandbox, stanok
-from launcher.config import Config, RunState
+from launcher import logs, sandbox, stanok, verify
+from launcher.config import CONTAINER_SUMMARY_ROOT, Config, RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.plan import SessionPlan
@@ -32,7 +32,10 @@ from launcher.gates import (
 )
 from launcher.opik import _opik_trace_count
 from launcher.session import _install_signal_handlers, run_continuous_session
-from launcher.summary import _publish_evidence, _rotate_stale_summary, build_summary, write_summary
+from launcher.summary import (
+    _publish_evidence, _rotate_stale_summary, build_summary,
+    write_env_fail_summary, write_summary,
+)
 from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
     host_ro_paths, host_rw_paths, parse_ticket_header, prepare_workspace,
@@ -61,7 +64,7 @@ def _fail_early(cfg, run_state, job: dict, start_ts: int, code: int, error: str)
     """
     job["rc"] = int(code)
     job["error"] = error
-    write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+    write_summary(cfg, job, int(time.time()) - start_ts)
     if os.path.exists(run_state.marker_path):
         try:
             os.remove(run_state.marker_path)
@@ -154,7 +157,7 @@ def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: i
         else:
             job["opik_traces"] = opik_after
             log(f"OPIK: project trace count after run = {opik_after}")
-        write_summary(cfg, run_state, job, int(time.time()) - start_ts)
+        write_summary(cfg, job, int(time.time()) - start_ts)
         if os.path.exists(run_state.marker_path):
             try:
                 os.remove(run_state.marker_path)
@@ -339,9 +342,36 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
     rw_paths are the per-ticket rw carve-outs (T4/CC-135, derived in main()
     from the same ticket text the container will parse); ro_paths are the
     protected files re-bound :ro over a carve-out dir (T4b/CC-136). The base
-    repo mount is always :ro (CC-154)."""
+    repo mount is always :ro (CC-154).
+
+    Stage 3 (T3-4): the container runs WITHOUT `--rm`; the finally retrieves
+    the worker's summary from the container's writable layer (`docker cp`)
+    before removing the container (`docker rm -f`). Order: wait -> cp -> rm.
+    A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS.
+
+    Stage 3 (T3-6): after the contract recompute the host runs the fresh
+    check (verify.fresh_verify, T3-3) when the summary was retrieved and the
+    contract is intact, and passes its result to _publish_evidence — the
+    final verdict is host-issued (spec §1.1, priority §3). The returned rc
+    equals the published verdict's rc."""
     evidence_dir, live_dir = cfg.label_paths(args.label)
     os.makedirs(evidence_dir, exist_ok=True)
+
+    # T3-4 reaper: remove stopped leftovers of THIS repo (crash remnants of
+    # earlier runs) before this run starts. Running containers are untouched;
+    # a foreign repo's containers are not this run's leftovers (condition 1).
+    sandbox.reap_stopped(cfg.repo_root)
+
+    # T3-4: a stale summary.json in LOG_DIR/<label> from an earlier run must
+    # not survive: the worker no longer writes there (its summary lives on the
+    # container layer), the host writes it only via docker cp — a failed cp
+    # would otherwise re-publish the previous run's verdict.
+    stale = os.path.join(live_dir, "summary.json")
+    if os.path.isfile(stale):
+        try:
+            os.replace(stale, stale + ".prev")
+        except OSError:
+            pass
 
     run_state = RunState(evidence_dir=evidence_dir, live_dir=live_dir,
                          marker_path=os.path.join(evidence_dir, ".running"))
@@ -364,6 +394,10 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
     # the host venv python is only for the host-side gates.
     # T4 (CC-135): the rw carve-outs come from the ticket's declared paths,
     # derived by main() with the same rule the container-side validation uses.
+    # Stage 3 (T3-1): host-side contract snapshot BEFORE `docker run`. Kept
+    # in this process's memory only (a LOG_DIR file could be rewritten by the
+    # worker); T3-2 recomputes after the container exits and compares.
+    before_manifest = verify.contract_snapshot(cfg)
     name, argv = sandbox.sandbox_argv(
         cfg.repo_root, cfg.log_dir, image,
         ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(cfg, args),
@@ -377,11 +411,54 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple) -> int:
         rc = run_state.interrupted_rc or 130
     finally:
         sandbox.docker_stop(name)
-        # CC-134: the container wrote the verdict into LOG_DIR (evidence/ is
-        # read-only there); publish it to the host-owned evidence/<label> now
-        # that the container is gone. BEFORE the marker removal, so the
-        # supervisor never sees "not running" with the summary still missing.
-        _publish_evidence(cfg, args.label, rc)
+        # Stage 3 (T3-4): the container survived its exit (no --rm) — retrieve
+        # the worker's summary from its writable layer into LOG_DIR/<label>
+        # (the publish source), then remove the container. Order: cp -> rm.
+        # A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS
+        # without the summary it was built from.
+        cp_rc, cp_err = sandbox.docker_cp(
+            name, f"{CONTAINER_SUMMARY_ROOT}/{args.label}/summary.json",
+            os.path.join(live_dir, "summary.json"))
+        sandbox.docker_rm_force(name)
+        # CC-134: publish the retrieved verdict to the host-owned
+        # evidence/<label>. BEFORE the marker removal, so the supervisor never
+        # sees "not running" with the summary still missing.
+        # Stage 3 (T3-2): recompute the host-side contract AFTER the
+        # container exits — the host's independent check of the tree the
+        # verdict was computed against; violations force CONTRACT-FAIL at
+        # publish, regardless of the worker summary.
+        # Stage 3 (T3-6): the fresh check (T3-3) runs ONLY when the summary
+        # was retrieved AND the contract is intact — a fresh run over a
+        # tampered tree is uninformative (spec §1.6); it is NOT gated on the
+        # worker's claims (§1.1: the host's check is the verdict authority).
+        # A fresh infra failure (EXEC_ERROR tail) is rc=16 ENV-FAIL — not a
+        # verdict (call the human). A fresh suite failure overrides the
+        # worker's claim at publish (FRESH-FAIL, §3); the run's exit rc is
+        # then set to the published verdict's rc — the process exit must not
+        # contradict the summary the supervisor reads.
+        contract_violations = verify.host_contract_check(cfg, before_manifest)
+        fresh_check = None
+        fresh_infra_error = None
+        if cp_rc == 0 and not contract_violations:
+            fresh_rc, fresh_tail = verify.fresh_verify(cfg)
+            if fresh_tail.startswith("EXEC_ERROR:"):
+                fresh_infra_error = fresh_tail
+            else:
+                fresh_check = (fresh_rc, fresh_tail)
+        _publish_evidence(cfg, args.label, rc, contract_violations, fresh_check)
+        if cp_rc != 0:
+            rc = int(ExitCode.ENV_FAIL)
+            write_env_fail_summary(
+                cfg, args.label,
+                f"docker cp failed (rc={cp_rc}): the worker summary could not "
+                f"be retrieved from the container layer — {cp_err or 'no such file'}")
+        elif fresh_infra_error is not None:
+            rc = int(ExitCode.ENV_FAIL)
+            write_env_fail_summary(
+                cfg, args.label,
+                f"fresh check unavailable — {fresh_infra_error}")
+        elif fresh_check is not None and fresh_check[0] != 0:
+            rc = fresh_check[0]
         try:
             os.remove(marker)
         except OSError:
@@ -507,10 +584,14 @@ def _build_parser(cfg) -> argparse.ArgumentParser:
     return p
 
 
-def _early_abort(cfg, evidence_dir: str, marker: str, label: str, ticket: str,
+def _early_abort(cfg, marker: str, label: str, ticket: str,
                  code: ExitCode, err_msg: str) -> int:
     """Launch-level refusal: log, clean a dead marker, write the EARLY-ABORT
-    summary (only when absent — a fresh verdict must not be overwritten)."""
+    summary (only when absent — a fresh verdict must not be overwritten).
+
+    T3-4: the summary goes to cfg.summary_dir(label) — inside the container
+    the writable-layer path the host retrieves with docker cp; on the host
+    the evidence dir (the host is the publisher, unchanged)."""
     log(err_msg)
     if os.path.exists(marker):
         # A live run's marker must survive an early abort of a
@@ -528,8 +609,9 @@ def _early_abort(cfg, evidence_dir: str, marker: str, label: str, ticket: str,
                 os.remove(marker)
             except OSError:
                 pass
-    os.makedirs(evidence_dir, exist_ok=True)
-    sum_path = os.path.join(evidence_dir, "summary.json")
+    summary_dir = cfg.summary_dir(label)
+    os.makedirs(summary_dir, exist_ok=True)
+    sum_path = os.path.join(summary_dir, "summary.json")
     if not os.path.exists(sum_path):
         job = {
             "label": label,
@@ -657,7 +739,7 @@ def _lock_key(cfg) -> "str | None":
         return None
 
 
-def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
+def _host_launch(cfg, args, marker: str) -> int:
     """Host sync: supervise the Docker container (launcher/sandbox.py).
 
     The container-side Runner re-runs the gates and takes the lock.
@@ -666,7 +748,7 @@ def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
     (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
     """
     if shutil.which("docker") is None:
-        return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket,
+        return _early_abort(cfg, marker, args.label, args.ticket,
                             ExitCode.DEFECT, "ERROR: docker not found on PATH")
     # T4 (CC-135): the container's rw carve-outs must be fixed BEFORE
     # `docker run`, but the SessionPlan is built later, inside the
@@ -682,7 +764,7 @@ def _host_launch(cfg, args, evidence_dir: str, marker: str) -> int:
         # container for a ticket that edits a protected file.
         assert_edit_paths_are_not_protected(cfg, edit_paths)
     except (OSError, ValueError) as e:
-        return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket,
+        return _early_abort(cfg, marker, args.label, args.ticket,
                             ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
     rw_paths = host_rw_paths(cfg, declared)
     ro_paths = host_ro_paths(cfg, rw_paths)
@@ -706,7 +788,7 @@ def main() -> int:
         marker = os.path.join(evidence_dir, ".running")
 
         def abort(code: ExitCode, err_msg: str) -> int:
-            return _early_abort(cfg, evidence_dir, marker, args.label, args.ticket, code, err_msg)
+            return _early_abort(cfg, marker, args.label, args.ticket, code, err_msg)
 
         # W2.6 provenance: capture HEAD on the HOST before anything launches
         # (gates, container, child) — the container-side build_summary reads
@@ -758,6 +840,6 @@ def main() -> int:
                 return abort(ExitCode.LOCK, f"LOCK: the repo is already busy with another run ({lock_path})")
             return cmd_run(cfg, args)
 
-        return _host_launch(cfg, args, evidence_dir, marker)
+        return _host_launch(cfg, args, marker)
 
     return 0
