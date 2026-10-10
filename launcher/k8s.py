@@ -30,6 +30,7 @@ knobs (STANOK_K8S_NAMESPACE / STANOK_KUBECTL), not Config fields.
 import base64
 import dataclasses
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -128,26 +129,85 @@ def extract_payload(text: str, nonce: str):
 
 
 _DIFF_PATH_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)", re.M)
+_OLDNEW_RE = re.compile(r"^(?:---|\+\+\+) (?:a/|b/)?(\S+)")
+_RENAME_COPY_RE = re.compile(r"^(?:rename|copy) (?:from|to) (.+)")
 _MODE_SYMLINK_RE = re.compile(r"^(old mode|new(?: file)? mode) 120000", re.M)
+_MODE_GITLINK_RE = re.compile(
+    r"^(old mode|new(?: file)? mode|deleted file mode) 160000", re.M)
+_INDEX_GITLINK_RE = re.compile(r"^index \S+ 160000")
+_SUBPROJECT_RE = re.compile(r"^Subproject commit ")
+
+
+def _path_violations(path: str) -> list:
+    """One path, every transport invariant (Package 1, operator spec
+    2026-10-10): no absolute path, no '..' segment, no '.git' component
+    (the .git directory is the machine's read-only boundary — a patch that
+    touches it bypasses every src/tests/docs rule; .gitignore is a normal
+    file, only the exact '.git' component is rejected). /dev/null is the
+    git sentinel for add/delete, not a path."""
+    if path == "/dev/null":
+        return []
+    violations = []
+    if path.startswith("/"):
+        violations.append(f"ABSOLUTE: {path}")
+    segments = path.split("/")
+    if ".." in segments:
+        violations.append(f"TRAVERSAL: {path}")
+    if ".git" in segments:
+        violations.append(f"GITDIR: {path}")
+    return violations
 
 
 def patch_gate(patch_text: str) -> list:
     """The transport-layer re-assertion of the Docker-era invariants (the
-    zone-symlink ban rc=13 / SEC-01): a patch that creates a symlink
-    (filemode 120000) or carries a path with a '..' segment is rejected
-    BEFORE apply — a host-issued CONTRACT-FAIL, never a silent apply."""
+    zone-symlink ban rc=13 / SEC-01), hardened per the Package 1 spec:
+    EVERY path-bearing header is checked (diff --git, ---/+++, rename
+    from/to, copy from/to — renames and copies included), every path is
+    checked for absolute/'..'/'.git' forms; symlinks (120000) and gitlinks
+    (160000 in any mode form, the `index .. 160000` line, 'Subproject
+    commit' lines) are rejected.
+    Rejected BEFORE apply — a host-issued CONTRACT-FAIL, never a silent
+    apply."""
     violations = []
     current = None
     for line in patch_text.splitlines():
         m = _DIFF_PATH_RE.match(line)
         if m:
             for path in (m.group(1), m.group(2)):
-                if ".." in path.split("/"):
-                    violations.append(f"TRAVERSAL: {path}")
+                violations.extend(_path_violations(path))
             current = m.group(2)
-        elif _MODE_SYMLINK_RE.match(line) and current:
+            continue
+        m = _OLDNEW_RE.match(line)
+        if m:
+            violations.extend(_path_violations(m.group(1)))
+            continue
+        m = _RENAME_COPY_RE.match(line)
+        if m:
+            violations.extend(_path_violations(m.group(1)))
+            continue
+        if _MODE_SYMLINK_RE.match(line) and current:
             violations.append(f"SYMLINK: {current}")
+        elif (_MODE_GITLINK_RE.match(line) or _INDEX_GITLINK_RE.match(line)
+                or _SUBPROJECT_RE.match(line)):
+            violations.append(f"GITLINK: {current or '<no file header>'}")
     return violations
+
+
+def patch_sha256(patch_bytes: bytes) -> str:
+    """The patch identity (Package 1): SHA-256 of the EXACT patch bytes,
+    computed once from the payload; every later use of the patch (scratch
+    apply, fresh Job, live apply) is re-verified against this hash —
+    fail closed on mismatch."""
+    return hashlib.sha256(patch_bytes).hexdigest()
+
+
+def patch_identity_ok(patch_file: str, expected: str) -> bool:
+    """Re-verify the on-disk patch file against the recorded hash."""
+    try:
+        with open(patch_file, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest() == expected
+    except OSError:
+        return False
 
 
 def apply_patch_scratch(tree_blob: str, patch_text: str) -> str:
@@ -367,7 +427,8 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
 # ==================================================================================
 def host_launch_k8s(cfg, args, marker: str) -> int:
     """The K8s-mode host supervision (the counterpart of run_sandboxed):
-    transport -> worker Job -> payload -> patch gate -> scratch contract ->
+    transport -> worker Job -> payload -> patch gate + patch identity
+    (SHA-256, re-verified before every apply) -> scratch contract ->
     fresh Job -> _publish_evidence -> rc alignment. The marker/summary
     protocol is identical to the Docker path: the supervisor reads
     evidence/<label>/summary.json exactly as before.
@@ -495,6 +556,18 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             with open(os.path.join(live_dir, name), "wb") as f:
                 f.write(data)
 
+        # Patch identity (Package 1): the hash of the EXACT payload bytes is
+        # computed ONCE here; the on-disk patch file is the payload bytes
+        # verbatim (binary write — never a text re-encode), and every later
+        # use (scratch apply, fresh Job, live apply) is re-verified against
+        # this hash. The identity is recorded in the evidence.
+        patch_bytes = payload.get("changes.patch", b"")
+        patch_sha = patch_sha256(patch_bytes)
+        patch_text = patch_bytes.decode("utf-8", errors="replace")
+        patch_file = os.path.join(live_dir, "changes.patch")
+        with open(patch_file, "wb") as f:
+            f.write(patch_bytes)
+
         # CC-225: the host stamps opik_traces — the in-Pod summary carries
         # the literal "disabled" (STANOK_IN_CONTAINER=1); the host reaches
         # the Opik backend and counts THIS session's traces, so the field
@@ -504,12 +577,13 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         try:
             with open(sum_path, encoding="utf-8") as f:
                 summary = json.load(f)
+            summary["patch_sha256"] = patch_sha
             sid = summary.get("session_id")
             if sid:
                 stamp_opik_traces(
                     summary, opik.session_trace_count(sid, run_start_iso))
-                with open(sum_path, "w", encoding="utf-8") as f:
-                    json.dump(summary, f, ensure_ascii=False, indent=2)
+            with open(sum_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -521,19 +595,20 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         except (OSError, ValueError, json.JSONDecodeError):
             pass
 
-        patch_text = payload.get("changes.patch", b"").decode("utf-8",
-                                                              errors="replace")
-        patch_file = os.path.join(live_dir, "changes.patch")
-        with open(patch_file, "w", encoding="utf-8") as f:
-            f.write(patch_text)
-
-        # The patch gate first (a symlink/traversal patch is rejected before
-        # anything is applied), then the scratch contract recompute — both
-        # feed the SAME contract_violations channel _publish_evidence forces
-        # to CONTRACT-FAIL.
+        # The patch gate first (a symlink/traversal/absolute/.git/gitlink
+        # patch is rejected before anything is applied), then the identity
+        # re-verification (the on-disk patch must be the hashed bytes), then
+        # the scratch contract recompute — all feed the SAME
+        # contract_violations channel _publish_evidence forces to
+        # CONTRACT-FAIL.
         contract_violations = patch_gate(patch_text)
         if contract_violations:
             log(f"K8S PATCH-GATE: {contract_violations}")
+        elif not patch_identity_ok(patch_file, patch_sha):
+            contract_violations = [
+                f"PATCH-SHA: {patch_file} does not match the hashed patch "
+                f"bytes ({patch_sha}) — fail closed, nothing is applied"]
+            log(f"K8S PATCH-SHA: {contract_violations}")
         else:
             try:
                 scratch = apply_patch_scratch(tree_blob, patch_text)
@@ -580,11 +655,19 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         if (rc == 0 and not contract_violations
                 and (fresh_check is None or fresh_check[0] == 0)
                 and patch_text.strip()):
-            r = subprocess.run(["git", "apply", patch_file], cwd=cfg.repo_root,
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                log(f"WARN: final PASS but git apply on the live tree failed "
-                    f"(rc={r.returncode}): {r.stderr.strip()}")
+            # Identity re-verified a third time, immediately before the live
+            # apply (Package 1): the bytes that land on the live tree must be
+            # the bytes the verdict was computed against — fail closed.
+            if not patch_identity_ok(patch_file, patch_sha):
+                log(f"WARN: final PASS but patch identity mismatch before "
+                    f"live apply (expected {patch_sha}) — apply SKIPPED")
+            else:
+                r = subprocess.run(["git", "apply", patch_file],
+                                   cwd=cfg.repo_root,
+                                   capture_output=True, text=True)
+                if r.returncode != 0:
+                    log(f"WARN: final PASS but git apply on the live tree "
+                        f"failed (rc={r.returncode}): {r.stderr.strip()}")
         return rc
     except KeyboardInterrupt:
         return run_state.interrupted_rc or 130

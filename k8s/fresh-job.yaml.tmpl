@@ -54,6 +54,15 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
+          # Disk bound (Package 1): same rule as the worker Job — the
+          # ephemeral-storage limit counts the writable layer AND the
+          # emptyDir AND /var/log/pods together, so it must NOT equal the
+          # emptyDir sizeLimit (2Gi).
+          resources:
+            requests:
+              ephemeral-storage: "1Gi"
+            limits:
+              ephemeral-storage: "4Gi"
           volumeMounts:
             - name: tree
               mountPath: /stanok/transport
@@ -71,4 +80,5 @@ spec:
           configMap:
             name: {{CM_PATCH}}
         - name: work
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 2Gi
