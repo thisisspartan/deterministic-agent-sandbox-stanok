@@ -21,7 +21,7 @@ import signal
 import subprocess
 import sys
 import time
-from launcher import logs, sandbox, stanok, verify
+from launcher import k8s, logs, sandbox, stanok, verify
 from launcher.config import Config, RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
@@ -756,6 +756,14 @@ def _lock_key(cfg) -> "str | None":
         return None
 
 
+def _runtime_mode() -> str:
+    """P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §3): the runtime switch.
+    STANOK_RUNTIME=k8s selects the host orchestrator (launcher/k8s.py);
+    absent/any other value = the Docker path, unchanged. A pure function:
+    the dispatch is testable without a cluster (test_k8s_wiring.py)."""
+    return "k8s" if os.environ.get("STANOK_RUNTIME") == "k8s" else "docker"
+
+
 def _host_launch(cfg, args, marker: str) -> int:
     """Host sync: supervise the Docker container (launcher/sandbox.py).
 
@@ -849,6 +857,15 @@ def main() -> int:
             # blocks until terminal (a foreground follow would exceed the
             # Bash tool's 10-min cap on a 45-min run).
             return launch_background(cfg, args)
+
+        # P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §3): the runtime switch.
+        # The launch contract (run/status/wait/stop, the marker, the
+        # summary.json semantics) is unchanged — only the runtime behind a
+        # host `run` differs. The in-container child never dispatches: it IS
+        # the runtime. With --follow the parent stays in launch_background;
+        # the detached child re-enters main() and lands here.
+        if _runtime_mode() == "k8s" and not in_container:
+            return k8s.host_launch_k8s(cfg, args, marker)
 
         if in_container or no_sandbox:
             # In-process session (container-side Runner, or host no-sandbox):
