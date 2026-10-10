@@ -41,7 +41,7 @@ import tempfile
 import time
 import uuid
 
-from launcher import verify
+from launcher import opik, verify
 from launcher.config import RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
@@ -194,6 +194,35 @@ def disable_sandbox_settings(settings_text: str) -> str:
     sandbox.pop("filesystem", None)
     sandbox.pop("network", None)
     return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def rewrite_tracing_endpoint(settings_text: str, endpoint: str) -> str:
+    """CC-225 (operator 2026-10-10): the in-Pod Opik config is ENV-only.
+    The extracted settings carry BETA_TRACING_ENDPOINT=http://localhost:8080/
+    ... — inside the Pod localhost is the Pod, so the OTLP export is silently
+    dropped (live cc221..cc224: zero traces, opik_traces "disabled"). The
+    host passes the reachable backend URL through the Job env
+    (STANOK_OPIK_TRACE_URL); the Pod runner rewrites the settings value from
+    that env BEFORE the base commit — settings.env is applied by claude
+    natively (session.py:530 --settings), and the rewrite is part of the
+    Pod's baseline, not a tree change. An empty endpoint returns the settings
+    unchanged (byte-for-byte)."""
+    if not endpoint:
+        return settings_text
+    data = json.loads(settings_text)
+    data.setdefault("env", {})["BETA_TRACING_ENDPOINT"] = endpoint
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def stamp_opik_traces(summary: dict, count) -> dict:
+    """CC-225: the host is the only party that can reach the Opik backend,
+    so the host — not the Pod — issues the opik_traces field. The in-Pod
+    summary carries the literal "disabled" (STANOK_IN_CONTAINER=1); the host
+    replaces it with the trace count measured for THIS session. None (Opik
+    unreachable) never masquerades as 0 — the field stays as written."""
+    if count is not None:
+        summary["opik_traces"] = count
+    return summary
 
 
 def render_template(text: str, variables: dict) -> str:
@@ -398,6 +427,9 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     before_manifest = verify.contract_snapshot(cfg)
     nonce = new_nonce()
     deadline = int(os.environ.get("STANOK_K8S_JOB_DEADLINE_S", "3600"))
+    # CC-225: the run-start bound for the Opik trace scan (the API list is
+    # newest-first; the scan stops at this timestamp).
+    run_start_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
 
     try:
         tree_blob = pack_tree(cfg.repo_root)
@@ -428,6 +460,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                     "JOB_NAME": job_name, "LABEL": label, "NONCE": nonce,
                     "IMAGE": cfg.docker_image, "NAMESPACE": ns,
                     "SERVER_URL": cfg.server_url, "MODEL": cfg.model,
+                    "OPIK_TRACE_URL": os.environ.get("STANOK_OPIK_TRACE_URL", ""),
                     "START_COMMIT": os.environ.get("STANOK_START_COMMIT", ""),
                     "DEADLINE": str(deadline),
                     "CM_TICKET": cm_ticket, "CM_TREE": cm_tree,
@@ -461,6 +494,24 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         for name, data in payload.items():
             with open(os.path.join(live_dir, name), "wb") as f:
                 f.write(data)
+
+        # CC-225: the host stamps opik_traces — the in-Pod summary carries
+        # the literal "disabled" (STANOK_IN_CONTAINER=1); the host reaches
+        # the Opik backend and counts THIS session's traces, so the field
+        # is host-issued (the Pod is not its own judge). None (backend
+        # unreachable) leaves the field as written — never a 0 masquerade.
+        sum_path = os.path.join(live_dir, "summary.json")
+        try:
+            with open(sum_path, encoding="utf-8") as f:
+                summary = json.load(f)
+            sid = summary.get("session_id")
+            if sid:
+                stamp_opik_traces(
+                    summary, opik.session_trace_count(sid, run_start_iso))
+                with open(sum_path, "w", encoding="utf-8") as f:
+                    json.dump(summary, f, ensure_ascii=False, indent=2)
+        except (OSError, json.JSONDecodeError):
+            pass
 
         summary_path = os.path.join(live_dir, "summary.json")
         worker_rc = int(ExitCode.DEFECT)
