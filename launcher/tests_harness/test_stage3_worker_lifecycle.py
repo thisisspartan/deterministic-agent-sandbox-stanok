@@ -115,7 +115,8 @@ def _mock_run(tmp_path, monkeypatch, container_rc=0, write_summary=True):
     monkeypatch.setattr(sandbox, "reap_stopped", lambda *a: calls.append("reap"))
     monkeypatch.setattr(sandbox, "sandbox_argv", spy_argv)
     # T3-6: run_sandboxed now runs the fresh check — mocked PASS here; the
-    # wiring itself is pinned in test_stage3_fresh_wiring.py.
+    # observable verdict path is pinned in test_scenarios_verdict.py
+    # (S6 removed the wiring unit test).
     monkeypatch.setattr(verify, "fresh_verify", lambda cfg: (0, ""))
     monkeypatch.setattr(cli.subprocess, "Popen", lambda argv, **kw: FakePopen(argv))
     monkeypatch.setattr(sandbox, "docker_stop", lambda name: calls.append("stop"))

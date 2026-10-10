@@ -146,12 +146,11 @@ in-container (first echelon, an override like NO-OP-PASS/LOOP-TRAP — without
 it a contract violation reads as VERIFY-FAIL) and by the HOST recompute
 (Authority below); FRESH-FAIL and the host CONTRACT-FAIL/ENV-FAIL are issued
 only by `_publish_evidence` — never by the container; pinned by
-`launcher/tests_harness/test_scenarios_verdict.py` (the verdict scenarios),
-`test_contract_fail_probe.py` (the override, the violations-beat-overrides
-rule in both write orders) and `test_verdict_fresh.py` (the publish
-priority CONTRACT-FAIL > FRESH-FAIL > the worker's claims — S2,
-PLAN-SIMPLIFY-2026-10-09: the I5 rc cross-check, the worker_* fields and
-INTEGRITY-FAIL are removed).
+`launcher/tests_harness/test_scenarios_verdict.py` (the verdict scenarios —
+S6, PLAN-SIMPLIFY-2026-10-09: the publish priority CONTRACT-FAIL >
+FRESH-FAIL > the worker's claims is pinned end-to-end there; the former
+unit bearers `test_contract_fail_probe.py` and `test_verdict_fresh.py`
+were removed in S6).
 
 **Authority of the verdict (Stage 3, SPEC-VERDICT-INTEGRITY-2026-10-08;
 closes the trust boundary opened by `b7ae392`).** The final
@@ -218,10 +217,11 @@ cannot be PASS without the artifacts it is built from. No summary at all
 (worker died before writing) publishes nothing: `status` reports `missing`
 (S1). Pinned by
 `test_stage3_host_snapshot.py`, `test_stage3_worker_lifecycle.py`,
-`test_stage3_fresh_verify.py`, `test_stage3_fresh_wiring.py`,
-`test_verdict_fresh.py` and `test_contract_fail_probe.py` test 7 (the former
-GAP test, flipped green in T3-7: a forged clean summary over a tampered tree
-is rejected as CONTRACT-FAIL).
+`test_stage3_fresh_verify.py` and `test_scenarios_verdict.py` (the forged
+clean summary over a tampered tree -> CONTRACT-FAIL; a green fresh check
+never fabricates a PASS — S6 removed the former unit bearers
+`test_stage3_fresh_wiring.py`, `test_verdict_fresh.py` and
+`test_contract_fail_probe.py`).
 
 **What PASS means (the boundary of the verdict, operator 2026-10-09).** The verdict is a
 statement about the TREE, not about the correctness of the code: `verifier=PASS` means the
@@ -313,7 +313,7 @@ COPY).
   `test_docker_image_digest_matches` fails until the image is rebuilt
   (CC-106: a stale image is a doctor failure, never a mid-run ENV-FAIL).
 - A new summary.json outcome -> `summary.py decide`/`_status_fields`;
-  `test_scenarios_verdict.py` + `test_verdict_fresh.py` must pass unchanged.
+  `test_scenarios_verdict.py` must pass unchanged.
 - Agent behavior / retry semantics -> `session.py`.
 - Mount or boundary rule -> `sandbox.py` + `ticket.py` path validation
   (the same rule derives both — CC-135).

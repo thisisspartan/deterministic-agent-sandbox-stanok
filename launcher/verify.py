@@ -370,7 +370,7 @@ def _contract_lock_forced_fail(job: dict, turn: int) -> int | None:
     not a PASS. No retry: the list is cumulative and can never be cleared
     inside the session, so a fix prompt cannot succeed; the supervisor
     relaunches with a refined ticket. Sets probe_result "CONTRACT-FAIL" (an
-    override, see test_contract_fail_probe.py) so the summary distinguishes a
+    override, see test_scenarios_verdict.py) so the summary distinguishes a
     contract violation from a test failure. Returns the run rc (1) or None
     when clean."""
     violations = job.get("contract_lock_violations") or []

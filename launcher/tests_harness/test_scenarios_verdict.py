@@ -29,7 +29,10 @@ Scenarios:
     ENV-FAIL summary — not a verdict, call the human;
   6 forged summary over a tampered tree: the worker weakened an existing
     protected test mid-run and its summary claims a clean PASS -> the host
-    recompute forces CONTRACT-FAIL; a host-issued verdict never exits 0.
+    recompute forces CONTRACT-FAIL; a host-issued verdict never exits 0;
+  7 honest worker FAIL, fresh green: the host's fresh check passes over the
+    final tree -> the honest FAIL is published unchanged; a green fresh check
+    never fabricates a PASS (the host only downgrades, never upgrades).
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_scenarios_verdict.py -q
 """
@@ -48,6 +51,11 @@ CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
 
 RETRY_WORKER = dict(CLEAN_WORKER, probe_result="PASS-AFTER-LOCAL-RETRY",
                     turns=2, failures=["turn 1: test_add failed"])
+
+HONEST_FAIL_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 1,
+                      "verifier": "FAIL", "probe_result": "VERIFY-FAIL",
+                      "turns": 1, "contract_lock_violations": [], "errors": [],
+                      "failures": ["test_x failed"]}
 
 
 def _repo(tmp_path):
@@ -68,7 +76,8 @@ def _published(repo):
 
 
 def _mock_run(tmp_path, monkeypatch, *, during_run=None,
-              worker_summary=CLEAN_WORKER, fresh_result=(0, "")):
+              worker_summary=CLEAN_WORKER, fresh_result=(0, ""),
+              container_rc=0):
     """run_sandboxed with the docker cycle mocked; the REAL contract snapshot,
     recompute and publish run. during_run: callable(repo) the fake worker runs
     mid-run. fresh_result: what verify.fresh_verify returns. Returns
@@ -90,7 +99,7 @@ def _mock_run(tmp_path, monkeypatch, *, during_run=None,
             with open(os.path.join(d, "summary.json"), "w",
                       encoding="utf-8") as f:
                 json.dump(worker_summary, f)
-            return 0
+            return container_rc
 
     def spy_argv(*a, **k):
         calls.append("run")
@@ -213,3 +222,19 @@ def test_scenario_forged_pass_over_tampered_tree(tmp_path, monkeypatch):
     assert dst["probe_result"] == "CONTRACT-FAIL"
     assert any("tests/t_test.py" in x for x in dst["contract_lock_violations"])
     assert "fresh" not in calls
+
+
+# --- 7: honest worker FAIL, fresh green ---------------------------------------------
+
+def test_scenario_honest_fail_not_fabricated(tmp_path, monkeypatch):
+    # The host's authority is exactly two checks, both downgrades: a green
+    # fresh check over the final tree does NOT flip the worker's honest FAIL
+    # into a PASS — the honest verdict is published unchanged.
+    repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
+                                       container_rc=1,
+                                       worker_summary=dict(HONEST_FAIL_WORKER))
+    rc = cli.run_sandboxed(cfg, args, (), (), ())
+    assert "fresh" in calls  # the fresh check is not gated on the worker's claims
+    assert rc == 1  # the exit equals the published verdict's rc
+    dst = _published(repo)
+    assert dst == dict(HONEST_FAIL_WORKER, rc=1)  # unchanged: no fabrication

@@ -155,8 +155,8 @@ def decide(job: dict) -> str:
     behavior; probe_result is ONE key, so without this rule the later write
     would win by accident. Then the session/host override (NO-OP-PASS,
     LOOP-TRAP, CONTRACT-FAIL); otherwise the derived table.
-    test_contract_fail_probe.py + test_verdict_fresh.py pin this priority:
-    any change here must pass them UNCHANGED."""
+    test_scenarios_verdict.py pins this priority end-to-end (S6): any
+    change here must pass it UNCHANGED."""
     if job.get("contract_lock_violations"):
         return "CONTRACT-FAIL"
     override = job.get("probe_result")
