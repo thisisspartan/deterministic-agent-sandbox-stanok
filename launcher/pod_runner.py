@@ -42,7 +42,12 @@ def _unpack(blob: str) -> None:
 
 def main() -> int:
     label = os.environ["STANOK_LABEL"]
-    nonce = os.environ["STANOK_NONCE"]
+    # CC-230: the nonce is consumed here and REMOVED from os.environ — the
+    # session env below is built from os.environ, so without the pop the
+    # agent's Bash inherits $STANOK_NONCE and could compromise the payload
+    # nonce. pop() without a default keeps the fail-fast (KeyError if the
+    # Job did not inject it).
+    nonce = os.environ.pop("STANOK_NONCE")
 
     # 1. The tree from the transport (no .git — the Pod owns its git).
     with open(os.path.join(TRANSPORT_DIR, "tree.tar.gz.b64"),
@@ -95,6 +100,7 @@ def main() -> int:
     os.makedirs(tmp, exist_ok=True)
     os.makedirs(home, exist_ok=True)
     env = dict(os.environ)
+    env.pop("STANOK_NONCE", None)  # CC-230 belt: never inherited downstream
     env.update({
         "STANOK_IN_CONTAINER": "1",
         "STANOK_REPO": REPO,

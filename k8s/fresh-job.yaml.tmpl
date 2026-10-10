@@ -32,11 +32,20 @@ spec:
         - name: fresh
           image: {{IMAGE}}
           imagePullPolicy: IfNotPresent
+          # CC-230: HOME/TMPDIR aligned with the worker's pod_runner redirect —
+          # under readOnlyRootFilesystem the image default /home/stanok is
+          # read-only; tests writing to ~/.cache need a writable HOME in the
+          # emptyDir. The dirs are created by the args script below.
+          env:
+            - name: HOME
+              value: /stanok-work/home
+            - name: TMPDIR
+              value: /stanok-work/tmp
           command: ["bash", "-c"]
           args:
             - |
               set -u
-              mkdir -p /stanok-work/work
+              mkdir -p /stanok-work/work /stanok-work/home /stanok-work/tmp
               base64 -d /stanok/transport/tree.tar.gz.b64 | tar -xz -C /stanok-work/work
               cd /stanok-work/work
               if [ -s /stanok/patch/changes.patch ]; then
