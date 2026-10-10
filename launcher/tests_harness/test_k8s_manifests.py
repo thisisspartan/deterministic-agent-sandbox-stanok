@@ -24,6 +24,10 @@ checks (no YAML parser in the image — the checks are text invariants):
   4  CC-229 (SPEC-READONLY-ROOT-2026-10-10): readOnlyRootFilesystem: true
      in BOTH job templates (all Pod writes already target the /stanok-work
      emptyDir — HOME/TMPDIR re-redirected by pod_runner.py)
+  5  CC-230: pod_runner.py consumes the nonce via os.environ.pop and drops
+     it from the session env (the agent's Bash must not see $STANOK_NONCE);
+     the fresh Job's HOME/TMPDIR point into the /stanok-work emptyDir (the
+     read-only root makes the image default /home/stanok unwritable)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -156,6 +160,24 @@ def test_worker_job_read_only_root():
 def test_fresh_job_read_only_root():
     y = _read("fresh-job.yaml.tmpl")
     assert "readOnlyRootFilesystem: true" in y
+
+
+# --- CC-230: nonce isolation + fresh-Pod HOME/TMPDIR alignment ----------
+
+def test_pod_runner_consumes_and_drops_nonce():
+    src = (Path(__file__).resolve().parents[1] / "pod_runner.py").read_text(
+        encoding="utf-8")
+    assert 'os.environ.pop("STANOK_NONCE")' in src
+    assert 'os.environ["STANOK_NONCE"]' not in src  # no leak back-read
+    assert 'env.pop("STANOK_NONCE", None)' in src  # session-env belt
+
+
+def test_fresh_job_home_tmpdir_aligned():
+    y = _read("fresh-job.yaml.tmpl")
+    assert "name: HOME" in y and "value: /stanok-work/home" in y
+    assert "name: TMPDIR" in y and "value: /stanok-work/tmp" in y
+    # the dirs must exist before the tests run (read-only root, emptyDir)
+    assert "mkdir -p /stanok-work/work /stanok-work/home /stanok-work/tmp" in y
 
 
 def test_rendered_names_are_versioned(monkeypatch):
