@@ -56,7 +56,20 @@ def main() -> int:
     sys.path.insert(0, REPO)
     from launcher import k8s
 
-    # 2. The base commit: the patch is computed against it.
+    # 2. O3: the Pod-side settings rewrite (bwrap off; the filesystem deny
+    # entries and the network block removed — the sandbox_config_gate would
+    # otherwise rc=28 on '../evidence', absent next to the extracted tree).
+    # BEFORE the base commit: the rewrite is part of the Pod's baseline, not
+    # an uncommitted change — the in-Pod dirty_tree_gate (cli.py, rc=22)
+    # would otherwise abort the session (live cc221, 2026-10-10).
+    settings = os.path.join(REPO, ".claude", "settings.stanok.json")
+    if os.path.isfile(settings):
+        with open(settings, encoding="utf-8") as f:
+            rewritten = k8s.disable_sandbox_settings(f.read())
+        with open(settings, "w", encoding="utf-8") as f:
+            f.write(rewritten)
+
+    # 3. The base commit: the patch is computed against it.
     def git(*a, check=True):
         return subprocess.run(["git", *a], cwd=REPO, check=check,
                               capture_output=True, text=True)
@@ -67,16 +80,6 @@ def main() -> int:
     git("add", "-A")
     git("commit", "-qm", "base")
     base = git("rev-parse", "HEAD").stdout.strip()
-
-    # 3. O3: the Pod-side settings rewrite (bwrap off; the filesystem deny
-    # entries and the network block removed — the sandbox_config_gate would
-    # otherwise rc=28 on '../evidence', absent next to the extracted tree).
-    settings = os.path.join(REPO, ".claude", "settings.stanok.json")
-    if os.path.isfile(settings):
-        with open(settings, encoding="utf-8") as f:
-            rewritten = k8s.disable_sandbox_settings(f.read())
-        with open(settings, "w", encoding="utf-8") as f:
-            f.write(rewritten)
 
     # 4. The session: the unchanged STANOK_IN_CONTAINER=1 path (gates, lock,
     # cmd_run). STANOK_START_COMMIT is inherited from the Job env — the

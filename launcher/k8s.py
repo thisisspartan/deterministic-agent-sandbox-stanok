@@ -288,6 +288,27 @@ def _job_rc_and_tail(job_name: str, ns: str) -> tuple:
     return exit_rc, tail
 
 
+def _wait_job_terminal(name: str, ns: str, timeout_s: int) -> str:
+    """Poll the Job until a terminal condition: 'complete' | 'failed' | 'timeout'.
+    `kubectl wait --for=condition=complete` blocks for the WHOLE timeout when the
+    Job FAILED (live cc221, 2026-10-10: a failed fresh Job hung the host for an
+    hour) — the host must learn about a failed Job immediately."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        r = _kubectl("get", "job", name, "-n", ns, "-o", "json")
+        if r.returncode == 0:
+            try:
+                conds = json.loads(r.stdout).get("status", {}).get("conditions", [])
+            except json.JSONDecodeError:
+                conds = []
+            for c in conds:
+                if c.get("status") == "True" and c.get("type") in ("Complete", "Failed"):
+                    return c["type"].lower()
+        if time.monotonic() >= deadline:
+            return "timeout"
+        time.sleep(5)
+
+
 # ==================================================================================
 # The fresh check as a deny-all Job (mirror of sandbox.fresh_verify_argv:
 # the same `run.sh list; run.sh test --all` pair, no model endpoint)
@@ -304,9 +325,7 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
         }))
     except RuntimeError as e:
         return (1, f"EXEC_ERROR: {e}")
-    r = _kubectl("wait", "--for=condition=complete", f"job/{fresh_name}",
-                 "-n", ns, f"--timeout={deadline + 60}s", timeout=deadline + 90)
-    if r.returncode == 0:
+    if _wait_job_terminal(fresh_name, ns, deadline + 60) == "complete":
         return (0, "")
     exit_rc, tail = _job_rc_and_tail(fresh_name, ns)
     if not tail.strip():
@@ -418,9 +437,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             if pod is not None:
                 _stream_pod_logs(pod, ns, os.path.join(live_dir, "pod-stdout.log"),
                                  deadline + 180)
-            _kubectl("wait", "--for=condition=complete", f"job/{job_name}",
-                     "-n", ns, f"--timeout={deadline + 60}s",
-                     timeout=deadline + 90)
+            _wait_job_terminal(job_name, ns, deadline + 60)
         except RuntimeError as e:
             rc = int(ExitCode.ENV_FAIL)
             write_env_fail_summary(cfg, label, f"k8s orchestration error — {e}")
