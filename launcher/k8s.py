@@ -1,8 +1,10 @@
 """k8s — the host-side orchestrator of the K8s runtime (SPEC-STANOK-K8S-RUNTIME-2026-10-10).
 
-The runtime switch (P1 §3): launch.sh keeps its contract (`run <ticket>
+The runtime switch (CC-231 production cutover, supersedes the P1 §3
+default): launch.sh keeps its contract (`run <ticket>
 <label> --follow`, status/wait/stop, the marker and summary.json semantics);
-STANOK_RUNTIME=k8s routes the host branch here instead of _host_launch. The
+this module is the DEFAULT host branch — the Docker path (_host_launch)
+runs only on an explicit STANOK_RUNTIME=docker. The
 Pod works on a TRANSPORTED COPY of the tree (git archive HEAD | gzip |
 base64 through a ConfigMap — the measured decision of 2026-10-10: the full
 bundle is 1.3MB > the 800KB ConfigMap threshold, the tarball is ~240KB); the
@@ -441,7 +443,8 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
 
 
 # ==================================================================================
-# host_launch_k8s — the host branch behind STANOK_RUNTIME=k8s
+# host_launch_k8s — the DEFAULT host branch (CC-231; Docker only on an
+# explicit STANOK_RUNTIME=docker)
 # ==================================================================================
 def host_launch_k8s(cfg, args, marker: str) -> int:
     """The K8s-mode host supervision (the counterpart of run_sandboxed):
