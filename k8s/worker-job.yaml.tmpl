@@ -56,6 +56,9 @@ spec:
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true  # CC-229 (SPEC-READONLY-ROOT): all Pod
+            # writes already go to the /stanok-work emptyDir (HOME/TMPDIR/CLAUDE_TMPDIR
+            # re-redirected by pod_runner.py; repo/logs under /stanok-work).
             capabilities:
               drop:
                 - ALL
