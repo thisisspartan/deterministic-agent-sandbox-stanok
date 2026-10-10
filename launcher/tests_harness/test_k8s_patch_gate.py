@@ -22,11 +22,15 @@ the exact bytes, re-verified before every apply. Tests:
   8  gitlink 160000 (new file / mode change / Subproject commit) -> GITLINK
   9  safe rename/copy and .gitignore patches pass
  10  patch_sha256/patch_identity_ok: the on-disk file must match the hash
+ 11  strict_patch_text: invalid UTF-8 bytes RAISE (no U+FFFD substitution —
+     the gate/scratch must see exactly the text whose bytes are hashed)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_patch_gate.py -q
 """
 import hashlib
 import os
+
+import pytest
 
 from launcher import k8s
 
@@ -228,6 +232,26 @@ def test_gitignore_is_not_gitdir():
     # '.git' as an exact path component is the boundary; '.gitignore' is a
     # normal file and must pass.
     assert k8s.patch_gate(GITIGNORE_OK) == []
+
+
+# --- Encoding gap (operator review 2026-10-10): strict decoding ----------
+
+INVALID_UTF8 = (b"diff --git a/src/m.py b/src/m.py\n"
+                b"--- a/src/m.py\n+++ b/src/m.py\n"
+                b"@@ -1 +1 @@\n-x\x80\x81\xff\n+y\n")
+
+
+def test_strict_patch_text_rejects_invalid_utf8():
+    # RED fixture: bytes that are not valid UTF-8 must RAISE. The gate and
+    # the scratch contract must see exactly the text whose bytes are hashed
+    # and applied — errors="replace" (U+FFFD) would verify a contract against
+    # a tree different from the one that gets applied.
+    with pytest.raises(UnicodeDecodeError):
+        k8s.strict_patch_text(INVALID_UTF8)
+
+
+def test_strict_patch_text_passes_valid_utf8():
+    assert k8s.strict_patch_text(CLEAN.encode("utf-8")) == CLEAN
 
 
 def test_patch_identity(tmp_path):

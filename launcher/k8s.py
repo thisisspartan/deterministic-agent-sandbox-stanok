@@ -201,6 +201,17 @@ def patch_sha256(patch_bytes: bytes) -> str:
     return hashlib.sha256(patch_bytes).hexdigest()
 
 
+def strict_patch_text(patch_bytes: bytes) -> str:
+    """Decode the patch bytes STRICTLY (encoding-gap micro-patch, operator
+    review 2026-10-10): the gate, the scratch contract and the apply must
+    see exactly the text whose bytes are hashed and applied —
+    errors="replace" would substitute U+FFFD and the contract would be
+    verified against a tree different from the one that lands. Raises
+    UnicodeDecodeError; the caller fail-closes with a host-issued
+    CONTRACT-FAIL before any scratch/fresh/apply operation."""
+    return patch_bytes.decode("utf-8")
+
+
 def patch_identity_ok(patch_file: str, expected: str) -> bool:
     """Re-verify the on-disk patch file against the recorded hash."""
     try:
@@ -563,7 +574,17 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         # this hash. The identity is recorded in the evidence.
         patch_bytes = payload.get("changes.patch", b"")
         patch_sha = patch_sha256(patch_bytes)
-        patch_text = patch_bytes.decode("utf-8", errors="replace")
+        # Strict decode (encoding-gap micro-patch): a patch that is not
+        # valid UTF-8 is a fail-closed contract violation BEFORE any
+        # gate/scratch/fresh/apply operation — no U+FFFD substitution.
+        try:
+            patch_text = strict_patch_text(patch_bytes)
+            decode_violation = None
+        except UnicodeDecodeError as e:
+            patch_text = ""
+            decode_violation = (
+                f"PATCH-UTF8: changes.patch is not valid UTF-8 ({e}) — "
+                "fail closed, nothing is applied")
         patch_file = os.path.join(live_dir, "changes.patch")
         with open(patch_file, "wb") as f:
             f.write(patch_bytes)
@@ -595,31 +616,37 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         except (OSError, ValueError, json.JSONDecodeError):
             pass
 
-        # The patch gate first (a symlink/traversal/absolute/.git/gitlink
-        # patch is rejected before anything is applied), then the identity
+        # Strict UTF-8 decode first (a non-UTF-8 patch never reaches the
+        # gate), then the patch gate (a symlink/traversal/absolute/.git/
+        # gitlink patch is rejected before anything is applied), then the identity
         # re-verification (the on-disk patch must be the hashed bytes), then
         # the scratch contract recompute — all feed the SAME
         # contract_violations channel _publish_evidence forces to
         # CONTRACT-FAIL.
-        contract_violations = patch_gate(patch_text)
-        if contract_violations:
-            log(f"K8S PATCH-GATE: {contract_violations}")
-        elif not patch_identity_ok(patch_file, patch_sha):
-            contract_violations = [
-                f"PATCH-SHA: {patch_file} does not match the hashed patch "
-                f"bytes ({patch_sha}) — fail closed, nothing is applied"]
-            log(f"K8S PATCH-SHA: {contract_violations}")
+        if decode_violation:
+            contract_violations = [decode_violation]
+            log(f"K8S PATCH-UTF8: {decode_violation}")
         else:
-            try:
-                scratch = apply_patch_scratch(tree_blob, patch_text)
-            except RuntimeError as e:
-                contract_violations = [f"PATCH-APPLY: {e}"]
+            contract_violations = patch_gate(patch_text)
+            if contract_violations:
+                log(f"K8S PATCH-GATE: {contract_violations}")
+        if not contract_violations:
+            if not patch_identity_ok(patch_file, patch_sha):
+                contract_violations = [
+                    f"PATCH-SHA: {patch_file} does not match the hashed patch "
+                    f"bytes ({patch_sha}) — fail closed, nothing is applied"]
+                log(f"K8S PATCH-SHA: {contract_violations}")
             else:
                 try:
-                    contract_violations = scratch_contract_violations(
-                        cfg, before_manifest, scratch, declared)
-                finally:
-                    shutil.rmtree(scratch, ignore_errors=True)
+                    scratch = apply_patch_scratch(tree_blob, patch_text)
+                except RuntimeError as e:
+                    contract_violations = [f"PATCH-APPLY: {e}"]
+                else:
+                    try:
+                        contract_violations = scratch_contract_violations(
+                            cfg, before_manifest, scratch, declared)
+                    finally:
+                        shutil.rmtree(scratch, ignore_errors=True)
 
         # The fresh check runs ONLY when the contract is intact (a fresh run
         # over a tampered tree is uninformative — spec §1.6); it is NOT
