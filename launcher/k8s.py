@@ -382,9 +382,12 @@ def _stream_pod_logs(pod: str, ns: str, path: str, timeout_s: int) -> None:
     lands in the host-side log file, never in the supervisor's context."""
     with open(path, "wb") as lf:
         try:
+            # CC-232: same config resolution as _kubectl — the log stream is
+            # a kubectl call too (incident cc233: without it the stream died
+            # on the non-readable /etc/rancher/k3s/k3s.yaml fallback).
             subprocess.run([_kubectl_bin(), "logs", "-f", pod, "-n", ns],
                            stdout=lf, stderr=subprocess.STDOUT,
-                           timeout=timeout_s)
+                           timeout=timeout_s, env=_cluster_env())
         except subprocess.TimeoutExpired:
             log("K8S: kubectl logs -f hit the host timeout")
         except OSError as e:

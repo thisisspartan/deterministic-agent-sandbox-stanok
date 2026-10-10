@@ -75,6 +75,28 @@ def test_cluster_env_no_fallback_without_kubeconfig(tmp_path, monkeypatch):
     assert "KUBECONFIG" not in k8s._cluster_env()
 
 
+def test_stream_pod_logs_uses_cluster_env(tmp_path, monkeypatch):
+    # incident cc233: the log stream called kubectl WITHOUT the config
+    # resolution — it died on the non-readable /etc/rancher/k3s/k3s.yaml
+    # fallback while every other kubectl call worked.
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    kc = tmp_path / ".kube" / "config"
+    kc.parent.mkdir()
+    kc.write_text("x", encoding="utf-8")
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        captured["env"] = kw.get("env")
+        return _FakeCompleted(0)
+    monkeypatch.setattr(k8s.subprocess, "run", fake_run)
+    k8s._stream_pod_logs("pod-x", "default", str(tmp_path / "out.log"), 5)
+    assert "logs" in captured["argv"]
+    assert captured["env"] is not None
+    assert captured["env"]["KUBECONFIG"] == str(kc)
+
+
 # --- 7: CC-232 _preflight_cluster branches (no real cluster) ----------------------
 
 class _FakeCompleted:
