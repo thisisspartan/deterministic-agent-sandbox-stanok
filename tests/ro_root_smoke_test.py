@@ -7,7 +7,18 @@ them there) must still accept them.
 """
 import os
 
+import pytest
+
 from src.ro_root_smoke import mul, write_probe
+
+# CC-232 (operator-approved host-side guard): the root-FS invariants below are
+# Pod-only — the read-only root and the /stanok-work emptyDir exist only in
+# the runner Pods (both Job templates set STANOK_IN_POD=1). On the host they
+# are false failures; the fresh Job runs this suite INSIDE the Pod, where the
+# guards are satisfied and the assertions execute unchanged.
+_pod_only = pytest.mark.skipif(
+    not os.environ.get("STANOK_IN_POD"),
+    reason="Pod-only invariant: runs in the worker/fresh Pod (STANOK_IN_POD=1)")
 
 
 def test_positive_numbers():
@@ -30,6 +41,7 @@ def test_commutativity():
         assert mul(a, b) == mul(b, a)
 
 
+@_pod_only
 def test_root_is_read_only():
     # The hardening IS in effect only if creating a file at the filesystem
     # root fails. If write_probe("/") succeeds, the root is writable and the
@@ -37,12 +49,14 @@ def test_root_is_read_only():
     assert write_probe("/") is False
 
 
+@_pod_only
 def test_work_dir_writable():
     # /stanok-work (emptyDir) is the designated writable zone in both Pods;
     # the read-only root must not break it.
     assert write_probe("/stanok-work") is True
 
 
+@_pod_only
 def test_runner_redirect_env_writable():
     # The runner redirects HOME/TMPDIR into /stanok-work. Probe those values
     # ONLY when they start with /stanok-work; when the variable is absent or

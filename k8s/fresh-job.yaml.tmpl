@@ -41,6 +41,9 @@ spec:
               value: /stanok-work/home
             - name: TMPDIR
               value: /stanok-work/tmp
+            - name: STANOK_IN_POD
+              value: "1"  # CC-232: the fresh Job runs the suite INSIDE the
+              # Pod — the Pod-only test guards execute here, not on the host.
           command: ["bash", "-c"]
           args:
             - |

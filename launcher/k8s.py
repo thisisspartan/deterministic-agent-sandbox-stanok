@@ -27,6 +27,8 @@ on a final PASS (§6 ordering).
 kubectl is the only cluster interface; missing kubectl = rc=16 ENV-FAIL
 (infrastructure, call the human). Namespace/kubectl binary are runtime
 knobs (STANOK_K8S_NAMESPACE / STANOK_KUBECTL), not Config fields.
+CC-232: a pre-flight doctor gate (cluster health + manifest contract tests)
+runs fail-closed before any resource is created — rc=16 on failure.
 """
 
 import base64
@@ -39,6 +41,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -328,9 +331,24 @@ def _read_manifest(name: str) -> str:
         return f.read()
 
 
+def _cluster_env() -> dict:
+    """CC-232: kubectl config resolution on the operator host. With KUBECONFIG
+    unset, kubectl's own fallback chain can land on the non-world-readable
+    /etc/rancher/k3s/k3s.yaml (the 2026-10-10 doctor failure); when
+    KUBECONFIG is unset and ~/.kube/config exists, set it explicitly — the
+    same fallback the doctor k8s health tests use."""
+    env = dict(os.environ)
+    if not env.get("KUBECONFIG"):
+        kc = os.path.expanduser("~/.kube/config")
+        if os.path.isfile(kc):
+            env["KUBECONFIG"] = kc
+    return env
+
+
 def _kubectl(*argv, timeout: int = 60, input_text: str = None):
     return subprocess.run([_kubectl_bin(), *argv], capture_output=True,
-                          text=True, timeout=timeout, input=input_text)
+                          text=True, timeout=timeout, input=input_text,
+                          env=_cluster_env())
 
 
 def _kubectl_checked(*argv, timeout: int = 60):
@@ -443,6 +461,41 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
 
 
 # ==================================================================================
+# CC-232: pre-flight doctor gate (fail-closed BEFORE any resource creation)
+# ==================================================================================
+def _preflight_cluster(cfg):
+    """CC-232 (operator spec 2026-10-11): before ANY cluster resource is
+    created, prove the two things doctor.sh proves about the K8s runtime —
+    (1) the cluster is reachable and every node is Ready; (2) the manifest
+    contract tests pass (a drifted template must never reach the cluster).
+    Returns None when launch-ready, else the abort reason. An infrastructure
+    defect (rc=16), never a ticket defect — the 3 ticket retries are not
+    burned on it."""
+    r = subprocess.run([_kubectl_bin(), "get", "nodes", "--no-headers"],
+                       capture_output=True, text=True, timeout=30,
+                       env=_cluster_env())
+    if r.returncode != 0:
+        return ("cluster unreachable: kubectl get nodes failed "
+                f"(rc={r.returncode}): {(r.stderr or r.stdout).strip()[:300]}")
+    for line in r.stdout.splitlines():
+        fields = line.split()
+        # exact column match: "NotReady" CONTAINS "Ready" — a substring test
+        # would be a false green.
+        if len(fields) < 2 or fields[1] != "Ready":
+            return f"node not Ready: {line.strip()[:120]}"
+    t = subprocess.run(
+        [sys.executable, "-m", "pytest",
+         os.path.join(LAUNCHER_DIR, "tests_harness", "test_k8s_manifests.py"),
+         "-q", "-p", "no:cacheprovider"],
+        cwd=cfg.repo_root, capture_output=True, text=True, timeout=120)
+    if t.returncode != 0:
+        tail = " | ".join((t.stdout or t.stderr).strip().splitlines()[-4:])
+        return (f"manifest contract tests failed (rc={t.returncode}) — the "
+                f"k8s templates drifted from the contract: {tail}")
+    return None
+
+
+# ==================================================================================
 # host_launch_k8s — the DEFAULT host branch (CC-231; Docker only on an
 # explicit STANOK_RUNTIME=docker)
 # ==================================================================================
@@ -484,6 +537,15 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     except (OSError, ValueError) as e:
         return _early_abort(cfg, marker, label, args.ticket, ExitCode.TICKET,
                             f"ERROR: ticket parse error: {e}")
+
+    # CC-232 pre-flight doctor gate (fail-closed): cluster health + manifest
+    # contract BEFORE any ConfigMap/Job is created — a dead cluster or a
+    # drifted template must not produce cluster resources. Infrastructure
+    # defect: rc=16, no marker, no evidence dir.
+    preflight = _preflight_cluster(cfg)
+    if preflight:
+        return _early_abort(cfg, marker, label, args.ticket, ExitCode.ENV_FAIL,
+                            f"ERROR: PREFLIGHT: {preflight}")
 
     evidence_dir, live_dir = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
