@@ -1,5 +1,14 @@
 """Docker sandbox boundary (R2: the former sandbox-run.sh, in Python).
 
+CC-231 (production cutover): DEPRECATED FALLBACK. The default runtime is
+k8s (launcher/k8s.py); this module runs ONLY on an explicit
+STANOK_RUNTIME=docker. The Docker container keeps seccomp/apparmor
+unconfined (required for the claude-code native bwrap sandbox inside it) —
+the k8s runtime replaces it with the hardened Pod securityContext
+(readOnlyRootFilesystem, drop ALL, RuntimeDefault). Kept as the documented
+fallback until the Docker path is retired; every use logs a deprecation
+line (see sandbox_argv).
+
 Single source of the `docker run` argv: mounts, env passthrough, resource
 limits, hardening. The caller (cli.py run_sandboxed) runs the returned
 argv as a supervised child inside a try/finally that guarantees
@@ -21,6 +30,7 @@ per-container filtering is impossible on the shared host network.
 """
 import os
 import subprocess
+import sys
 
 from launcher.config import DEFAULT_DOCKER_NETWORK
 
@@ -126,6 +136,10 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
     see _mount_specs). The default is () = nothing writable: a caller that
     forgets them gets a read-only container, never an open one.
     """
+    # CC-231: every use of the deprecated Docker fallback is logged.
+    print("stanok: DEPRECATED Docker fallback runtime (explicit "
+          "STANOK_RUNTIME=docker) — the default runtime is k8s",
+          file=sys.stderr)
     uid, gid = os.getuid(), os.getgid()
     name = f"stanok-{os.path.basename(repo_root)}-{os.getpid()}"
 

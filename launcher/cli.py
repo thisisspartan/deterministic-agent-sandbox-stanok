@@ -757,11 +757,20 @@ def _lock_key(cfg) -> "str | None":
 
 
 def _runtime_mode() -> str:
-    """P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §3): the runtime switch.
-    STANOK_RUNTIME=k8s selects the host orchestrator (launcher/k8s.py);
-    absent/any other value = the Docker path, unchanged. A pure function:
-    the dispatch is testable without a cluster (test_k8s_wiring.py)."""
-    return "k8s" if os.environ.get("STANOK_RUNTIME") == "k8s" else "docker"
+    """CC-231 (production cutover, supersedes the P1 default): k8s is the
+    DEFAULT runtime. The Docker path (launcher/sandbox.py, deprecated
+    fallback) runs ONLY on an explicit STANOK_RUNTIME=docker; any other
+    value/absence = k8s (launcher/k8s.py). A pure function: the dispatch is
+    testable without a cluster (test_k8s_wiring.py)."""
+    return "docker" if os.environ.get("STANOK_RUNTIME") == "docker" else "k8s"
+
+
+def _warn_deprecated_docker() -> None:
+    """CC-231: the explicit-Docker opt-in is loud — the operator must see
+    they are on the deprecated insecure path (seccomp/apparmor unconfined)."""
+    print("WARNING: Running deprecated insecure Docker runtime "
+          "(seccomp/apparmor unconfined) — STANOK_RUNTIME=docker is an "
+          "explicit fallback; the default runtime is k8s.", file=sys.stderr)
 
 
 def _host_launch(cfg, args, marker: str) -> int:
@@ -858,15 +867,15 @@ def main() -> int:
             # Bash tool's 10-min cap on a 45-min run).
             return launch_background(cfg, args)
 
-        # P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §3): the runtime switch.
-        # The launch contract (run/status/wait/stop, the marker, the
+        # CC-231 (production cutover): the runtime switch — k8s is the
+        # default, Docker only on an explicit STANOK_RUNTIME=docker. The
+        # launch contract (run/status/wait/stop, the marker, the
         # summary.json semantics) is unchanged — only the runtime behind a
-        # host `run` differs. The in-container child never dispatches: it IS
-        # the runtime. With --follow the parent stays in launch_background;
-        # the detached child re-enters main() and lands here.
-        if _runtime_mode() == "k8s" and not in_container:
-            return k8s.host_launch_k8s(cfg, args, marker)
-
+        # host `run` differs. Order: an in-container child or a no-sandbox
+        # test run never dispatches — it IS the runtime / the test mode;
+        # only a host run chooses. With --follow the parent stays in
+        # launch_background; the detached child re-enters main() and lands
+        # here.
         if in_container or no_sandbox:
             # In-process session (container-side Runner, or host no-sandbox):
             # the lock serializes runs of this repo. D2: the key is the git
@@ -887,6 +896,12 @@ def main() -> int:
                 return abort(ExitCode.LOCK, f"LOCK: the repo is already busy with another run ({lock_path})")
             return cmd_run(cfg, args)
 
+        # CC-231: host run — k8s by default; the deprecated Docker path
+        # only on an explicit STANOK_RUNTIME=docker, with a loud WARNING.
+        if _runtime_mode() == "k8s":
+            return k8s.host_launch_k8s(cfg, args, marker)
+
+        _warn_deprecated_docker()
         return _host_launch(cfg, args, marker)
 
     return 0

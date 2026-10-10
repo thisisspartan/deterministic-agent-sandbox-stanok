@@ -1,6 +1,8 @@
 """doctor — structural invariants of the claude machine (R5: pytest port of hooks/doctor.sh).
 
 Static invariants + mock runner launches (rc=15/20/22/20/24).
+CC-231 (production cutover): k8s runtime health — kubectl on PATH, a Ready
+node (the template securityContext checks live in test_k8s_manifests.py).
 Count (do not hardcode the number in prose):
     uv run --directory <repo> pytest launcher/tests_harness --collect-only -q | tail -1
 Run via hooks/doctor.sh (thin wrapper) or directly:
@@ -118,6 +120,53 @@ def test_docker_image_digest_matches():
     image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
     assert gates.preflight_image(Config(), image), \
         "image preflight failed: digest mismatch or runner unavailable"
+
+
+# --- CC-231 (production cutover): k8s is the DEFAULT runtime ---------------
+# The worker/fresh template securityContext validation is NOT duplicated
+# here — it is pinned in test_k8s_manifests.py (primitive-first: one home
+# per invariant). These two checks cover the HOST side of the default path:
+# the kubectl CLI and a Ready node.
+
+def _supervisor_zone_present():
+    return (REPO_ROOT.parent / "CONTEXT.md").is_file()
+
+
+def test_kubectl_available():
+    # The default runtime needs the kubectl CLI on the host. Public clone
+    # (no supervisor zone): skip — valid absence (same pattern as
+    # test_context_md_budget).
+    if not _supervisor_zone_present():
+        pytest.skip("supervisor zone not present (public clone) — "
+                    "k8s runtime not expected")
+    assert shutil.which("kubectl") is not None, \
+        "kubectl not found on PATH — the default (k8s) runtime cannot run"
+
+
+def test_k8s_cluster_nodes_ready():
+    # The node serving the worker/fresh Jobs must be Ready.
+    if not _supervisor_zone_present():
+        pytest.skip("supervisor zone not present (public clone) — "
+                    "k8s runtime not expected")
+    if shutil.which("kubectl") is None:
+        pytest.skip("kubectl unavailable — flagged by test_kubectl_available")
+    # Same kubeconfig resolution as the launch path: the launcher relies on
+    # kubectl's own env resolution (the supervisor exports KUBECONFIG); the
+    # default /etc/rancher/k3s/k3s.yaml is not user-readable — fall back to
+    # ~/.kube/config when KUBECONFIG is unset (the operator host layout).
+    env = dict(os.environ)
+    kc = Path.home() / ".kube" / "config"
+    if not env.get("KUBECONFIG") and kc.is_file():
+        env["KUBECONFIG"] = str(kc)
+    out = subprocess.run(["kubectl", "get", "nodes", "--no-headers"],
+                         env=env, capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, f"kubectl get nodes failed: {out.stderr}"
+    lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+    assert lines, "kubectl returned no nodes"
+    for ln in lines:
+        fields = ln.split()
+        # columns: NAME STATUS ROLES AGE VERSION — STATUS is 2nd
+        assert "Ready" in fields[1], f"node not Ready: {ln}"
 
 
 def test_contract_lock_runsh():
