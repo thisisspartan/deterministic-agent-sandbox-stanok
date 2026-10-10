@@ -409,6 +409,13 @@ def _wait_job_terminal(name: str, ns: str, timeout_s: int) -> str:
         time.sleep(5)
 
 
+def job_deadline() -> int:
+    """CC-230: Job activeDeadlineSeconds — 30-minute insurance against a
+    hung container (both Jobs share this value; STANOK_K8S_JOB_DEADLINE_S
+    overrides)."""
+    return int(os.environ.get("STANOK_K8S_JOB_DEADLINE_S", "1800"))
+
+
 # ==================================================================================
 # The fresh check as a deny-all Job (mirror of sandbox.fresh_verify_argv:
 # the same `run.sh list; run.sh test --all` pair, no model endpoint)
@@ -498,7 +505,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     # run; the tree the verdict was computed against is the scratch).
     before_manifest = verify.contract_snapshot(cfg)
     nonce = new_nonce()
-    deadline = int(os.environ.get("STANOK_K8S_JOB_DEADLINE_S", "3600"))
+    deadline = job_deadline()
     # CC-225: the run-start bound for the Opik trace scan (the API list is
     # newest-first; the scan stops at this timestamp).
     run_start_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())

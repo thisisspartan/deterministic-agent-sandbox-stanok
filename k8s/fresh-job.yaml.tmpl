@@ -14,7 +14,7 @@ metadata:
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: {{DEADLINE}}
-  ttlSecondsAfterFinished: 3600
+  ttlSecondsAfterFinished: 300  # CC-230: auto-cleanup of finished Jobs
   template:
     metadata:
       labels:

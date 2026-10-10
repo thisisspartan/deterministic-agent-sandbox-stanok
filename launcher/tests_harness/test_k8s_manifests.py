@@ -28,6 +28,10 @@ checks (no YAML parser in the image — the checks are text invariants):
      it from the session env (the agent's Bash must not see $STANOK_NONCE);
      the fresh Job's HOME/TMPDIR point into the /stanok-work emptyDir (the
      read-only root makes the image default /home/stanok unwritable)
+  6  CC-230 (operator spec 2026-10-10): Job timeouts — ttlSecondsAfterFinished
+     300 in BOTH templates (auto-cleanup); activeDeadlineSeconds rendered
+     from job_deadline(), default 1800 (30-min insurance), env override
+     STANOK_K8S_JOB_DEADLINE_S
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -178,6 +182,22 @@ def test_fresh_job_home_tmpdir_aligned():
     assert "name: TMPDIR" in y and "value: /stanok-work/tmp" in y
     # the dirs must exist before the tests run (read-only root, emptyDir)
     assert "mkdir -p /stanok-work/work /stanok-work/home /stanok-work/tmp" in y
+
+
+def test_job_timeouts():
+    # CC-230: auto-cleanup in both templates; the deadline is rendered from
+    # job_deadline() (never a literal in the template).
+    for name in ("worker-job.yaml.tmpl", "fresh-job.yaml.tmpl"):
+        y = _read(name)
+        assert "ttlSecondsAfterFinished: 300" in y
+        assert "activeDeadlineSeconds: {{DEADLINE}}" in y
+
+
+def test_job_deadline_default_and_override(monkeypatch):
+    monkeypatch.delenv("STANOK_K8S_JOB_DEADLINE_S", raising=False)
+    assert k8s.job_deadline() == 1800  # 30-min insurance (operator spec)
+    monkeypatch.setenv("STANOK_K8S_JOB_DEADLINE_S", "600")
+    assert k8s.job_deadline() == 600
 
 
 def test_rendered_names_are_versioned(monkeypatch):
