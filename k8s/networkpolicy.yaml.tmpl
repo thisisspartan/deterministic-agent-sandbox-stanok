@@ -1,0 +1,95 @@
+# P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §7) — the network boundary that
+# REPLACES the Docker-era stanok-net iptables policy and the bwrap network
+# block (O3). Apply once per namespace; the policies select Pods by label,
+# the Jobs carry the labels.
+#
+# 2.4 (operator 2026-10-10): this manifest carries NO addresses — the three
+# egress targets are placeholders rendered from configuration by
+# launcher/netpol.py (`python3 -m launcher.netpol` prints the applied
+# manifest; infra/netpol-smoke.sh applies exactly what it renders):
+#   {{MODEL_IP}}        — the inference server: derived from STANOK_SERVER_URL
+#   {{OPIK_HOST_IP}}    — the Opik backend's published host address
+#                         (STANOK_OPIK_HOST_IP, default in launcher/config.py)
+#   {{OPIK_BACKEND_IP}} — the Opik backend's container address on the compose
+#                         network (STANOK_OPIK_BACKEND_IP; pinned in the
+#                         compose override — see the CC-225 note below)
+# A grep for a dotted IPv4 literal in this file must find nothing: the
+# addresses live in configuration, not in the manifest.
+#
+# Worker: egress ONLY to kube-dns (53), the model host (8080 — the inference
+# server) and the Opik backend (8080 — the OTLP tracing target, CC-225).
+# Everything else is refused: packages from the internet are NOT installable,
+# exactly as in the Docker era.
+#
+# CC-225 incident (cc225/cc225-retry1 ConnectionRefused): the netpol
+# controller filters Pod egress in filter FORWARD, which sees the POST-DNAT
+# destination — a Pod->{{OPIK_HOST_IP}}:8080 packet is DNATed (docker
+# published port) to the backend's container address {{OPIK_BACKEND_IP}}
+# BEFORE FORWARD, so the {{OPIK_HOST_IP}}/32 rule never matches and the
+# packet is REJECTED (ConnectionRefused, not timeout). Ground truth
+# (iptables nat dump): the DOCKER chain DNATs the published port to the
+# backend's address on the custom compose network, NOT on the docker bridge.
+# The post-DNAT destination is therefore allowed by a /32 rule: the
+# backend's container address is FIXED in the compose override (ipv4_address,
+# outside the dynamic-allocation range), so the policy narrows the whole
+# compose network to one /32. The {{OPIK_HOST_IP}}/32 rule is kept as
+# documentation of intent (it would match only a non-DNATed path). NOTE: the
+# k3s netpol controller ignores NetworkPolicy UPDATES — after editing this
+# file, delete + re-apply.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stanok-worker-egress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      stanok: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: {{MODEL_IP}}/32
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: {{OPIK_HOST_IP}}/32
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: {{OPIK_BACKEND_IP}}/32
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Fresh (the host's independent verifier Pod): DENY-ALL egress — policyTypes
+# Egress with NO egress rules. The check must not reach the model server or
+# anything else (the mirror of the Docker fresh container's --network=none).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stanok-fresh-deny-all
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      stanok: fresh
+  policyTypes:
+    - Egress

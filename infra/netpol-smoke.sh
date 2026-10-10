@@ -5,29 +5,36 @@
 #
 # Traps this script is built around (operator review 2026-10-10):
 #  1. LABEL. stanok-worker-egress selects Pods by label `stanok: worker`
-#     (k8s/networkpolicy.yaml). An unlabeled test Pod is NOT restricted and
-#     its probes pass — a green result that proves nothing. The probe Pod
-#     carries the exact label the worker Job carries.
+#     (k8s/networkpolicy.yaml.tmpl, rendered by launcher/netpol.py). An
+#     unlabeled test Pod is NOT restricted and its probes pass — a green
+#     result that proves nothing. The probe Pod carries the exact label the
+#     worker Job carries.
 #  2. CONTROL. The same probe from an UNLABELED pod must reach 1.1.1.1 —
 #     otherwise a FAIL could mean "the probe is broken", not "blocked".
-#  3. REAL ADDRESSES. The worker's actual paths: model 192.168.8.131:8080,
-#     Opik 192.168.122.156:8080 (the policy sees the POST-DNAT destination
-#     172.25.0.4 — CC-225; the published-address probe proves the DNATed
-#     packet passed the 172.25.0.0/16 rule; a DIRECT probe of 172.25.0.4 is
+#  3. REAL ADDRESSES (2.4). The manifest template carries NO addresses; this
+#     script renders it (STANOK_SERVER_URL is REQUIRED — MODEL_IP is derived
+#     from it) and derives the probe targets from the RENDERED manifest: the
+#     three /32 cidrs in order = model, Opik published host, Opik post-DNAT
+#     container address (CC-225: the policy sees the POST-DNAT destination;
+#     the published-address probe proves the DNATed packet passed the
+#     post-DNAT /32 rule; a DIRECT probe of the post-DNAT address is
 #     informational only: it times out even UNLABELED, not routable from
-#     pods). The port-narrowing proof is 192.168.122.156:22 — the host SSH
+#     pods). The port-narrowing proof is <opik-host>:22 — the host SSH
 #     listens there, so a FAIL on that address+port can only be the policy.
 #  4. HOST EXPOSURE. NetworkPolicy guards Pods only. The external check
 #     (host SSH/Opik from another LAN machine) runs ONLY when STANOK_LAN_PEER
 #     is set; without a peer it is reported SKIP, never silently dropped.
 #
-# The script RE-APPLIES the policy (delete + apply: the k3s netpol controller
-# ignores NetworkPolicy UPDATES) and records the applied manifest's sha256
-# together with the results in evidence/netpol-<ts>/.
+# The script RENDERS the manifest (launcher/netpol.py — the applied manifest
+# is saved to the evidence dir), RE-APPLIES the policy (delete + apply: the
+# k3s netpol controller ignores NetworkPolicy UPDATES) and records the
+# applied manifest's sha256 together with the results in evidence/netpol-<ts>/.
 #
 # Usage (on the k3s host):
-#   KUBECONFIG=<kubeconfig> [STANOK_LAN_PEER=<ssh-host>] infra/netpol-smoke.sh
-# Knobs: STANOK_KUBECTL (default kubectl), STANOK_NAMESPACE (default),
+#   KUBECONFIG=<kubeconfig> STANOK_SERVER_URL=http://<model-host>:8080 \
+#     [STANOK_LAN_PEER=<ssh-host>] infra/netpol-smoke.sh
+# Knobs: STANOK_PY (default <repo>/.venv/bin/python — the netpol renderer),
+#        STANOK_KUBECTL (default kubectl), STANOK_NAMESPACE (default),
 #        STANOK_IMAGE (default stanok-machine:latest — the image the Jobs use;
 #        probe Pods pin imagePullPolicy: IfNotPresent, kubectl run would force
 #        Always for :latest and fail with ErrImagePull).
@@ -42,7 +49,9 @@ IMAGE="${STANOK_IMAGE:-stanok-machine:latest}"
 TS="$(date +%F-%H%M%S)"
 EV="$ROOT/evidence/netpol-$TS"
 LOG="$EV/results.txt"
-MANIFEST="$ROOT/k8s/networkpolicy.yaml"
+TEMPLATE="$ROOT/k8s/networkpolicy.yaml.tmpl"
+APPLIED="$EV/networkpolicy.applied.yaml"
+PY="${STANOK_PY:-$ROOT/.venv/bin/python}"
 PODS=(netpol-probe-worker netpol-probe-control netpol-probe-fresh)
 
 mkdir -p "$EV"
@@ -53,15 +62,26 @@ die() { echo "FATAL: $*"; exit 2; }
 # --- [1/5] preflight -------------------------------------------------------------
 command -v "$KUBECTL" >/dev/null || die "kubectl not found"
 "$KUBECTL" get nodes >/dev/null 2>&1 || die "cluster unreachable (kubectl get nodes)"
-[[ -f "$MANIFEST" ]] || die "manifest missing: $MANIFEST"
+[[ -f "$TEMPLATE" ]] || die "template missing: $TEMPLATE"
+[[ -x "$PY" ]] || die "renderer python missing: $PY"
+[[ -n "${STANOK_SERVER_URL:-}" ]] || die "STANOK_SERVER_URL must be set (MODEL_IP is derived from it)"
 
 echo "== netpol-smoke $TS =="
-echo "manifest sha256: $(sha256sum "$MANIFEST" | cut -d' ' -f1)"
-sha256sum "$MANIFEST" > "$EV/manifest.sha256"
+echo "template sha256: $(sha256sum "$TEMPLATE" | cut -d' ' -f1)"
 
-# --- [2/5] re-apply the policy (k3s ignores netpol UPDATES) --------------------
-"$KUBECTL" delete -n "$NS" -f "$MANIFEST" --ignore-not-found >/dev/null || die "netpol delete failed"
-"$KUBECTL" apply -n "$NS" -f "$MANIFEST" >/dev/null || die "netpol apply failed"
+# --- [2/5] render + re-apply the policy (k3s ignores netpol UPDATES) ----------
+(cd "$ROOT" && "$PY" -m launcher.netpol) > "$APPLIED" || die "netpol render failed (launcher.netpol)"
+echo "rendered: $APPLIED"
+echo "applied manifest sha256: $(sha256sum "$APPLIED" | cut -d' ' -f1)"
+sha256sum "$APPLIED" > "$EV/manifest.sha256"
+# Probe targets = the rendered manifest's three /32 cidrs, in template order
+mapfile -t CIDRS < <(grep -oE 'cidr: [0-9.]+/32' "$APPLIED" | awk '{print $2}')
+MODEL_IP="${CIDRS[0]%%/*}"; OPIK_HOST_IP="${CIDRS[1]%%/*}"; OPIK_BACKEND_IP="${CIDRS[2]%%/*}"
+[[ -n "$MODEL_IP" && -n "$OPIK_HOST_IP" && -n "$OPIK_BACKEND_IP" ]] \
+  || die "rendered manifest has fewer than 3 /32 cidrs"
+echo "targets: model=$MODEL_IP opik-host=$OPIK_HOST_IP opik-post-dnat=$OPIK_BACKEND_IP"
+"$KUBECTL" delete -n "$NS" -f "$APPLIED" --ignore-not-found >/dev/null || die "netpol delete failed"
+"$KUBECTL" apply -n "$NS" -f "$APPLIED" >/dev/null || die "netpol apply failed"
 echo "policy re-applied (delete+apply)"
 
 cleanup() { "$KUBECTL" delete -n "$NS" --wait=false pod "${PODS[@]}" >/dev/null 2>&1; }
@@ -129,34 +149,36 @@ check() { # $1=pod $2=kind(tcp|dns) $3=target $4=port $5=expected $6=name
 }
 
 # worker-labeled: allowed paths OK, everything else blocked
-check netpol-probe-worker tcp 192.168.8.131 8080 OK  "worker->model"
-check netpol-probe-worker tcp 192.168.122.156 8080 OK "worker->opik-published"
-# The 172.25.0.0/16:8080 rule is proven by the check above: the DNATed packet
-# (FORWARD sees 172.25.0.4, CC-225) passed. A DIRECT probe of the post-DNAT
-# address is NOT a valid test: proven 2026-10-10 it times out even from an
-# UNLABELED pod (the address is not routable from pods without the DNAT path)
-# — expected-OK there would be a false red, expected-FAIL a false green.
-echo "INFO  opik-post-DNAT direct: $(probe_tcp netpol-probe-worker 172.25.0.4 8080) on 172.25.0.4:8080 (informational: unreachable from pods by design, see comment)"
-check netpol-probe-worker dns example.com "" OK        "worker->dns"
-check netpol-probe-worker tcp 1.1.1.1 80 FAIL          "worker->internet"
-check netpol-probe-worker tcp 192.168.122.156 22 FAIL  "worker->host-ssh(port-narrowing)"
+check netpol-probe-worker tcp "$MODEL_IP" 8080 OK        "worker->model"
+check netpol-probe-worker tcp "$OPIK_HOST_IP" 8080 OK    "worker->opik-published"
+# The post-DNAT /32 rule is proven by the check above: the DNATed packet
+# (FORWARD sees $OPIK_BACKEND_IP, CC-225) passed. A DIRECT probe of the
+# post-DNAT address is NOT a valid test: proven 2026-10-10 it times out even
+# from an UNLABELED pod (the address is not routable from pods without the
+# DNAT path) — expected-OK there would be a false red, expected-FAIL a false
+# green.
+echo "INFO  opik-post-DNAT direct: $(probe_tcp netpol-probe-worker "$OPIK_BACKEND_IP" 8080) on $OPIK_BACKEND_IP:8080 (informational: unreachable from pods by design, see comment)"
+check netpol-probe-worker dns example.com "" OK          "worker->dns"
+check netpol-probe-worker tcp 1.1.1.1 80 FAIL            "worker->internet"
+check netpol-probe-worker tcp "$OPIK_HOST_IP" 22 FAIL    "worker->host-ssh(port-narrowing)"
 # control: unlabeled pod proves the probe machinery and cluster egress work
-check netpol-probe-control tcp 1.1.1.1 80 OK           "control->internet(proof-of-work)"
+check netpol-probe-control tcp 1.1.1.1 80 OK             "control->internet(proof-of-work)"
 # fresh: deny-all
-check netpol-probe-fresh tcp 192.168.8.131 8080 FAIL  "fresh->model"
-check netpol-probe-fresh dns example.com "" FAIL       "fresh->dns"
-check netpol-probe-fresh tcp 1.1.1.1 80 FAIL           "fresh->internet"
+check netpol-probe-fresh tcp "$MODEL_IP" 8080 FAIL       "fresh->model"
+check netpol-probe-fresh dns example.com "" FAIL         "fresh->dns"
+check netpol-probe-fresh tcp 1.1.1.1 80 FAIL             "fresh->internet"
 
-# informational: a foreign port on the Opik net. NOT a hard check: a FAIL
-# here is indistinguishable from "nothing listens on that port"; the hard
-# port-narrowing proof is worker->host-ssh above (host SSH definitely listens).
-echo "INFO  opik-net-port-narrowing: $(probe_tcp netpol-probe-worker 172.25.0.4 8081) on 172.25.0.4:8081 (informational)"
+# informational: a foreign port on the Opik backend address. NOT a hard check:
+# a FAIL here is indistinguishable from "nothing listens on that port"; the
+# hard port-narrowing proof is worker->host-ssh above (host SSH definitely
+# listens).
+echo "INFO  opik-net-port-narrowing: $(probe_tcp netpol-probe-worker "$OPIK_BACKEND_IP" 8081) on $OPIK_BACKEND_IP:8081 (informational)"
 
 # external host-exposure: hard only when a LAN peer is provided
 if [[ -n "${STANOK_LAN_PEER:-}" ]]; then
   ext() { ssh -o BatchMode=yes -o ConnectTimeout=5 "$STANOK_LAN_PEER" \
             "timeout 5 bash -c '</dev/tcp/$1/$2'" 2>/dev/null && echo OK || echo FAIL; }
-  for spec in "192.168.122.156 22 host-ssh" "192.168.122.156 8080 opik-from-LAN"; do
+  for spec in "$OPIK_HOST_IP 22 host-ssh" "$OPIK_HOST_IP 8080 opik-from-LAN"; do
     set -- $spec
     got="$(ext "$1" "$2")"
     if [[ "$got" == FAIL ]]; then echo "PASS  external-$3: $1:$2 -> FAIL (not exposed)"

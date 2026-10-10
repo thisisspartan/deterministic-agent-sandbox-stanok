@@ -22,6 +22,7 @@ spec:
         stanok: worker
     spec:
       restartPolicy: Never
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
