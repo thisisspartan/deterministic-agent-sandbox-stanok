@@ -392,7 +392,7 @@ def preflight_server(cfg) -> bool:
 # S4 network preflight (SPEC-NETWORK-2026-10-09) — HOST-side, before the worker
 # starts. The policy (E2): model reachable from the worker container, external
 # network blocked, host services closed; enforced by the STANOK-NET iptables
-# chain on the stanok-net bridge (infra/stanok-net.sh). A refusal here is
+# chain on the stanok-net bridge (operator-managed). A refusal here is
 # rc=16 ENV-FAIL (policy not installed) — rc=20 only when the model server is
 # unreachable for the HOST too (server down, not a policy defect).
 # ==================================================================================
@@ -502,8 +502,8 @@ def network_preflight(cfg) -> tuple | None:
         return None
     net = _net_name()
     if not _network_exists(net):
-        return (16, f"docker network {net!r} missing — install the network "
-                    f"unit (infra/stanok-net.service) or set "
+        return (16, f"docker network {net!r} missing — create it "
+                    f"(docker network create {net}) or set "
                     f"STANOK_SKIP_NET_PREFLIGHT=1")
     probe = _run_net_probe(cfg)
     host_server_ok = False

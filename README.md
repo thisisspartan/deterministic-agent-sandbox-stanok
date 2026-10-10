@@ -107,14 +107,22 @@ The call chain, the module/ownership map, the coupling design and the
 | `STANOK_CONTAINER_PIDS`| `512`                   | container pids limit             |
 | `STANOK_CONTAINER_CPUS`| `2`                     | container CPU limit              |
 | `STANOK_DOCKER_NETWORK`| `stanok-net`            | worker bridge network (S4; the iptables policy lives on it) |
-| `STANOK_SKIP_NET_PREFLIGHT` | unset              | `1` — skip the network-policy probe (hosts without the unit) |
+| `STANOK_SKIP_NET_PREFLIGHT` | unset              | `1` — skip the network-policy probe (hosts without the bridge policy) |
+| `STANOK_OPIK_HOST_IP`  | `192.168.122.156`     | Opik backend published host address (netpol template, 2.4) |
+| `STANOK_OPIK_BACKEND_IP` | `172.25.0.250`      | Opik backend container address, post-DNAT (netpol template, 2.4) |
 
-Network (S4, SPEC-NETWORK): the worker container runs on the dedicated bridge
-`stanok-net`; the iptables chain STANOK-NET (installed by
-`infra/stanok-net.sh` + `infra/stanok-net.service` — the OPERATOR installs:
-copy both to `/etc/systemd/system/`, adjust ExecStart to the checkout path,
-`systemctl enable --now stanok-net.service`) allows ONLY the model server.
-The launcher probes the policy before every worker start (rc=16 refusal).
+Network: the K8s runtime is bounded by the NetworkPolicy
+`k8s/networkpolicy.yaml.tmpl` — the template carries no addresses; they come
+from configuration (`launcher/config.py` defaults, env overrides
+`STANOK_OPIK_HOST_IP`/`STANOK_OPIK_BACKEND_IP`, MODEL_IP from
+`STANOK_SERVER_URL`) and are rendered by `launcher/netpol.py`
+(`python3 -m launcher.netpol`). Re-verified by `infra/netpol-smoke.sh`,
+which renders, applies and probes exactly the rendered manifest. The
+Docker-era bridge `stanok-net` + iptables chain STANOK-NET (S4) is kept for
+the Docker runtime; its installer scripts (`infra/stanok-net.{sh,service}`)
+were removed 2026-10-10 — the network and the chain are operator-managed
+host infrastructure. The launcher probes the policy before every worker
+start (rc=16 refusal).
 
 ## How it works
 

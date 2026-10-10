@@ -14,8 +14,9 @@ Transcribed 1:1 from sandbox-run.sh (deleted in R2): same volume set, same
 STANOK_* env passthrough, same limits, same seccomp/apparmor unconfined
 trade (required for the claude-code native bwrap sandbox inside the
 container). S4 (SPEC-NETWORK-2026-10-09) replaced --network=host with the
-dedicated bridge `stanok-net`: the iptables STANOK-NET chain (infra/
-stanok-net.sh) allows ONLY the model server and drops everything else —
+dedicated bridge `stanok-net`: the iptables STANOK-NET chain (operator-
+managed host infrastructure) allows ONLY the model server and drops
+everything else —
 per-container filtering is impossible on the shared host network.
 """
 import os
@@ -150,7 +151,7 @@ def sandbox_argv(repo_root: str, log_dir: str, image: str, inner_argv: list,
         # trap (a no-op after a normal exit).
         "docker", "run", "--rm", "--name", name, "--init",
         # S4 (SPEC-NETWORK-2026-10-09): dedicated bridge, NOT host. The
-        # STANOK-NET iptables chain (infra/stanok-net.sh, DOCKER-USER+INPUT)
+        # STANOK-NET iptables chain (DOCKER-USER+INPUT, operator-managed)
         # allows ONLY the model server (STANOK_SERVER_URL) and drops the rest:
         # no external internet, no host services. The host verifies this policy
         # before the worker starts (gates.network_preflight, rc=16).

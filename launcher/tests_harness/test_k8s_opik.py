@@ -9,8 +9,10 @@ is ENV-only (no git-tree file changes):
      -> settings returned unchanged (byte-for-byte)
   2  worker-job.yaml.tmpl carries STANOK_OPIK_TRACE_URL rendered from the
      host env (the Pod gets the reachable backend address, not localhost)
-  3  networkpolicy.yaml: worker egress additionally to the Opik backend on
-     the node host 192.168.122.156:8080; the fresh Pod stays deny-all
+  3  networkpolicy.yaml.tmpl rendered via launcher.netpol (2.4): worker
+     egress additionally to the Opik backend on the node host
+     192.168.122.156:8080 and its post-DNAT container address
+     172.25.0.250:8080 (CC-225); the fresh Pod stays deny-all
   4  k8s.stamp_opik_traces: the host replaces the in-Pod "disabled" with
      the host-measured trace count for THIS session (the Pod is not its own
      judge); opik.session_trace_count paginates + filters thread_id
@@ -52,14 +54,15 @@ def test_worker_manifest_carries_opik_env():
     assert "{{OPIK_TRACE_URL}}" in y
 
 
-def test_networkpolicy_opik_egress_worker_only():
-    from pathlib import Path
-    y = (Path(__file__).resolve().parents[2] / "k8s" /
-         "networkpolicy.yaml").read_text(encoding="utf-8")
+def test_networkpolicy_opik_egress_worker_only(monkeypatch):
+    from launcher import netpol
+    monkeypatch.setenv("STANOK_SERVER_URL", "http://192.168.8.131:8080")
+    y = netpol.render_netpol()
     docs = y.split("---")
     worker = docs[0]
-    assert "192.168.122.156" in worker  # the Opik backend on the node host
-    assert "192.168.8.131" in worker    # the model host stays allowed
+    assert "192.168.122.156/32" in worker  # the Opik backend on the node host
+    assert "172.25.0.250/32" in worker     # post-DNAT container address (CC-225)
+    assert "192.168.8.131/32" in worker    # the model host stays allowed
     # the fresh policy (the remaining docs) stays deny-all: no ipBlocks
     assert "192.168.122.156" not in "".join(docs[1:])
 

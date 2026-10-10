@@ -21,11 +21,23 @@ LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_REPO = os.path.abspath(os.path.join(LAUNCHER_DIR, ".."))
 DEFAULT_MODEL = "qwen3.8-flash-next-iq3_xxs"
 # S4 (SPEC-NETWORK-2026-10-09): the worker's dedicated bridge network. The
-# iptables policy (infra/stanok-net.sh) is installed ON THIS network only —
+# iptables policy (STANOK-NET chain, operator-managed host infrastructure)
+# is installed ON THIS network only —
 # on `bridge`/`host` it would filter the whole docker traffic. Read at call
 # time via STANOK_DOCKER_NETWORK (sandbox.py, gates.py) — a runtime knob,
 # not a Config field (the argv builders do not take cfg).
 DEFAULT_DOCKER_NETWORK = "stanok-net"
+# 2.4 (SPEC-STANOK-K8S-RUNTIME, operator 2026-10-10): the addresses the
+# NetworkPolicy manifest renders — k8s/networkpolicy.yaml.tmpl carries only
+# {{...}} placeholders, the addresses live here. Runtime knobs, not Config
+# fields (netpol.py reads them at call time via STANOK_OPIK_HOST_IP /
+# STANOK_OPIK_BACKEND_IP; MODEL_IP is derived from STANOK_SERVER_URL).
+# The defaults are the contract: the Opik backend's published host address,
+# and its container address pinned in the compose override — CC-225: the
+# netpol controller sees the POST-DNAT destination, so the /32 rule is the
+# container address, not the published one.
+DEFAULT_OPIK_HOST_IP = "192.168.122.156"
+DEFAULT_OPIK_BACKEND_IP = "172.25.0.250"
 
 @dataclass(frozen=True)
 class Config:

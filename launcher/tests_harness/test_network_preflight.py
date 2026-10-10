@@ -2,7 +2,7 @@
 
 Policy under test (E2): model reachable from the worker container, external
 network blocked, host services closed. Enforcement: the worker runs on the
-`stanok-net` bridge (iptables STANOK-NET chain, infra/stanok-net.sh) and the
+`stanok-net` bridge (iptables STANOK-NET chain, operator-managed) and the
 host probes the policy BEFORE the worker starts (rc=16 refusal, rc=20 only
 when the server is down for the host too).
 

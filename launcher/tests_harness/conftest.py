@@ -89,8 +89,9 @@ def write(path, body):
 # S4 (SPEC-NETWORK): the worker container runs on the stanok-net bridge;
 # sandbox.sandbox_argv carries --network=<that network>. The live-docker
 # suites (mounts/tmpfs/lifecycle) launch real containers through it, so the
-# network must exist. In production it is host infrastructure created by
-# infra/stanok-net.sh (the operator's unit); the missing-network refusal is
+# network must exist. In production it is host infrastructure created by the
+# operator (the infra installer scripts were removed 2026-10-10); the
+# missing-network refusal is
 # covered by test_network_preflight.py. The harness self-provisions the
 # bridge here — idempotent, same name/subnet as the infra script — so the
 # live suites run on any docker host. No-Docker variant: docker absent →

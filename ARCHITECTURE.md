@@ -36,9 +36,9 @@ The image preflight is NOT on this path (doctor-only, CC-106).
 - Network policy (S4, SPEC-NETWORK-2026-10-09): the worker runs on the
   dedicated bridge `stanok-net` (172.28.0.0/16, `config.DEFAULT_DOCKER_NETWORK`,
   env override `STANOK_DOCKER_NETWORK`), NOT on `host`. The iptables chain
-  STANOK-NET (jumps at DOCKER-USER 1 + INPUT 1, installed by
-  `infra/stanok-net.sh` + `stanok-net.service` — supervisor prepares, operator
-  installs) allows ONLY the model server (`STANOK_SERVER_URL`): external
+  STANOK-NET (jumps at DOCKER-USER 1 + INPUT 1; the installer scripts
+  `infra/stanok-net.{sh,service}` were removed 2026-10-10 — the chain is
+  operator-managed) allows ONLY the model server (`STANOK_SERVER_URL`): external
   internet and host services are closed (E2 policy). Enforcement:
   `gates.network_preflight` runs HOST-side in `cli._host_launch` before
   `run_sandboxed` (covers sync and the --follow child; NOT in `_launch_gates`
