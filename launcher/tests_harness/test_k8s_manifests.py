@@ -21,6 +21,9 @@ checks (no YAML parser in the image — the checks are text invariants):
      (the limit counts writable layer + emptyDir + logs together)
   3  fresh-job.yaml.tmpl: verifier only (run.sh list + test --all), the
      patch applied, NO model address (deny-all Pod), the same disk bound
+  4  CC-229 (SPEC-READONLY-ROOT-2026-10-10): readOnlyRootFilesystem: true
+     in BOTH job templates (all Pod writes already target the /stanok-work
+     emptyDir — HOME/TMPDIR re-redirected by pod_runner.py)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -141,6 +144,18 @@ def test_networkpolicy_template_carries_revision_placeholder():
     # both policies are versioned
     assert "stanok-worker-egress-{{REVISION}}" in y
     assert "stanok-fresh-deny-all-{{REVISION}}" in y
+
+
+# --- CC-229 (SPEC-READONLY-ROOT-2026-10-10): read-only root FS ----------
+
+def test_worker_job_read_only_root():
+    y = _read("worker-job.yaml.tmpl")
+    assert "readOnlyRootFilesystem: true" in y
+
+
+def test_fresh_job_read_only_root():
+    y = _read("fresh-job.yaml.tmpl")
+    assert "readOnlyRootFilesystem: true" in y
 
 
 def test_rendered_names_are_versioned(monkeypatch):

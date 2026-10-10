@@ -49,6 +49,9 @@ spec:
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true  # CC-229 (SPEC-READONLY-ROOT): the fresh
+            # verifier unpacks the tree, applies the patch and runs tests ONLY in
+            # the /stanok-work emptyDir.
             capabilities:
               drop:
                 - ALL
