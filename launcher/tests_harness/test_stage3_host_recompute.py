@@ -6,7 +6,7 @@ the host recomputes the protected-files manifest and compares it with the
 snapshot. Any violation (a pre-existing protected file DELETED or MODIFIED)
 forces `probe_result = CONTRACT-FAIL` and the final FAIL, regardless of what
 the worker's summary.json claims — the verdict is issued by the host, not by
-the defendant (GAP test #9 in test_contract_fail_probe.py).
+the defendant (the forged-summary scenario in test_scenarios_verdict.py).
 
 The comparison is the same logic as `_check_contract_lock` (extracted to
 `_compare_manifests`, the one source), but without the job/turn context:

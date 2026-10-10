@@ -18,6 +18,7 @@ import sys
 import urllib.request
 import tomllib
 from launcher import sandbox
+from launcher.config import DEFAULT_DOCKER_NETWORK
 from launcher.logs import log
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -99,10 +100,11 @@ def hidden_files_gate(cfg) -> bool:
 
 
 def zone_symlinks(cfg) -> list[str]:
-    """All symlinks under the writable zones — the ONE scanner shared by the
-    launch gate (zone_symlink_gate) and the post-turn check
-    (verify._check_zone_symlinks). The rule (cc217 review follow-up, operator
+    """All symlinks under the writable zones — the ONE scanner behind the
+    launch gate (zone_symlink_gate). The rule (cc217 review follow-up, operator
     decision 2026-10-09): in src/tests/docs/scripts symlinks do not exist.
+    S3 (PLAN-SIMPLIFY-2026-10-09): the post-turn scan was removed — the
+    launch ban is the only enforcement point.
 
     lstat semantics: os.walk with followlinks=False (a symlinked directory is
     LISTED, never descended into) and os.path.islink on every entry — file
@@ -138,8 +140,10 @@ def zone_symlink_gate(cfg) -> list[str]:
     (`src/link -> launcher/` — proven by test_docker_bind_resolves_symlink_source).
     The ban covers UNDECLARED links (the declared-path rule inspects only
     declared paths) and links under tests/ (host_ro_paths would bind them
-    :ro verbatim and Docker would resolve them to their targets). The
-    post-run counterpart is verify._check_zone_symlinks (CONTRACT-FAIL).
+    :ro verbatim and Docker would resolve them to their targets). S3
+    (PLAN-SIMPLIFY-2026-10-09): this launch gate is the ONLY enforcement
+    point — the post-turn scan was removed; a mid-run new file under tests/
+    or src/ is caught by the structural rules (T3-9/T3-10).
 
     Returns the problem list (empty = OK); each problem names the path, its
     target and the fix — an accidental operator-side symlink must come with
@@ -382,6 +386,135 @@ def preflight_server(cfg) -> bool:
         return False
     log(f"PREFLIGHT: server n_ctx={n_ctx} >= required window {required} — OK")
     return True
+
+
+# ==================================================================================
+# S4 network preflight (SPEC-NETWORK-2026-10-09) — HOST-side, before the worker
+# starts. The policy (E2): model reachable from the worker container, external
+# network blocked, host services closed; enforced by the STANOK-NET iptables
+# chain on the stanok-net bridge (infra/stanok-net.sh). A refusal here is
+# rc=16 ENV-FAIL (policy not installed) — rc=20 only when the model server is
+# unreachable for the HOST too (server down, not a policy defect).
+# ==================================================================================
+
+NET_PROBE_SCRIPT = '''\
+import json
+import socket
+import sys
+import urllib.request
+
+out = {"model": False, "external": False, "host": False}
+
+def _http_ok(url, timeout):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(urllib.request.Request(url), timeout=timeout) as resp:
+        resp.read(1)
+
+def _tcp_ok(host, port, timeout):
+    s = socket.create_connection((host, port), timeout=timeout)
+    s.close()
+
+try:
+    _http_ok(sys.argv[1].rstrip("/") + "/props", 5)
+    out["model"] = True
+except Exception:
+    pass
+try:
+    _tcp_ok("1.1.1.1", 80, 3)
+    out["external"] = True
+except Exception:
+    pass
+try:
+    gw = None
+    with open("/proc/net/route") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 3 and parts[1] == "00000000":
+                gw = socket.inet_ntoa(bytes.fromhex(parts[2])[::-1])
+                break
+    if gw:
+        _tcp_ok(gw, 22, 3)
+        out["host"] = True
+except Exception:
+    pass
+print(json.dumps(out))
+'''
+
+
+def _net_name() -> str:
+    return os.environ.get("STANOK_DOCKER_NETWORK", DEFAULT_DOCKER_NETWORK)
+
+
+def _network_exists(net: str) -> bool:
+    try:
+        sp = subprocess.run(["docker", "network", "inspect", net],
+                           capture_output=True, text=True, timeout=15)
+        return sp.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _run_net_probe(cfg) -> dict | None:
+    """Run the probe container (sandbox.probe_argv, script via stdin);
+    return the parsed JSON or None on ANY failure (start, timeout, output)."""
+    _name, argv = sandbox.probe_argv(cfg.repo_root, cfg.docker_image,
+                                     cfg.server_url)
+    try:
+        sp = subprocess.run(argv, input=NET_PROBE_SCRIPT,
+                           capture_output=True, text=True, timeout=30)
+        if sp.returncode != 0:
+            log(f"NET PROBE: container rc={sp.returncode}: "
+                f"{sp.stderr.strip()[:200]}")
+            return None
+        return json.loads(sp.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as e:
+        log(f"NET PROBE: failed to run/parse: {type(e).__name__}: {e}")
+        return None
+
+
+def classify_net_probe(probe: dict | None, host_server_ok: bool) -> tuple | None:
+    """Pure classification (SPEC-NETWORK R4). None = policy verified OK.
+    Returns (rc, message): 16 ENV-FAIL (policy missing/leaking), 20 SERVER
+    (the model is down for the host too — not a policy defect)."""
+    if probe is None:
+        return (16, "network probe failed to run or printed no JSON")
+    if probe.get("external"):
+        return (16, "policy leak: the container reached 1.1.1.1:80 "
+                    "(external network is not blocked)")
+    if probe.get("host"):
+        return (16, "policy leak: the container reached the host gateway:22 "
+                    "(host services are not closed)")
+    if not probe.get("model"):
+        if host_server_ok:
+            return (16, "model server reachable from the HOST but blocked for "
+                        "the container — STANOK-NET chain missing or wrong")
+        return (20, "model server unreachable from the container AND from the "
+                    "host (server down, not a policy defect)")
+    return None
+
+
+def network_preflight(cfg) -> tuple | None:
+    """Host-side gate, called from cli._host_launch before the worker starts
+    (NOT from _launch_gates — those re-run inside the container, where the
+    docker CLI is absent). Returns None to proceed, (rc, msg) to refuse."""
+    if os.environ.get("STANOK_SKIP_NET_PREFLIGHT") == "1":
+        log("NET PREFLIGHT: skipped (STANOK_SKIP_NET_PREFLIGHT=1)")
+        return None
+    net = _net_name()
+    if not _network_exists(net):
+        return (16, f"docker network {net!r} missing — install the network "
+                    f"unit (infra/stanok-net.service) or set "
+                    f"STANOK_SKIP_NET_PREFLIGHT=1")
+    probe = _run_net_probe(cfg)
+    host_server_ok = False
+    if probe is not None and not probe.get("model"):
+        # Distinguish "policy blocks the model" from "the server is down":
+        # the host tries the same URL itself.
+        host_server_ok = _fetch_server_props(cfg) is not None
+    verdict = classify_net_probe(probe, host_server_ok)
+    if verdict is None:
+        log("NET PREFLIGHT: model reachable, external+host closed — OK")
+    return verdict
 
 
 def _stack_preflights(cfg) -> list[str]:

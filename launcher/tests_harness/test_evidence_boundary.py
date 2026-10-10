@@ -123,7 +123,6 @@ def test_container_cannot_write_evidence(tmp_path):
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     finally:
-        sandbox.docker_stop(name)
-        sandbox.docker_rm_force(name)  # T3-4: no --rm — the host removes it
+        sandbox.docker_stop(name)  # hang-safety net; --rm removes the container
     assert "SRC-OK" in proc.stdout, proc
     assert "EVIDENCE-DENIED" in proc.stdout, proc

@@ -27,10 +27,28 @@ label guard (rc=15) -> role-leak (rc=24) -> ticket resolution (rc=13)
 -> dirty-tree gate (rc=22) -> [--follow: detached self-run | sync]
 -> ticket header + declared-path validation (rc=13)
 -> server /props preflight (rc=20)
+-> network preflight (rc=16; rc=20 only when the server is down for the host too)
 -> run_sandboxed -> sandbox.sandbox_argv -> docker run
 ```
 
 The image preflight is NOT on this path (doctor-only, CC-106).
+
+- Network policy (S4, SPEC-NETWORK-2026-10-09): the worker runs on the
+  dedicated bridge `stanok-net` (172.28.0.0/16, `config.DEFAULT_DOCKER_NETWORK`,
+  env override `STANOK_DOCKER_NETWORK`), NOT on `host`. The iptables chain
+  STANOK-NET (jumps at DOCKER-USER 1 + INPUT 1, installed by
+  `infra/stanok-net.sh` + `stanok-net.service` — supervisor prepares, operator
+  installs) allows ONLY the model server (`STANOK_SERVER_URL`): external
+  internet and host services are closed (E2 policy). Enforcement:
+  `gates.network_preflight` runs HOST-side in `cli._host_launch` before
+  `run_sandboxed` (covers sync and the --follow child; NOT in `_launch_gates`
+  — those re-run inside the container, where the docker CLI is absent): a
+  probe container (`sandbox.probe_argv`, same image, script via stdin) reports
+  `{model, external, host}`; a missing network or a policy leak is rc=16,
+  the model down for the host too is rc=20. The fresh-check container stays
+  `--network=none`. In-container `summary.opik_traces` is the literal
+  "disabled" (`opik.opik_traces_field`) — the bridge closes the host Opik by
+  design. Tests: `launcher/tests_harness/test_network_preflight.py`.
 
 - Zone rule (cc217-impl incident + review, 2026-10-09): `ticket.declared_carveout`
   requires (a) NO component of a declared path (impl/test/docs/edit) to be a
@@ -50,8 +68,10 @@ The image preflight is NOT on this path (doctor-only, CC-106).
   `launcher/tests_harness/test_ticket_zone.py`.
 
 - Zone-symlink ban (cc217 review follow-up, operator decision 2026-10-09):
-  in the writable zones (src/tests/docs/scripts) symlinks do not exist. Two
-  enforcement points, ONE scanner (`gates.zone_symlinks`):
+  in the writable zones (src/tests/docs/scripts) symlinks do not exist. ONE
+  enforcement point, ONE scanner (`gates.zone_symlinks`) — S3
+  (PLAN-SIMPLIFY-2026-10-09) removed the post-turn scan, the launch ban
+  remains:
   1. LAUNCH — `gates.zone_symlink_gate` in `cli._launch_gates` after the
      hidden-files gate: any symlink in a zone — file, directory, dangling, or
      the zone directory itself — refuses the launch (rc=13) with the path list
@@ -66,15 +86,13 @@ The image preflight is NOT on this path (doctor-only, CC-106).
      across the zone boundary is EXDEV (proven by
      `test_docker_hardlink_across_mounts_fails`); a link inside one zone
      stays inside it.
-  2. POST-TURN — `verify._check_zone_symlinks` from
-     `session._post_turn_decision` (after `_check_contract_lock`, and the
-     forced FAIL runs BEFORE `verify_gate` — the suite never executes on a
-     tree already declared tampered): a symlink CREATED in a zone during the
-     run is a contract_lock violation -> the existing forced-FAIL path
-     (CONTRACT-FAIL, no retry). Compared against
-     the session-start snapshot, NOT the ticket — a ticket never declares
-     arbitrary links. Tests: `launcher/tests_harness/test_zone_symlink_ban.py`
-     (the two former GAP tests in test_ticket_zone.py are green with the ban).
+  A mid-run created symlink is no longer scanned post-turn (S3): a new FILE
+  under tests/ or src/ (symlinked files included — os.walk lists them) is
+  caught by the structural rules (T3-9/T3-10, worker + host echelons);
+  directory links and links under docs//scripts/ are not — accepted gap, the
+  launch ban covers the session-start state. Tests:
+  `launcher/tests_harness/test_zone_symlink_ban.py` (the two former GAP
+  tests in test_ticket_zone.py are green with the ban).
 
 CONTAINER (the same `cli.main` re-runs inside the image):
 
@@ -82,7 +100,6 @@ CONTAINER (the same `cli.main` re-runs inside the image):
 gates re-run + lock (rc=21) -> session.run_continuous_session:
   per turn: session._execute_turn (the agent via the SDK)
   -> verify._check_contract_lock (SHA256 manifest diff)
-  -> verify._check_zone_symlinks (new zone symlink -> contract_lock)
   -> verify.verify_gate: scripts/run.sh test --all
   -> on FAIL: a retry turn with the failure block (--local-retries)
 ```
@@ -98,22 +115,21 @@ gates re-run + lock (rc=21) -> session.run_continuous_session:
 VERDICT (Stage 3, SPEC-VERDICT-INTEGRITY-2026-10-08):
 
 ```
-CONTAINER: summary.write_summary -> summary.json on the container's WRITABLE
-LAYER (CONTAINER_SUMMARY_ROOT=/var/tmp/stanok-evidence/<label> — survives
-`docker stop`, dies with `docker rm`; NOT tmpfs, NOT a mount; the worker no
-longer writes the shared LOG_DIR, so the verdict file is not a file the
-worker can rewrite after the run; commit_sha is captured on the HOST by
-cli._capture_start_commit before any launch and passed via the
+CONTAINER: summary.write_summary -> summary.json into the rw LOG_DIR/<label>
+mount (S1, 2026-10-09: rollback of T3-4 — the worker writes where
+cfg.label_paths already routes every other writer; commit_sha is captured on
+the HOST by cli._capture_start_commit before any launch and passed via the
 STANOK_START_COMMIT env — the container never runs git, plan 2026-10-08)
 
 HOST (cli.run_sandboxed, one finally): reap_stopped -> verify.contract_snapshot
-(pre-run, host process MEMORY only) -> docker run (NO --rm) -> wait
-(container_rc = ground truth) -> stop -> docker cp (worker summary ->
-LOG_DIR/<label>, the publish source) -> docker rm -f ->
+(pre-run, host process MEMORY only) -> docker run (--rm) -> wait
+(container_rc = ground truth) -> stop (abnormal-path trap) -> summary-presence
+check (no summary = aborted run: nothing published, status `missing`) ->
 verify.host_contract_check (recompute vs the snapshot) -> verify.fresh_verify
-(fresh container, T3-3; runs ONLY when the summary was retrieved AND the
+(fresh container, T3-3; runs ONLY when the summary exists AND the
 contract is intact — spec §1.6) -> summary._publish_evidence (the HOST issues
-the final verdict, Authority below) -> marker removal
+the final verdict, Authority below; publishes nothing when the files are
+absent) -> marker removal
 
 -> evidence/<label>/summary.json is read exactly once by the supervisor
 (CLAUDE.supervisor.md §3)
@@ -121,7 +137,7 @@ the final verdict, Authority below) -> marker removal
 
 `probe_result` values: `CLEAN-FIRST | PASS-AFTER-LOCAL-RETRY | VERIFY-FAIL |
 EARLY-ABORT | NO-OP-PASS | ENV-FAIL | LOOP-TRAP | CONTRACT-FAIL |
-FRESH-FAIL | INTEGRITY-FAIL` — derived by `summary.decide` (priority, operator
+FRESH-FAIL` — derived by `summary.decide` (priority, operator
 review 2026-10-09: non-empty `contract_lock_violations` wins over every
 behavioral override — verdict integrity beats model behavior, and probe_result
 is one key so the rule must be explicit, not write-order luck; then the
@@ -130,11 +146,11 @@ in-container (first echelon, an override like NO-OP-PASS/LOOP-TRAP — without
 it a contract violation reads as VERIFY-FAIL) and by the HOST recompute
 (Authority below); FRESH-FAIL and the host CONTRACT-FAIL/ENV-FAIL are issued
 only by `_publish_evidence` — never by the container; pinned by
-`launcher/tests_harness/test_verdict_table.py` (the table, unchanged) and
-`test_contract_fail_probe.py` (the override, the violations-beat-overrides
-rule in both write orders, and the host exemption: `_publish_evidence`
-records an I5 violation but never downgrades CONTRACT-FAIL to INTEGRITY-FAIL
-— spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL).
+`launcher/tests_harness/test_scenarios_verdict.py` (the verdict scenarios —
+S6, PLAN-SIMPLIFY-2026-10-09: the publish priority CONTRACT-FAIL >
+FRESH-FAIL > the worker's claims is pinned end-to-end there; the former
+unit bearers `test_contract_fail_probe.py` and `test_verdict_fresh.py`
+were removed in S6).
 
 **Authority of the verdict (Stage 3, SPEC-VERDICT-INTEGRITY-2026-10-08;
 closes the trust boundary opened by `b7ae392`).** The final
@@ -188,19 +204,34 @@ independent host checks, both against state the worker cannot rewrite:
    the host-backstop TIMEOUT flows as FRESH-FAIL (run.sh self-limits per
    file, so a host overrun is a pathological tree, not an infra refusal).
 
-Priority at publish (spec §3): **CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL
-> worker override**. The worker's claims are diagnostic-only: preserved in
-`worker_rc`/`worker_verifier`, written ONLY when the host overrides the
-verdict (the clean path stays byte-identical); the I5 detector compares
-`worker_rc` with the container exit, never the host's own final write. A
-failed `docker cp` or an unavailable fresh check writes an ENV-FAIL summary
+Priority at publish (spec §3, S2-simplified per PLAN-SIMPLIFY-2026-10-09):
+**CONTRACT-FAIL > FRESH-FAIL > the worker's claims**. The host's authority
+is its two independent checks only; the worker's summary passes through
+untouched when neither fires (the clean path stays byte-identical).
+Sanctioned gap: a pure forgery (claims PASS while the container exited
+non-zero) over a clean contract with a green fresh check is no longer
+caught — the verdict is a statement about the TREE (suite green + tree =
+declared), not about the worker's self-report. An unavailable fresh check writes an ENV-FAIL summary
 (`write_env_fail_summary`, rc=16) directly into evidence/ — the verdict
-cannot be PASS without the artifacts it is built from. Pinned by
+cannot be PASS without the artifacts it is built from. No summary at all
+(worker died before writing) publishes nothing: `status` reports `missing`
+(S1). Pinned by
 `test_stage3_host_snapshot.py`, `test_stage3_worker_lifecycle.py`,
-`test_stage3_fresh_verify.py`, `test_stage3_fresh_wiring.py`,
-`test_verdict_fresh.py` and `test_contract_fail_probe.py` test 9 (the former
-GAP test, flipped green in T3-7: a forged clean summary over a tampered tree
-is rejected as CONTRACT-FAIL).
+`test_stage3_fresh_verify.py` and `test_scenarios_verdict.py` (the forged
+clean summary over a tampered tree -> CONTRACT-FAIL; a green fresh check
+never fabricates a PASS — S6 removed the former unit bearers
+`test_stage3_fresh_wiring.py`, `test_verdict_fresh.py` and
+`test_contract_fail_probe.py`).
+
+**What PASS means (the boundary of the verdict, operator 2026-10-09).** The verdict is a
+statement about the TREE, not about the correctness of the code: `verifier=PASS` means the
+reference test suite is green on the final tree (`run.sh test --all` in the fresh container)
+and the tree matches the ticket's declared contract. It does NOT mean the implementation is
+correct — the model may hardcode expected values or fit the implementation to the tests.
+Closing that gap is the ticket's acceptance criteria (a human concern), not a mechanism the
+launcher can provide. The end-to-end scenario tests (`test_scenarios_verdict.py`) assert only
+the observable verdict (rc / verifier / probe_result / contract_lock_violations) and never
+promise code correctness.
 
 ## Module map — the owner of each contract
 
@@ -212,13 +243,13 @@ is rejected as CONTRACT-FAIL).
 | `launcher/plan.py` | `SessionPlan` (the file-policy object, the single source — I1) |
 | `launcher/logs.py` | logging (`log()`; the per-run sink `_stdout_log_f` assigned by `cli.cmd_run`) |
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
-| `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight |
+| `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight, network preflight (S4: probe classification, host-only) |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
-| `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker lifecycle (no `--rm`, stop/cp/rm, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
+| `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker network (`--network=stanok-net`, S4) + `probe_argv` (the policy probe container); worker lifecycle (`--rm`, the stop trap, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
 | `launcher/session.py` | the one Claude session: turns, TDD hook, retry prompt, loop-guard |
 | `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts); host trust boundary: `contract_snapshot`/`host_contract_check` (T3-1/T3-2) + structural tests/+src/ rule (T3-9/T3-10), `fresh_verify` (T3-3) |
 | `launcher/summary.py` | the summary.json schema (`decide`/`_status_fields`), host-issued verdict priority + `write_env_fail_summary` (T3-5/T3-6), evidence publishing, rotation |
-| `launcher/opik.py` | trace-count check (telemetry only) |
+| `launcher/opik.py` | trace-count check (telemetry only); `opik_traces_field` — "disabled" in-container (S4, the bridge closes host Opik) |
 | `scripts/run.sh` + `scripts/stacks/*.toml` | the run.sh contract + the stack registry (single source) |
 | `CLAUDE.md` | the machine role (auto-loaded in the machine session) |
 | `../CLAUDE.supervisor.md` | the supervisor protocol: verdict reading, stop conditions |
@@ -282,7 +313,7 @@ COPY).
   `test_docker_image_digest_matches` fails until the image is rebuilt
   (CC-106: a stale image is a doctor failure, never a mid-run ENV-FAIL).
 - A new summary.json outcome -> `summary.py decide`/`_status_fields`;
-  `test_verdict_table.py` must pass unchanged.
+  `test_scenarios_verdict.py` must pass unchanged.
 - Agent behavior / retry semantics -> `session.py`.
 - Mount or boundary rule -> `sandbox.py` + `ticket.py` path validation
   (the same rule derives both — CC-135).

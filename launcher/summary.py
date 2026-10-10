@@ -1,10 +1,12 @@
 """summary — the verdict artifacts: summary.json, evidence publishing, rotation.
 
-build_summary/write_summary (the typed contract, T3-4 summary routing),
-write_env_fail_summary (T3-4/T3-6: docker cp failure or fresh-check infra
-failure -> ENV-FAIL),
-_publish_evidence (CC-134, I5 integrity check; T3-5 host-issued verdict
-priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL), _rotate_stale_summary,
+build_summary/write_summary (the typed contract, S1 summary routing:
+container -> rw LOG_DIR/<label>),
+write_env_fail_summary (T3-6: fresh-check infra failure -> ENV-FAIL),
+_publish_evidence (CC-134; T3-5 host-issued verdict priority
+CONTRACT-FAIL > FRESH-FAIL > the worker's claims — S2, PLAN-SIMPLIFY-2026-10-09:
+the I5 rc cross-check, the worker_* fields and INTEGRITY-FAIL are removed),
+_rotate_stale_summary,
 the status-field table. Static
 config arrives as the passed-in Config; the per-run evidence dir as the
 passed-in RunState (C).
@@ -27,42 +29,28 @@ def _publish_evidence(cfg, label: str, container_rc: int,
     rw view of evidence/, so the host is the only publisher. Missing files are
     skipped: an aborted launch publishes nothing rather than a fake verdict.
 
-    I5 fail-closed integrity check (REVIEW-ISOLATION-2026-09-28 §6.2): the
-    host's container_rc (docker exit code = the container-side launcher's
-    exit code = the real run rc) is ground truth. A summary.json that claims
-    PASS after a non-zero container exit, or whose rc field disagrees with
-    the container exit, is a forged verdict from the PASS->publish TOCTOU
-    window — force FAIL and record the violation.
-
-    NO-OP exemption: a NO-OP run (probe_result == "NO-OP-PASS") intentionally
-    returns rc=1 with verifier=PASS (the machine did no work; the artifacts
-    pre-existed and the verifier really passed). That rc=1+PASS combination is
-    legitimate, not a forgery, so the "claims PASS" check is skipped for it;
-    the rc-field consistency check still applies.
-
-    CONTRACT-FAIL exemption: a contract violation outranks the integrity
-    label (spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL) — the
-    violation is recorded and the rc fixed, but probe_result stays
-    CONTRACT-FAIL.
+    S2 (PLAN-SIMPLIFY-2026-10-09): the I5 rc cross-check, the worker_*
+    fields and the INTEGRITY-FAIL value are REMOVED. The host's authority is
+    its two independent checks only — the contract recompute and the fresh
+    check; the worker's summary passes through untouched when neither fires.
+    The verdict is a statement about the TREE (suite green + tree = declared),
+    not about the worker's self-report: a pure forgery (claims PASS while the
+    container exited non-zero) over a clean contract with a green fresh check
+    is no longer caught — sanctioned gap.
 
     Stage 3 (T3-2) `contract_violations`: the host's own recompute of the
     protected-files manifest (verify.host_contract_check against the pre-run
     snapshot). Non-empty means the tree the verdict was computed against was
     tampered with — the host forces verifier=FAIL + probe_result=CONTRACT-FAIL
     regardless of what the worker summary claims (the judge is not the
-    defendant). This outranks the I5 check: the I5 block is skipped.
+    defendant).
 
     Stage 3 (T3-5): the final verifier/rc/probe_result are issued by the HOST
-    with the spec priority CONTRACT-FAIL > FRESH-FAIL > INTEGRITY-FAIL >
-    worker override. `fresh_check=(rc, tail)` is verify.fresh_verify's result
-    (the host's independent re-run in a fresh container, T3-3); a non-zero
-    fresh rc forces verifier=FAIL + probe_result=FRESH-FAIL + rc=fresh rc,
-    the tail appended to errors. fresh_check=None = not run (T3-5 does not
-    wire it into run_sandboxed yet — T3-6 does). The worker's claims are
-    preserved in worker_rc/worker_verifier — written ONLY when the host
-    overrides the verdict (the clean path stays byte-identical). The I5
-    detector compares worker_rc with the container exit, NOT the final rc:
-    the host's own final write is never taken for a forgery."""
+    with the priority CONTRACT-FAIL > FRESH-FAIL > the worker's claims.
+    `fresh_check=(rc, tail)` is verify.fresh_verify's result (the host's
+    independent re-run in a fresh container, T3-3); a non-zero fresh rc forces
+    verifier=FAIL + probe_result=FRESH-FAIL + rc=fresh rc, the tail appended
+    to errors. fresh_check=None = not run."""
     src = os.path.join(cfg.log_dir, label)
     files = ("summary.json", "launcher.stdout.log")
     if not any(os.path.isfile(os.path.join(src, f)) for f in files):
@@ -83,26 +71,18 @@ def _publish_evidence(cfg, label: str, container_rc: int,
         return
     if not isinstance(summary, dict):
         return
-    # Stage 3 (T3-5): the worker's claims are captured BEFORE any host write.
-    # The I5 detector compares worker_rc with the container exit — never the
-    # host's own final write: the host's rc=container_rc is not a forgery.
-    worker_rc = summary.get("rc")
-    worker_verifier = summary.get("verifier")
     if contract_violations:
         # Stage 3 (T3-2): the host's recompute outranks the worker's verdict
-        # (spec priority CONTRACT-FAIL > everything): the tree was tampered
-        # with after the pre-run snapshot — the verdict was computed against
-        # modified protected files. Force the FAIL; the I5 block below cannot
-        # add signal the host already has.
+        # (priority CONTRACT-FAIL > everything): the tree was tampered with
+        # after the pre-run snapshot — the verdict was computed against
+        # modified protected files. Force the FAIL.
         summary["verifier"] = "FAIL"
         # T3-9: a host-issued FAIL cannot carry a success rc — the rc
         # contract (exitcodes.py: 1 = contract violation) requires 1 when
         # the container claimed success; the container's non-zero exit
-        # stays ground truth. The worker's claim is preserved in worker_rc.
+        # stays ground truth.
         summary["rc"] = container_rc or int(ExitCode.DEFECT)
         summary["probe_result"] = "CONTRACT-FAIL"
-        summary["worker_rc"] = worker_rc
-        summary["worker_verifier"] = worker_verifier
         summary.setdefault("contract_lock_violations", []).extend(
             contract_violations)
         summary["error"] = (
@@ -116,15 +96,13 @@ def _publish_evidence(cfg, label: str, container_rc: int,
     if fresh_check is not None and fresh_check[0] != 0:
         # Stage 3 (T3-5): the host's independent fresh check (T3-3) failed —
         # the suite does not pass on the tree as the HOST sees it, whatever
-        # the worker's summary claims. Spec priority: FRESH-FAIL outranks the
-        # I5 check and the worker override. The final rc is the fresh
-        # check's own exit code — the host's measurement, not the worker's.
+        # the worker's summary claims. Priority: FRESH-FAIL outranks the
+        # worker's claims. The final rc is the fresh check's own exit code —
+        # the host's measurement, not the worker's.
         fresh_rc, tail = fresh_check
         summary["verifier"] = "FAIL"
         summary["rc"] = fresh_rc
         summary["probe_result"] = "FRESH-FAIL"
-        summary["worker_rc"] = worker_rc
-        summary["worker_verifier"] = worker_verifier
         summary.setdefault("errors", []).append(
             f"HOST FRESH-CHECK: the suite failed in a fresh container the "
             f"worker never touched (rc={fresh_rc}): {tail}")
@@ -132,38 +110,6 @@ def _publish_evidence(cfg, label: str, container_rc: int,
             json.dump(summary, f, indent=2)
         log(f"FRESH-CHECK: {label}: fresh verify rc={fresh_rc} — "
             "verdict FRESH-FAIL")
-        return
-    violations = []
-    # A NO-OP run intentionally returns rc=1 with verifier=PASS (the machine
-    # did no work; the artifacts pre-existed and the verifier really passed).
-    # The "claims PASS" check must not fire on that intentional combination —
-    # only the rc-field consistency check below still applies.
-    is_noop = summary.get("probe_result") == "NO-OP-PASS"
-    if not is_noop and container_rc != 0 and worker_verifier == "PASS":
-        violations.append(
-            f"container exited rc={container_rc} but summary claims PASS")
-    if worker_rc != container_rc:
-        violations.append(
-            f"summary rc={worker_rc!r} != container rc={container_rc}")
-    if violations:
-        # A forged verdict must not leave any PASS-shaped field behind:
-        # override the whole verdict, not just the verifier flag.
-        # CONTRACT-FAIL exemption (operator review 2026-10-09): the spec
-        # priority is CONTRACT-FAIL > INTEGRITY-FAIL — a contract violation
-        # is the defect class the supervisor must see. The violation is still
-        # recorded and the container rc stays ground truth, but the verdict
-        # CLASS is not downgraded.
-        summary["verifier"] = "FAIL"
-        summary["rc"] = container_rc
-        summary["worker_rc"] = worker_rc
-        summary["worker_verifier"] = worker_verifier
-        if summary.get("probe_result") != "CONTRACT-FAIL":
-            summary["probe_result"] = "INTEGRITY-FAIL"
-        summary["integrity_violation"] = "; ".join(violations)
-        with open(sum_dst, "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2)
-        log(f"INTEGRITY: {label}: forged verdict rejected: "
-            + "; ".join(violations))
 
 
 def _rotate_stale_summary(cfg, label: str) -> None:
@@ -208,10 +154,9 @@ def decide(job: dict) -> str:
     (the tree was tampered with), LOOP-TRAP/NO-OP-PASS only the model's
     behavior; probe_result is ONE key, so without this rule the later write
     would win by accident. Then the session/host override (NO-OP-PASS,
-    LOOP-TRAP, CONTRACT-FAIL); otherwise the derived table. INTEGRITY-FAIL is
-    NOT here — the host sets it after build_summary, in _publish_evidence.
-    test_verdict_table.py pins this priority: any change here must pass it
-    UNCHANGED (its jobs carry no violations)."""
+    LOOP-TRAP, CONTRACT-FAIL); otherwise the derived table.
+    test_scenarios_verdict.py pins this priority end-to-end (S6): any
+    change here must pass it UNCHANGED."""
     if job.get("contract_lock_violations"):
         return "CONTRACT-FAIL"
     override = job.get("probe_result")
@@ -274,10 +219,10 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
 def write_summary(cfg, job: dict, elapsed_s: int) -> None:
     """Writes the exact summary.json contract expected by the L1 Supervisor.
 
-    Stage 3 (T3-4): the path is cfg.summary_dir(label) — inside the container
-    the writable-layer path the host retrieves with `docker cp` after the
-    container exits; on the host (no-sandbox) the evidence dir. The summary
-    is no longer a file shared through a mount the worker can rewrite."""
+    S1 (rollback of T3-4): the path is cfg.summary_dir(label) — inside the
+    container the rw LOG_DIR/<label> mount (the host publishes it into
+    evidence/<label> after the container exits); on the host (no-sandbox) the
+    evidence dir."""
     d = cfg.summary_dir(job["label"])
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, "summary.json"), "w", encoding="utf-8") as f:
@@ -285,11 +230,10 @@ def write_summary(cfg, job: dict, elapsed_s: int) -> None:
 
 
 def write_env_fail_summary(cfg, label: str, error: str) -> None:
-    """Stage 3 (T3-4, generalized by T3-6): a host-side infrastructure
-    failure — `docker cp` could not retrieve the worker's summary, or the
-    fresh check could not run (EXEC_ERROR). The verdict cannot be issued:
-    the host writes an ENV-FAIL summary (rc=16) with the error text directly
-    into the evidence dir — not a verdict, call the human."""
+    """Stage 3 (T3-6): a host-side infrastructure failure — the fresh check
+    could not run (EXEC_ERROR). The verdict cannot be issued: the host writes
+    an ENV-FAIL summary (rc=16) with the error text directly into the
+    evidence dir — not a verdict, call the human."""
     evidence_dir, _ = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
     job = {"label": label, "rc": int(ExitCode.ENV_FAIL), "verifier": "FAIL",

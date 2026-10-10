@@ -1,25 +1,24 @@
-"""Stage 3 T3-4 — worker container lifecycle (SPEC-VERDICT-INTEGRITY §2, T3-4).
+"""Worker container lifecycle (S1 rollback of T3-4, PLAN-SIMPLIFY-2026-10-09).
 
-The worker container runs WITHOUT `--rm`: it must survive its exit so the host
-can retrieve the summary from the container's WRITABLE LAYER (`docker cp`),
-and only then remove it (`docker rm -f`). The worker's summary.json is written
-to a container-internal path (config.CONTAINER_SUMMARY_ROOT — a writable-layer
-dir: not tmpfs, not the mounted LOG_DIR); the session's streaming log and the
-marker stay in LOG_DIR. Host order: wait -> cp -> rm. A failed `docker cp` is
-an ENV-FAIL (rc=16) with the error text: the verdict cannot be PASS.
-Reaper: at the start of a host run, STOPPED containers with the `stanok-`
-prefix (crash leftovers) are removed; running containers are not touched.
-(Deviation from the plan's "at the start of cmd_run": cmd_run executes inside
-the container, where the docker CLI is absent — the reaper lives at the start
-of the host-side run_sandboxed.)
+The worker container runs WITH `--rm`: the worker writes its summary.json
+directly into the rw LOG_DIR/<label> mount (config.summary_dir) — the host
+never retrieves anything from the container layer: no `docker cp`, no
+`docker rm -f`. The host still calls docker_stop in the finally: the trap for
+the abnormal paths (signal/timeout); with `--rm` a normal exit has already
+removed the container, so there the stop is a harmless no-op.
+Reaper: at the start of a host run, STOPPED containers with the
+`stanok-{repo}-` prefix (crash leftovers of runs whose docker CLI died before
+the daemon could remove them) are removed; running containers are not touched.
+A run whose worker never wrote a summary publishes NOTHING: `launch.sh status`
+reports `missing` = an aborted run (supervisor protocol §3.3) — not a verdict.
 
-Tests 1-2: worker argv has no `--rm`; summary routing (container vs host).
-Tests 3-5: mocked host cycle — `docker cp` failure -> rc=16 + summary not
-PASS; reaper removes only stopped prefixed containers; a successful cycle
-calls cp then rm -f and preserves the container rc.
-Test 6: real docker (skipped when docker is absent) — the plan's
-stop-condition check: `docker cp` DOES copy from a STOPPED container,
-CONTAINER_SUMMARY_ROOT is writable under --user, `docker rm -f` removes it.
+Tests 1-2: worker argv has `--rm`; summary routing (container = the LOG_DIR
+mount vs host = the evidence dir).
+Tests 3-5: mocked host cycle — no summary -> nothing published, status
+`missing`; reaper removes only stopped prefixed containers; a successful cycle
+calls stop but never cp/rm and preserves the container rc.
+Test 6: real docker (skipped when docker is absent) — a sandbox_argv container
+is GONE after its exit (`--rm` does the removal, no host-side rm needed).
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_stage3_worker_lifecycle.py -q
 """
@@ -32,19 +31,19 @@ import subprocess
 import pytest
 
 from launcher import cli, sandbox, summary, verify
-from launcher import config as launcher_config
 from launcher.config import Config, RunState
 
 IMAGE = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
 
 
-# --- 1: the worker container is not auto-removed -------------------------------
+# --- 1: the worker container is auto-removed ------------------------------------
 
-def test_worker_argv_has_no_rm(tmp_path):
+def test_worker_argv_has_rm(tmp_path):
     _, argv = sandbox.sandbox_argv(str(tmp_path / "repo"), str(tmp_path / "logs"),
                                    "img", ["python3", "x"])
-    assert "--rm" not in argv
-    # the container is still named: it is the cp/rm target (T3-4)
+    assert "--rm" in argv
+    # the container is still named: the reaper's filter and the stop-trap
+    # in the finally address it by name
     assert "--name" in argv
 
 
@@ -52,9 +51,10 @@ def test_worker_argv_has_no_rm(tmp_path):
 
 def test_summary_dir_routing(tmp_path, monkeypatch):
     cfg = Config(repo_root=str(tmp_path / "repo"), log_dir=str(tmp_path / "logs"))
-    # container: the writable-layer path, NOT the mounted LOG_DIR
+    # container: the rw LOG_DIR mount — the worker's summary lands where the
+    # host's publish source is (S1 rollback: no container-internal path)
     monkeypatch.setenv("STANOK_IN_CONTAINER", "1")
-    assert cfg.summary_dir("lbl") == os.path.join(launcher_config.CONTAINER_SUMMARY_ROOT, "lbl")
+    assert cfg.summary_dir("lbl") == os.path.join(str(tmp_path / "logs"), "lbl")
     # host: the evidence dir (the host is the publisher)
     monkeypatch.delenv("STANOK_IN_CONTAINER")
     assert cfg.summary_dir("lbl") == str(tmp_path / "repo" / "evidence" / "lbl")
@@ -68,23 +68,20 @@ def test_write_summary_follows_routing(tmp_path, monkeypatch):
                          marker_path=str(tmp_path / "ev" / ".running"))
     job = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
            "turns": 1}
-    try:
-        summary.write_summary(cfg, job, 1)
-        s = json.loads(open(os.path.join(launcher_config.CONTAINER_SUMMARY_ROOT, "lbl",
-                                        "summary.json"),
-                            encoding="utf-8").read())
-        assert s["probe_result"] == "CLEAN-FIRST"
-        # the shared LOG_DIR/evidence mount is NOT the summary target anymore
-        assert not os.path.exists(str(tmp_path / "ev" / "summary.json"))
-    finally:
-        shutil.rmtree(launcher_config.CONTAINER_SUMMARY_ROOT, ignore_errors=True)
+    summary.write_summary(cfg, job, 1)
+    s = json.loads((tmp_path / "logs" / "lbl" / "summary.json")
+                   .read_text(encoding="utf-8"))
+    assert s["probe_result"] == "CLEAN-FIRST"
+    # the host-owned evidence/ is NOT the container's summary target
+    assert not os.path.exists(str(tmp_path / "ev" / "summary.json"))
 
 
 # --- 3-5: mocked host cycle -----------------------------------------------------
 
-def _mock_run(tmp_path, monkeypatch, cp_result=(0, ""), container_rc=0):
-    """run_sandboxed with docker mocked. The mock cp, on success, writes a
-    worker-shaped summary to the host path (what a real `docker cp` does).
+def _mock_run(tmp_path, monkeypatch, container_rc=0, write_summary=True):
+    """run_sandboxed with docker mocked. The fake worker writes its summary
+    into LOG_DIR/<label> (the rw mount — what the real container does with
+    `--rm`). write_summary=False simulates a worker that died before writing.
     Returns (repo, cfg, calls, args)."""
     repo = tmp_path / "repo"
     for d in ("src", "tests", "docs", "scripts"):
@@ -104,48 +101,43 @@ def _mock_run(tmp_path, monkeypatch, cp_result=(0, ""), container_rc=0):
 
         def wait(self):
             calls.append("wait")
+            if write_summary:
+                d = logdir / "lbl"
+                d.mkdir(exist_ok=True)
+                with open(d / "summary.json", "w", encoding="utf-8") as f:
+                    json.dump({"label": "lbl", "ticket": "t.md",
+                               "rc": container_rc, "verifier": "PASS",
+                               "probe_result": "CLEAN-FIRST", "turns": 1,
+                               "contract_lock_violations": [],
+                               "errors": [], "failures": []}, f)
             return container_rc
-
-    def spy_cp(name, cpath, hpath):
-        calls.append("cp")
-        rc, err = cp_result
-        if rc == 0:
-            os.makedirs(os.path.dirname(hpath), exist_ok=True)
-            with open(hpath, "w", encoding="utf-8") as f:
-                json.dump({"label": "lbl", "ticket": "t.md", "rc": container_rc,
-                           "verifier": "PASS", "probe_result": "CLEAN-FIRST",
-                           "turns": 1, "contract_lock_violations": [],
-                           "errors": [], "failures": []}, f)
-        return (rc, err)
 
     monkeypatch.setattr(sandbox, "reap_stopped", lambda *a: calls.append("reap"))
     monkeypatch.setattr(sandbox, "sandbox_argv", spy_argv)
     # T3-6: run_sandboxed now runs the fresh check — mocked PASS here; the
-    # wiring itself is pinned in test_stage3_fresh_wiring.py.
+    # observable verdict path is pinned in test_scenarios_verdict.py
+    # (S6 removed the wiring unit test).
     monkeypatch.setattr(verify, "fresh_verify", lambda cfg: (0, ""))
     monkeypatch.setattr(cli.subprocess, "Popen", lambda argv, **kw: FakePopen(argv))
     monkeypatch.setattr(sandbox, "docker_stop", lambda name: calls.append("stop"))
-    monkeypatch.setattr(sandbox, "docker_cp", lambda *a: spy_cp(*a))
-    monkeypatch.setattr(sandbox, "docker_rm_force", lambda name: calls.append("rm"))
     monkeypatch.setattr(cli, "_install_signal_handlers", lambda rs: None)
-    monkeypatch.setattr(cli.os, "setpgid", lambda *a: None)
+    monkeypatch.setattr(cli.os, "setpgid", lambda *a, **kw: None)
     args = argparse.Namespace(label="lbl", ticket="t.md",
                              local_retries=cfg.default_retries, extra=[])
     return repo, cfg, calls, args
 
 
-def test_cp_failure_is_env_fail(tmp_path, monkeypatch):
-    repo, cfg, calls, args = _mock_run(
-        tmp_path, monkeypatch,
-        cp_result=(1, "Error: No such container: stanok-test"))
+def test_missing_summary_publishes_nothing(tmp_path, monkeypatch):
+    """S1: with `--rm` there is no cp to fail — a worker that never wrote a
+    summary publishes NOTHING (no fake verdict, no ENV-FAIL): the run is an
+    aborted run, `status` reports `missing` (supervisor protocol §3.3)."""
+    repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
+                                       container_rc=1, write_summary=False)
     rc = cli.run_sandboxed(cfg, args, (), (), ())
-    assert rc == 16
-    s = json.loads((repo / "evidence" / "lbl" / "summary.json")
-                   .read_text(encoding="utf-8"))
-    assert s["verifier"] == "FAIL"
-    assert s["rc"] == 16
-    assert s["probe_result"] == "ENV-FAIL"
-    assert any("docker cp" in e for e in s["errors"])
+    assert rc == 1  # the container rc is the run rc
+    assert not (repo / "evidence" / "lbl" / "summary.json").exists()
+    st = cli._status_dict(cfg, "lbl")
+    assert st["state"] == "missing"
 
 
 def test_reaper_removes_only_stopped_prefixed(monkeypatch, tmp_path):
@@ -197,6 +189,11 @@ def test_reaper_noop_when_nothing_stopped(monkeypatch, tmp_path):
     assert len(calls) == 1 and "ps" in calls[0]  # no `docker rm` without ids
 
 
+def _docker_rm(*names):
+    subprocess.run(["docker", "rm", "-f", *names],
+                   capture_output=True, text=True, timeout=60)
+
+
 def _container_exists(name: str) -> bool:
     ps = subprocess.run(["docker", "ps", "-a", "--filter", f"name={name}", "-q"],
                         capture_output=True, text=True, timeout=30)
@@ -230,34 +227,33 @@ def test_reaper_leaves_foreign_repo_container(tmp_path):
         assert not _container_exists(mine)    # this repo's leftover: reaped
         assert _container_exists(foreign)     # foreign: untouched
     finally:
-        sandbox.docker_rm_force(mine)
-        sandbox.docker_rm_force(foreign)
+        _docker_rm(mine, foreign)
 
 
-def test_successful_cycle_cp_then_rm_rc_preserved(tmp_path, monkeypatch):
-    repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
-                                       cp_result=(0, ""), container_rc=0)
+def test_successful_cycle_stops_but_never_cps_or_rms(tmp_path, monkeypatch):
+    repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch, container_rc=0)
     rc = cli.run_sandboxed(cfg, args, (), (), ())
-    assert rc == 0  # the container rc is the run rc (I5 ground truth)
+    assert rc == 0  # the container rc is the run rc
     # the reaper runs before this run's container starts
     assert calls.index("reap") < calls.index("sandbox_argv")
-    # the plan's order: wait -> cp -> rm
-    assert calls.index("wait") < calls.index("cp") < calls.index("rm")
+    # S1: the retrieval cycle is gone — the summary arrived via the mount;
+    # the stop-trap remains, cp/rm do not
+    assert "stop" in calls
+    assert "cp" not in calls and "rm" not in calls
     s = json.loads((repo / "evidence" / "lbl" / "summary.json")
                    .read_text(encoding="utf-8"))
     assert s["verifier"] == "PASS" and s["probe_result"] == "CLEAN-FIRST"
 
 
-def test_status_and_wait_see_final_summary_after_cp(tmp_path, monkeypatch, capsys):
-    """Operator condition 2 (2026-10-09): after the host cycle (cp -> publish
-    -> marker removal) `cmd_status` and `cmd_wait` must report the FINAL
+def test_status_and_wait_see_final_summary(tmp_path, monkeypatch, capsys):
+    """Operator condition 2 (2026-10-09): after the host cycle (publish ->
+    marker removal) `cmd_status` and `cmd_wait` must report the FINAL
     verdict — the published summary.json, not `missing`, not a stale one.
     The readers of summary.json: `_publish_evidence` is the ONLY reader of the
-    LOG_DIR copy (the docker cp target); `_status_dict` (cmd_status/cmd_wait)
+    LOG_DIR copy (the worker's mount target); `_status_dict` (cmd_status/cmd_wait)
     reads the published evidence/<label>/summary.json; the supervisor reads the
     same published file."""
-    repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch,
-                                       cp_result=(0, ""), container_rc=0)
+    repo, cfg, calls, args = _mock_run(tmp_path, monkeypatch, container_rc=0)
     assert cli.run_sandboxed(cfg, args, (), (), ()) == 0
     st = cli._status_dict(cfg, "lbl")
     assert st["state"] == "done"
@@ -277,31 +273,21 @@ def test_status_and_wait_see_final_summary_after_cp(tmp_path, monkeypatch, capsy
     assert out2["verifier"] == "PASS" and out2["probe_result"] == "CLEAN-FIRST"
 
 
-# --- 6: real docker — the plan's stop-condition ---------------------------------
+# --- 6: real docker — --rm does the removal --------------------------------------
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
-def test_docker_cp_retrieves_summary_from_stopped_container(tmp_path):
-    name = f"stanok-cptest-{os.getpid()}"
-    inner = ("mkdir -p /var/tmp/stanok-evidence/t && "
-             "printf '{\"rc\": 0}' > /var/tmp/stanok-evidence/t/summary.json")
-    argv = ["docker", "run", "--name", name, "--init",
-            "--user", f"{os.getuid()}:{os.getgid()}",
-            IMAGE, "bash", "-c", inner]
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
-        # the writable-layer path is writable under --user (the worker's uid)
-        assert proc.returncode == 0, proc.stderr
-        # no --rm: the container survives its exit as STOPPED
-        ps = subprocess.run(["docker", "ps", "-a", "--filter", f"name={name}", "-q"],
-                            capture_output=True, text=True, timeout=30)
-        assert ps.stdout.strip() != ""
-        out = tmp_path / "summary.json"
-        rc, err = sandbox.docker_cp(name, "/var/tmp/stanok-evidence/t/summary.json",
-                                    str(out))
-        assert rc == 0, err
-        assert out.read_text(encoding="utf-8") == '{"rc": 0}'
-    finally:
-        sandbox.docker_rm_force(name)
-    ps2 = subprocess.run(["docker", "ps", "-a", "--filter", f"name={name}", "-q"],
-                         capture_output=True, text=True, timeout=30)
-    assert ps2.stdout.strip() == ""
+def test_rm_container_is_gone_after_exit(tmp_path):
+    """S1 rollback, real docker: a container built by sandbox_argv (`--rm`) is
+    removed by the daemon on exit — no host-side `docker rm` is needed and the
+    name is free again immediately after the run."""
+    repo = tmp_path / "repo"
+    for d in ("src", "tests", "docs", "scripts"):
+        (repo / d).mkdir(parents=True)
+    log = tmp_path / "logs"
+    log.mkdir()
+    name, argv = sandbox.sandbox_argv(str(repo), str(log), IMAGE, ["true"])
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    ps = subprocess.run(["docker", "ps", "-a", "--filter", f"name={name}", "-q"],
+                        capture_output=True, text=True, timeout=30)
+    assert ps.stdout.strip() == ""

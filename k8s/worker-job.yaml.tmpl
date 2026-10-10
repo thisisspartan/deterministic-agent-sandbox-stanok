@@ -1,0 +1,86 @@
+# P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §7/§9) — the worker Job template.
+# Rendered by launcher/k8s.py ({{VARS}} substitution) and applied with
+# `kubectl apply -f -`. Vanilla K8s (no k3s-specific fields). The Pod works
+# on the TRANSPORTED copy under /stanok-work (emptyDir) — the live tree is
+# never touched. Non-root + dropped capabilities + RuntimeDefault seccomp
+# replace the bwrap sandbox (O3); the network boundary is the
+# NetworkPolicy (stanok: worker). NO privileged anywhere.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{JOB_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    stanok: worker
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{DEADLINE}}
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        stanok: worker
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: {{IMAGE}}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/bin/python3", "/stanok/runner/pod_runner.py"]
+          env:
+            - name: STANOK_LABEL
+              value: "{{LABEL}}"
+            - name: STANOK_NONCE
+              value: "{{NONCE}}"
+            - name: STANOK_SERVER_URL
+              value: "{{SERVER_URL}}"
+            - name: STANOK_OPIK_TRACE_URL
+              value: "{{OPIK_TRACE_URL}}"
+            - name: STANOK_MODEL
+              value: "{{MODEL}}"
+            - name: STANOK_START_COMMIT
+              value: "{{START_COMMIT}}"
+            - name: STANOK_LOG_DIR
+              value: "/stanok-work/logs"
+            - name: STANOK_POD_REPO
+              value: "/stanok-work/repo"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: ticket
+              mountPath: /stanok/ticket
+              readOnly: true
+            - name: tree
+              mountPath: /stanok/transport
+              readOnly: true
+            - name: runner
+              mountPath: /stanok/runner
+              readOnly: true
+            - name: work
+              mountPath: /stanok-work
+      volumes:
+        - name: ticket
+          configMap:
+            name: {{CM_TICKET}}
+        - name: tree
+          configMap:
+            name: {{CM_TREE}}
+        - name: runner
+          configMap:
+            name: {{CM_RUNNER}}
+        - name: work
+          emptyDir: {}

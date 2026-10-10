@@ -8,7 +8,7 @@ repo root come from the passed-in Config (C).
 import hashlib
 import os
 import subprocess
-from launcher import gates, sandbox
+from launcher import sandbox
 from launcher.logs import log
 
 
@@ -362,30 +362,6 @@ def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
         log(f"  [CONTRACT-LOCK] turn {turn}: {violations}")
 
 
-def _check_zone_symlinks(cfg, before: list[str], job: dict, turn: int) -> None:
-    """Post-turn half of the zone-symlink ban (operator decision 2026-10-09):
-    a symlink CREATED in a writable zone during the run is a contract_lock
-    violation -> the existing forced-FAIL path (no retry, cumulative).
-    Compared against the session-start snapshot (gates.zone_symlinks), NOT
-    the ticket — a ticket never declares arbitrary links. The launch gate
-    guarantees an empty baseline; the snapshot makes the rule independent of
-    it too: a link that predates the session is not a NEW one. Fail-closed:
-    a scan error is itself a violation."""
-    try:
-        after = gates.zone_symlinks(cfg)
-    except OSError as e:
-        job.setdefault("contract_lock_violations", []).append(
-            f"turn {turn}: ZONE-SYMLINK-SCAN-FAILED: {e}")
-        log(f"  [ZONE-SYMLINK] turn {turn}: scan failed: {e} — fail-closed")
-        return
-    new = [rel for rel in after if rel not in set(before)]
-    if new:
-        job.setdefault("contract_lock_violations", []).extend(
-            f"turn {turn}: NEW-SYMLINK: {rel}" for rel in new
-        )
-        log(f"  [ZONE-SYMLINK] turn {turn}: {new}")
-
-
 def _contract_lock_forced_fail(job: dict, turn: int) -> int | None:
     """Fail-closed on contract_lock violations (W2.5 + P2): a non-empty
     cumulative violations list means the machine MODIFIED/DELETED a
@@ -394,7 +370,7 @@ def _contract_lock_forced_fail(job: dict, turn: int) -> int | None:
     not a PASS. No retry: the list is cumulative and can never be cleared
     inside the session, so a fix prompt cannot succeed; the supervisor
     relaunches with a refined ticket. Sets probe_result "CONTRACT-FAIL" (an
-    override, see test_contract_fail_probe.py) so the summary distinguishes a
+    override, see test_scenarios_verdict.py) so the summary distinguishes a
     contract violation from a test failure. Returns the run rc (1) or None
     when clean."""
     violations = job.get("contract_lock_violations") or []
@@ -407,9 +383,9 @@ def _contract_lock_forced_fail(job: dict, turn: int) -> int | None:
     job["probe_result"] = "CONTRACT-FAIL"
     job["verifier"] = "FAIL"
     job["error"] = ("CONTRACT-LOCK: the machine modified or deleted protected "
-                   "files (tests/, scripts/run.sh) or created a symlink in a "
-                   "writable zone after the manifest snapshot — the verdict was "
-                   "computed against tampered tests")
+                   "files (tests/, scripts/run.sh) or created an undeclared "
+                   "file under tests/ or src/ after the manifest snapshot — "
+                   "the verdict was computed against tampered tests")
     job.setdefault("failures", []).extend(
         ("(contract_lock)", v) for v in violations
     )

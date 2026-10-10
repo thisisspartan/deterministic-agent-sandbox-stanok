@@ -21,16 +21,17 @@ import signal
 import subprocess
 import sys
 import time
-from launcher import logs, sandbox, stanok, verify
-from launcher.config import CONTAINER_SUMMARY_ROOT, Config, RunState
+from launcher import k8s, logs, sandbox, stanok, verify
+from launcher.config import Config, RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.plan import SessionPlan
 from launcher.gates import (
-    check_test_config, dirty_tree_gate, hidden_files_gate, preflight_server,
-    root_refusal, sandbox_config_gate, validate_label, zone_symlink_gate,
+    check_test_config, dirty_tree_gate, hidden_files_gate, network_preflight,
+    preflight_server, root_refusal, sandbox_config_gate, validate_label,
+    zone_symlink_gate,
 )
-from launcher.opik import _opik_trace_count
+from launcher.opik import opik_traces_field
 from launcher.session import _install_signal_handlers, run_continuous_session
 from launcher.summary import (
     _publish_evidence, _rotate_stale_summary, build_summary,
@@ -148,10 +149,15 @@ def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: i
         # Post-run Opik check (CC-106): strictly AFTER the verdict is formed,
         # ONE fast best-effort sample of the project trace count. No baseline
         # poll before the session, no sleep/resample loop — Opik latency must
-        # never delay the run. Any network/HTTP/timeout failure ->
-        # opik_traces: null. rc and verifier are never touched here.
-        opik_after = _opik_trace_count()
-        if opik_after is None:
+        # never delay the run. rc and verifier are never touched here.
+        # S4 (SPEC-NETWORK R5): inside the container the field is the literal
+        # "disabled" — the stanok-net bridge makes the host Opik unreachable
+        # BY DESIGN, and the field must be present, not 0/null.
+        opik_after = opik_traces_field()
+        if opik_after == "disabled":
+            job["opik_traces"] = "disabled"
+            log("OPIK: tracing disabled in-container (bridge network)")
+        elif opik_after is None:
             job["opik_traces"] = None
             log("OPIK: post-run trace count unavailable (backend unreachable)")
         else:
@@ -348,13 +354,16 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
     plus these paths under tests/ — an undeclared new file is a
     CONTRACT-FAIL (structural tests/ rule).
 
-    Stage 3 (T3-4): the container runs WITHOUT `--rm`; the finally retrieves
-    the worker's summary from the container's writable layer (`docker cp`)
-    before removing the container (`docker rm -f`). Order: wait -> cp -> rm.
-    A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS.
+    S1 (2026-10-09, rollback of T3-4): the container runs WITH `--rm`; the
+    worker writes its summary into the rw LOG_DIR/<label> mount, so the host
+    never retrieves anything from the container layer. The finally: stop
+    (abnormal-path trap) -> summary presence check -> contract recompute ->
+    fresh check -> publish. No summary = the worker died before writing:
+    nothing is published, `status` reports `missing` — an aborted run per the
+    supervisor protocol, not a verdict (no ENV-FAIL branch).
 
     Stage 3 (T3-6): after the contract recompute the host runs the fresh
-    check (verify.fresh_verify, T3-3) when the summary was retrieved and the
+    check (verify.fresh_verify, T3-3) when the summary exists and the
     contract is intact, and passes its result to _publish_evidence — the
     final verdict is host-issued (spec §1.1, priority §3). The returned rc
     equals the published verdict's rc."""
@@ -366,10 +375,10 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
     # a foreign repo's containers are not this run's leftovers (condition 1).
     sandbox.reap_stopped(cfg.repo_root)
 
-    # T3-4: a stale summary.json in LOG_DIR/<label> from an earlier run must
-    # not survive: the worker no longer writes there (its summary lives on the
-    # container layer), the host writes it only via docker cp — a failed cp
-    # would otherwise re-publish the previous run's verdict.
+    # S1: the worker writes its summary into LOG_DIR/<label> (the rw mount).
+    # A stale summary.json from an earlier run must not survive: if this
+    # worker crashes before writing, the stale file would otherwise be
+    # re-published as this run's verdict.
     stale = os.path.join(live_dir, "summary.json")
     if os.path.isfile(stale):
         try:
@@ -414,27 +423,23 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
     except KeyboardInterrupt:
         rc = run_state.interrupted_rc or 130
     finally:
+        # S1 (rollback of T3-4): the container ran WITH `--rm` — the daemon
+        # removed it on a normal exit; this stop is the abnormal-path trap
+        # (a real stop after a signal/crash, a no-op after a normal exit).
         sandbox.docker_stop(name)
-        # Stage 3 (T3-4): the container survived its exit (no --rm) — retrieve
-        # the worker's summary from its writable layer into LOG_DIR/<label>
-        # (the publish source), then remove the container. Order: cp -> rm.
-        # A failed cp is an ENV-FAIL (rc=16): the verdict cannot be PASS
-        # without the summary it was built from.
-        cp_rc, cp_err = sandbox.docker_cp(
-            name, f"{CONTAINER_SUMMARY_ROOT}/{args.label}/summary.json",
-            os.path.join(live_dir, "summary.json"))
-        sandbox.docker_rm_force(name)
-        # CC-134: publish the retrieved verdict to the host-owned
-        # evidence/<label>. BEFORE the marker removal, so the supervisor never
-        # sees "not running" with the summary still missing.
+        # The worker wrote its summary into the rw LOG_DIR/<label> mount.
+        # No summary = the worker died before writing (crash/kill): nothing
+        # is published, `status` reports `missing` — an aborted run per the
+        # supervisor protocol, not a verdict.
+        summary_present = os.path.isfile(os.path.join(live_dir, "summary.json"))
         # Stage 3 (T3-2): recompute the host-side contract AFTER the
         # container exits — the host's independent check of the tree the
         # verdict was computed against; violations force CONTRACT-FAIL at
         # publish, regardless of the worker summary.
         # Stage 3 (T3-6): the fresh check (T3-3) runs ONLY when the summary
-        # was retrieved AND the contract is intact — a fresh run over a
-        # tampered tree is uninformative (spec §1.6); it is NOT gated on the
-        # worker's claims (§1.1: the host's check is the verdict authority).
+        # exists AND the contract is intact — a fresh run over a tampered
+        # tree is uninformative (spec §1.6); it is NOT gated on the worker's
+        # claims (§1.1: the host's check is the verdict authority).
         # A fresh infra failure (EXEC_ERROR tail) is rc=16 ENV-FAIL — not a
         # verdict (call the human). A fresh suite failure overrides the
         # worker's claim at publish (FRESH-FAIL, §3); the run's exit rc is
@@ -447,20 +452,18 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
             cfg, before_manifest, declared)
         fresh_check = None
         fresh_infra_error = None
-        if cp_rc == 0 and not contract_violations:
+        if summary_present and not contract_violations:
             fresh_rc, fresh_tail = verify.fresh_verify(cfg)
             if fresh_tail.startswith("EXEC_ERROR:"):
                 fresh_infra_error = fresh_tail
             else:
                 fresh_check = (fresh_rc, fresh_tail)
+        # CC-134: publish to the host-owned evidence/<label> BEFORE removing
+        # the marker, so the supervisor never sees "not running" with the
+        # summary still missing. _publish_evidence publishes nothing when the
+        # files are absent — an aborted run stays aborted.
         _publish_evidence(cfg, args.label, rc, contract_violations, fresh_check)
-        if cp_rc != 0:
-            rc = int(ExitCode.ENV_FAIL)
-            write_env_fail_summary(
-                cfg, args.label,
-                f"docker cp failed (rc={cp_rc}): the worker summary could not "
-                f"be retrieved from the container layer — {cp_err or 'no such file'}")
-        elif fresh_infra_error is not None:
+        if fresh_infra_error is not None:
             rc = int(ExitCode.ENV_FAIL)
             write_env_fail_summary(
                 cfg, args.label,
@@ -469,8 +472,8 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
             rc = fresh_check[0]
         elif contract_violations and rc == 0:
             # T3-9: the exit equals the published verdict's rc (T3-6
-            # principle) — a host-issued CONTRACT-FAIL never exits 0; the
-            # container's 0 is preserved in the summary as worker_rc.
+            # principle) — a host-issued CONTRACT-FAIL never exits 0;
+            # _publish_evidence forces the summary rc to DEFECT too.
             rc = int(ExitCode.DEFECT)
         try:
             os.remove(marker)
@@ -602,9 +605,9 @@ def _early_abort(cfg, marker: str, label: str, ticket: str,
     """Launch-level refusal: log, clean a dead marker, write the EARLY-ABORT
     summary (only when absent — a fresh verdict must not be overwritten).
 
-    T3-4: the summary goes to cfg.summary_dir(label) — inside the container
-    the writable-layer path the host retrieves with docker cp; on the host
-    the evidence dir (the host is the publisher, unchanged)."""
+    S1: the summary goes to cfg.summary_dir(label) — inside the container the
+    rw LOG_DIR/<label> mount; on the host the evidence dir (the host is the
+    publisher)."""
     log(err_msg)
     if os.path.exists(marker):
         # A live run's marker must survive an early abort of a
@@ -681,9 +684,10 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
     # no symlink in src/tests/docs/scripts — the zones are the only rw mounts
     # and Docker resolves a bind source's realpath, so a link hands rw access
     # to its target. Undeclared links and links under tests/ are in scope
-    # (the declared-path rule inspects only declared paths). The post-turn
-    # counterpart is verify._check_zone_symlinks (CONTRACT-FAIL). The abort
-    # message names each path, its target and the fix (CC-157-style).
+    # (the declared-path rule inspects only declared paths). S3
+    # (PLAN-SIMPLIFY-2026-10-09): this is the ONLY enforcement point — the
+    # post-turn scan was removed. The abort message names each path, its
+    # target and the fix (CC-157-style).
     try:
         zone_links = zone_symlink_gate(cfg)
     except OSError as e:
@@ -752,6 +756,14 @@ def _lock_key(cfg) -> "str | None":
         return None
 
 
+def _runtime_mode() -> str:
+    """P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §3): the runtime switch.
+    STANOK_RUNTIME=k8s selects the host orchestrator (launcher/k8s.py);
+    absent/any other value = the Docker path, unchanged. A pure function:
+    the dispatch is testable without a cluster (test_k8s_wiring.py)."""
+    return "k8s" if os.environ.get("STANOK_RUNTIME") == "k8s" else "docker"
+
+
 def _host_launch(cfg, args, marker: str) -> int:
     """Host sync: supervise the Docker container (launcher/sandbox.py).
 
@@ -759,6 +771,9 @@ def _host_launch(cfg, args, marker: str) -> int:
     CC-106: the image digest/runner preflight no longer blocks the
     launch path — it lives in doctor
     (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
+    S4 (SPEC-NETWORK): network_preflight runs here, after the ticket parse
+    and before run_sandboxed — it covers the sync path and the --follow
+    child alike (the child re-enters main → _host_launch).
     """
     if shutil.which("docker") is None:
         return _early_abort(cfg, marker, args.label, args.ticket,
@@ -779,6 +794,14 @@ def _host_launch(cfg, args, marker: str) -> int:
     except (OSError, ValueError) as e:
         return _early_abort(cfg, marker, args.label, args.ticket,
                             ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
+    # S4 (SPEC-NETWORK R4): verify the network policy BEFORE the worker
+    # starts — a missing chain would otherwise surface mid-run as an API
+    # stall. Host-only: the container-side gates never see the docker CLI.
+    net_fail = network_preflight(cfg)
+    if net_fail is not None:
+        net_rc, net_msg = net_fail
+        return _early_abort(cfg, marker, args.label, args.ticket,
+                            net_rc, f"ERROR: network preflight: {net_msg}")
     rw_paths = host_rw_paths(cfg, declared)
     ro_paths = host_ro_paths(cfg, rw_paths)
     # T3-9: the declared paths parsed here are the ONLY declared context —
@@ -834,6 +857,15 @@ def main() -> int:
             # blocks until terminal (a foreground follow would exceed the
             # Bash tool's 10-min cap on a 45-min run).
             return launch_background(cfg, args)
+
+        # P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §3): the runtime switch.
+        # The launch contract (run/status/wait/stop, the marker, the
+        # summary.json semantics) is unchanged — only the runtime behind a
+        # host `run` differs. The in-container child never dispatches: it IS
+        # the runtime. With --follow the parent stays in launch_background;
+        # the detached child re-enters main() and lands here.
+        if _runtime_mode() == "k8s" and not in_container:
+            return k8s.host_launch_k8s(cfg, args, marker)
 
         if in_container or no_sandbox:
             # In-process session (container-side Runner, or host no-sandbox):

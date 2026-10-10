@@ -1,0 +1,73 @@
+# P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §7/§9) — the fresh-check Job:
+# the host's independent verifier, the mirror of sandbox.fresh_verify_argv
+# (the same `run.sh list; run.sh test --all` pair, the same rc precedence).
+# It runs on the transported tree + changes.patch in a Pod the worker never
+# touched, with NO model endpoint and NO network (the stanok: fresh deny-all
+# NetworkPolicy) — the verifier only.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stanok-fresh-{{JOB_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    stanok: fresh
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{DEADLINE}}
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        stanok: fresh
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fresh
+          image: {{IMAGE}}
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -u
+              mkdir -p /stanok-work/work
+              base64 -d /stanok/transport/tree.tar.gz.b64 | tar -xz -C /stanok-work/work
+              cd /stanok-work/work
+              if [ -s /stanok/patch/changes.patch ]; then
+                git apply /stanok/patch/changes.patch
+              fi
+              bash scripts/run.sh list; list_rc=$?
+              bash scripts/run.sh test --all; test_rc=$?
+              if [ "$list_rc" -ne 0 ]; then exit "$list_rc"; fi
+              exit "$test_rc"
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tree
+              mountPath: /stanok/transport
+              readOnly: true
+            - name: patch
+              mountPath: /stanok/patch
+              readOnly: true
+            - name: work
+              mountPath: /stanok-work
+      volumes:
+        - name: tree
+          configMap:
+            name: {{CM_TREE}}
+        - name: patch
+          configMap:
+            name: {{CM_PATCH}}
+        - name: work
+          emptyDir: {}

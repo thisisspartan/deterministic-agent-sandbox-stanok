@@ -77,15 +77,14 @@ def _mock_run(tmp_path, monkeypatch):
     monkeypatch.setattr(verify, "contract_snapshot", spy_snapshot)
     monkeypatch.setattr(sandbox, "sandbox_argv", spy_argv)
     # T3-6: run_sandboxed now runs the fresh check — mocked PASS here; the
-    # wiring itself is pinned in test_stage3_fresh_wiring.py.
+    # observable verdict path is pinned in test_scenarios_verdict.py
+    # (S6 removed the wiring unit test).
     monkeypatch.setattr(verify, "fresh_verify", lambda cfg: (0, ""))
     monkeypatch.setattr(cli.subprocess, "Popen", spy_popen)
     monkeypatch.setattr(sandbox, "docker_stop", lambda name: None)
-    # T3-4: run_sandboxed now also calls the reaper, cp and rm -f — mocked so
-    # this T3-1 test keeps observing only its own boundary (the snapshot).
+    # S1: run_sandboxed also calls the reaper — mocked so this T3-1 test keeps
+    # observing only its own boundary (the snapshot).
     monkeypatch.setattr(sandbox, "reap_stopped", lambda *a: None)
-    monkeypatch.setattr(sandbox, "docker_cp", lambda *a: (0, ""))
-    monkeypatch.setattr(sandbox, "docker_rm_force", lambda name: None)
     monkeypatch.setattr(cli, "_install_signal_handlers", lambda rs: None)
     monkeypatch.setattr(cli.os, "setpgid", lambda *a: None)
     args = argparse.Namespace(label="lbl", ticket="t.md",

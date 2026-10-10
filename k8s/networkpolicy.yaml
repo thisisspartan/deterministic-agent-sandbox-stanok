@@ -1,0 +1,81 @@
+# P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §7) — the network boundary that
+# REPLACES the Docker-era stanok-net iptables policy and the bwrap network
+# block (O3). Apply once per namespace; the policies select Pods by label,
+# the Jobs carry the labels.
+#
+# Worker: egress ONLY to kube-dns (53), the model host 192.168.8.131
+# (8080 — the inference server) and the Opik backend (8080 — the OTLP
+# tracing target, CC-225). Everything else is refused: packages from the
+# internet are NOT installable, exactly as in the Docker era.
+#
+# CC-225 incident (cc225/cc225-retry1 ConnectionRefused): the netpol
+# controller filters Pod egress in filter FORWARD, which sees the POST-DNAT
+# destination — a Pod→192.168.122.156:8080 packet is DNATed (docker published
+# port) to the backend's container address BEFORE FORWARD, so the
+# 192.168.122.156/32 rule never matches and the packet is REJECTED
+# (ConnectionRefused, not timeout). Ground truth (iptables nat dump):
+# `-A DOCKER ! -i br-493c27e58c48 -p tcp --dport 8080 -j DNAT
+# --to-destination 172.25.0.4:8080` — opik-backend lives on the custom
+# compose network opik_default (172.25.0.0/16), NOT on docker bridge
+# 172.17.0.0/16. The 172.25.0.0/16:8080 rule allows the post-DNAT
+# destination; on that network only opik-backend listens on 8080.
+# The 192.168.122.156/32 rule is kept as documentation of intent (it would
+# match only a non-DNATed path). NOTE: the k3s netpol controller ignores
+# NetworkPolicy UPDATES — after editing this file, delete + re-apply.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stanok-worker-egress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      stanok: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 192.168.8.131/32
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 192.168.122.156/32
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 172.25.0.0/16
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Fresh (the host's independent verifier Pod): DENY-ALL egress — policyTypes
+# Egress with NO egress rules. The check must not reach the model server or
+# anything else (the mirror of the Docker fresh container's --network=none).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stanok-fresh-deny-all
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      stanok: fresh
+  policyTypes:
+    - Egress

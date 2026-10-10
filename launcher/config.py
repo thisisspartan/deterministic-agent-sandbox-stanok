@@ -20,14 +20,12 @@ LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 # If STANOK_REPO is not set, we go up one level (stanok/launcher -> stanok)
 DEFAULT_REPO = os.path.abspath(os.path.join(LAUNCHER_DIR, ".."))
 DEFAULT_MODEL = "qwen3.8-flash-next-iq3_xxs"
-
-# Stage 3 (T3-4, SPEC-VERDICT-INTEGRITY §2): the worker's summary lives on
-# the container's WRITABLE LAYER (not tmpfs, not a mount): it survives
-# `docker stop` and dies with `docker rm`. The host retrieves it with
-# `docker cp` after the container exits — the verdict is no longer built
-# from a file the worker left in a mount shared with the host.
-CONTAINER_SUMMARY_ROOT = "/var/tmp/stanok-evidence"
-
+# S4 (SPEC-NETWORK-2026-10-09): the worker's dedicated bridge network. The
+# iptables policy (infra/stanok-net.sh) is installed ON THIS network only —
+# on `bridge`/`host` it would filter the whole docker traffic. Read at call
+# time via STANOK_DOCKER_NETWORK (sandbox.py, gates.py) — a runtime knob,
+# not a Config field (the argv builders do not take cfg).
+DEFAULT_DOCKER_NETWORK = "stanok-net"
 
 @dataclass(frozen=True)
 class Config:
@@ -91,28 +89,25 @@ class Config:
         BOTH paths resolve into the rw LOG_DIR/<label>; the host publishes the
         verdict back into evidence/<label> after the container exits
         (_publish_evidence). Routed here, so every writer —
-        launcher.stdout.log, the .running marker — follows automatically.
+        launcher.stdout.log, the .running marker, summary.json (S1: the worker
+        writes it into the rw LOG_DIR mount) — follows automatically.
         STANOK_IN_CONTAINER is read at CALL time (the container/host identity is
-        runtime state, not config).
-
-        T3-4: summary.json is NOT routed here anymore — the container's
-        summary target is the writable-layer path, see summary_dir."""
+        runtime state, not config)."""
         live = os.path.join(self.log_dir, label)
         if os.environ.get("STANOK_IN_CONTAINER") == "1":
             return (live, live)
         return (os.path.join(self.repo_root, "evidence", label), live)
 
     def summary_dir(self, label: str) -> str:
-        """Where the process that runs the session writes summary.json (T3-4).
+        """Where the process that runs the session writes summary.json.
 
-        Container: CONTAINER_SUMMARY_ROOT/<label> — a container-internal
-        writable-layer path: it survives `docker stop` (so the host can
-        `docker cp` it out) and dies with `docker rm`. The worker no longer
-        shares a writable summary file with the host's LOG_DIR.
+        S1 (2026-10-09, rollback of T3-4): the container writes it into the
+        rw LOG_DIR/<label> mount — the same routing as label_paths; the host
+        publishes it into evidence/<label> after the container exits.
         Host / no-sandbox: the evidence dir — the host is the publisher.
         Same call-time STANOK_IN_CONTAINER routing rule as label_paths."""
         if os.environ.get("STANOK_IN_CONTAINER") == "1":
-            return os.path.join(CONTAINER_SUMMARY_ROOT, label)
+            return os.path.join(self.log_dir, label)
         return os.path.join(self.repo_root, "evidence", label)
 
 

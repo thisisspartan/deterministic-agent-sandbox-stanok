@@ -19,16 +19,13 @@ and launcher/summary.py (C: no hub facade — the Config is passed explicitly):
      rc=0 pass / rc=1 a (suite) failure / rc=6 ENV-FAIL / rc=124 TIMEOUT /
      rc=2 (entrypoint refuses `--all`) is a FAIL — strict contract, the
      per-file fallback was removed (PLAN-HYGIENE 2026-10-08)
-  8  _publish_evidence I5 integrity check: a summary claiming PASS after a
-     non-zero container exit, or with an rc field disagreeing with the
-     container exit, is rewritten to FAIL + probe_result INTEGRITY-FAIL +
-     rc=container_rc + integrity_violation (no PASS-shaped field survives,
-     a container-written probe_result is overwritten); clean summaries pass
-     through untouched
+
+S2 (PLAN-SIMPLIFY-2026-10-09): the former test 8 (_publish_evidence I5
+integrity check) was removed together with the I5 mechanism; the verdict-path
+coverage is carried by test_scenarios_verdict.py (S6a).
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_verdict_safety.py -q
 """
-import json
 from pathlib import Path
 
 from launcher import summary, ticket, verify
@@ -260,108 +257,3 @@ def test_verify_gate_suite_rc2_is_fail(tmp_path):
     assert any(name == "(suite)" and "refused" in msg for name, msg in failures)
 
 
-# --- 8: _publish_evidence I5 integrity check -----------------------------------
-
-def _publish_tree(tmp_path, label, summary_dict):
-    """A host tree: log_dir/<label> holds the container-written verdict,
-    repo/evidence is where the host publishes it."""
-    repo = tmp_path / "repo"
-    logdir = tmp_path / "logs"
-    live = logdir / label
-    live.mkdir(parents=True)
-    (live / "summary.json").write_text(json.dumps(summary_dict), encoding="utf-8")
-    (live / "launcher.stdout.log").write_text("log\n", encoding="utf-8")
-    return repo, logdir
-
-
-def _published(repo, label):
-    return json.loads(
-        (repo / "evidence" / label / "summary.json").read_text(encoding="utf-8"))
-
-
-def test_publish_evidence_forces_fail_on_forged_pass(tmp_path):
-    # The I5 window: a surviving container child rewrites the verdict to
-    # PASS after the container exited non-zero. The host rc is ground truth.
-    repo, logdir = _publish_tree(tmp_path, "lbl", {"rc": 0, "verifier": "PASS"})
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 1)
-    dst = _published(repo, "lbl")
-    assert dst["verifier"] == "FAIL"
-    assert dst["probe_result"] == "INTEGRITY-FAIL"
-    assert dst["rc"] == 1
-    assert "integrity_violation" in dst
-    assert "claims PASS" in dst["integrity_violation"]
-
-
-def test_publish_evidence_forces_fail_on_rc_field_tamper(tmp_path):
-    # rc field forged 1 -> 0 while the verifier stays FAIL: the verdict text
-    # is unchanged but the rc disagrees with the container exit.
-    repo, logdir = _publish_tree(tmp_path, "lbl", {"rc": 0, "verifier": "FAIL"})
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 1)
-    dst = _published(repo, "lbl")
-    assert dst["verifier"] == "FAIL"
-    assert dst["probe_result"] == "INTEGRITY-FAIL"
-    assert dst["rc"] == 1
-    assert "integrity_violation" in dst
-    assert "!= container rc=1" in dst["integrity_violation"]
-
-
-def test_publish_evidence_overrides_pass_shaped_probe_result(tmp_path):
-    # A forged verdict must not leave any PASS-shaped field behind: a
-    # probe_result written by the container ("CLEAN-FIRST") is overwritten
-    # to INTEGRITY-FAIL, not kept alongside the forced verifier=FAIL.
-    repo, logdir = _publish_tree(tmp_path, "lbl", {
-        "rc": 0, "verifier": "PASS", "probe_result": "CLEAN-FIRST"})
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 1)
-    dst = _published(repo, "lbl")
-    assert dst["probe_result"] == "INTEGRITY-FAIL"
-    assert dst["verifier"] == "FAIL"
-    assert dst["rc"] == 1
-
-
-def test_publish_evidence_clean_pass_untouched(tmp_path):
-    repo, logdir = _publish_tree(tmp_path, "lbl", {"rc": 0, "verifier": "PASS"})
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 0)
-    dst = _published(repo, "lbl")
-    assert dst == {"rc": 0, "verifier": "PASS"}
-    assert "integrity_violation" not in dst
-
-
-def test_publish_evidence_clean_fail_untouched(tmp_path):
-    repo, logdir = _publish_tree(tmp_path, "lbl", {"rc": 1, "verifier": "FAIL"})
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 1)
-    dst = _published(repo, "lbl")
-    assert dst == {"rc": 1, "verifier": "FAIL"}
-    assert "integrity_violation" not in dst
-
-
-def test_publish_evidence_noop_pass_untouched(tmp_path):
-    # A NO-OP run intentionally returns rc=1 with verifier=PASS (the machine
-    # did no work; the artifacts pre-existed and the verifier really passed).
-    # The I5 "claims PASS" check must not fire on that intentional combination.
-    repo, logdir = _publish_tree(tmp_path, "lbl", {
-        "rc": 1, "verifier": "PASS", "probe_result": "NO-OP-PASS"})
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 1)
-    dst = _published(repo, "lbl")
-    assert dst["verifier"] == "PASS"
-    assert "integrity_violation" not in dst
-
-
-def test_publish_evidence_noop_rc_tamper_still_caught(tmp_path):
-    # The rc-field consistency check still applies to a NO-OP: a forged rc
-    # field (summary rc=0 while the container exited 1) is still a violation.
-    repo, logdir = _publish_tree(tmp_path, "lbl", {
-        "rc": 0, "verifier": "PASS", "probe_result": "NO-OP-PASS"})
-    summary._publish_evidence(
-        Config(repo_root=str(repo), log_dir=str(logdir)), "lbl", 1)
-    dst = _published(repo, "lbl")
-    assert dst["verifier"] == "FAIL"
-    assert dst["probe_result"] == "INTEGRITY-FAIL"
-    assert dst["rc"] == 1
-    assert "integrity_violation" in dst
-    assert "!= container rc=1" in dst["integrity_violation"]
