@@ -1,7 +1,6 @@
 # P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §7) — the network boundary that
 # REPLACES the Docker-era stanok-net iptables policy and the bwrap network
-# block (O3). Apply once per namespace; the policies select Pods by label,
-# the Jobs carry the labels.
+# block (O3). The policies select Pods by label, the Jobs carry the labels.
 #
 # 2.4 (operator 2026-10-10): this manifest carries NO addresses — the three
 # egress targets are placeholders rendered from configuration by
@@ -16,10 +15,26 @@
 # A grep for a dotted IPv4 literal in this file must find nothing: the
 # addresses live in configuration, not in the manifest.
 #
-# Worker: egress ONLY to kube-dns (53), the model host (8080 — the inference
-# server) and the Opik backend (8080 — the OTLP tracing target, CC-225).
-# Everything else is refused: packages from the internet are NOT installable,
-# exactly as in the Docker era.
+# PACKAGE 1 (operator audit 2026-10-10):
+# * Versioned names: {{REVISION}} is a deterministic hash of the rendered
+#   SEMANTIC content (comments and metadata.name excluded — the hash is
+#   never self-referential). Cutover is make-before-break: NetworkPolicy
+#   rules are ADDITIVE (a Pod's effective permission is the union of every
+#   policy selecting it), so applying a stricter policy does NOT revoke what
+#   an older policy still allows — the old rules stay effective until the
+#   old policy objects are deleted. infra/netpol-smoke.sh applies the new
+#   names first, verifies them, and only then deletes the older
+#   Stanok-managed names; a DNS blackout is claimed only after the old
+#   worker policy is gone.
+# * Worker: egress ONLY to the model host (8080) and the Opik backend
+#   (8080). NO kube-dns rule (full DNS egress blackout): the worker needs
+#   no name resolution — the model and the Opik endpoints are IP literals
+#   in the Job env. Everything else is refused: packages from the internet
+#   are NOT installable, exactly as in the Docker era.
+# * Fresh: default-deny in BOTH directions (policyTypes Ingress + Egress,
+#   no rules) — the honest mirror of the Docker fresh container's
+#   --network=none. kubectl wait/logs keep working: they ride the
+#   kubelet/CRI path, not the Pod network.
 #
 # CC-225 incident (cc225/cc225-retry1 ConnectionRefused): the netpol
 # controller filters Pod egress in filter FORWARD, which sees the POST-DNAT
@@ -34,12 +49,13 @@
 # outside the dynamic-allocation range), so the policy narrows the whole
 # compose network to one /32. The {{OPIK_HOST_IP}}/32 rule is kept as
 # documentation of intent (it would match only a non-DNATed path). NOTE: the
-# k3s netpol controller ignores NetworkPolicy UPDATES — after editing this
-# file, delete + re-apply.
+# k3s netpol controller ignores NetworkPolicy UPDATES — the versioned names
+# make every semantic change a NEW object (apply-then-delete-old), which is
+# why the fixed legacy names are retired.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: stanok-worker-egress
+  name: stanok-worker-egress-{{REVISION}}
   namespace: default
 spec:
   podSelector:
@@ -48,18 +64,6 @@ spec:
   policyTypes:
     - Egress
   egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-          podSelector:
-            matchLabels:
-              k8s-app: kube-dns
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
     - to:
         - ipBlock:
             cidr: {{MODEL_IP}}/32
@@ -79,17 +83,18 @@ spec:
         - protocol: TCP
           port: 8080
 ---
-# Fresh (the host's independent verifier Pod): DENY-ALL egress — policyTypes
-# Egress with NO egress rules. The check must not reach the model server or
-# anything else (the mirror of the Docker fresh container's --network=none).
+# Fresh (the host's independent verifier Pod): default-deny in BOTH
+# directions — policyTypes Ingress + Egress with NO rules. The check must
+# not reach the model server or anything else, and nothing may reach it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: stanok-fresh-deny-all
+  name: stanok-fresh-deny-all-{{REVISION}}
   namespace: default
 spec:
   podSelector:
     matchLabels:
       stanok: fresh
   policyTypes:
+    - Ingress
     - Egress

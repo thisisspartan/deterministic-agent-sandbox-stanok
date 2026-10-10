@@ -9,6 +9,15 @@ value the worker Job receives (fail closed: the URL host must parse as an
 IPv4 address — a hostname the netpol controller cannot match as an ipBlock
 is a configuration error, never a silent render).
 
+Versioned names (Package 1, operator spec 2026-10-10): the template carries
+{{REVISION}} — a deterministic hash of the rendered SEMANTIC content. The
+canonical text excludes comment lines and metadata.name lines, so the hash is
+never self-referential: the name is derived from the revision, the revision
+never contains the name. Same inputs -> same revision; any semantic change
+(addresses, rules, policyTypes) -> a different revision -> a NEW object name
+(the k3s netpol controller ignores NetworkPolicy UPDATES; make-before-break
+cutover needs new names).
+
 Consumers: infra/netpol-smoke.sh (`python3 -m launcher.netpol` prints the
 rendered manifest; the smoke applies exactly what it renders) and the
 launcher, for a future apply-at-startup.
@@ -16,8 +25,10 @@ launcher, for a future apply-at-startup.
 Run: <venv>/bin/python -m launcher.netpol
 """
 
+import hashlib
 import ipaddress
 import os
+import re
 import sys
 from urllib.parse import urlparse
 
@@ -49,8 +60,34 @@ def netpol_variables() -> dict:
     }
 
 
+_NAME_LINE_RE = re.compile(r"^\s*name:\s")
+
+
+def canonical(text: str) -> str:
+    """Semantic content only: comment lines and metadata.name lines are
+    excluded — the revision is never self-referential (the name is derived
+    from it, so hashing the name would make it depend on itself)."""
+    return "\n".join(
+        line for line in text.splitlines()
+        if not line.lstrip().startswith("#") and not _NAME_LINE_RE.match(line)
+    )
+
+
+def revision(text: str) -> str:
+    """Deterministic content hash of the canonical rendered manifest."""
+    return hashlib.sha256(canonical(text).encode("utf-8")).hexdigest()[:12]
+
+
+def render_netpol_with_revision() -> tuple:
+    """Two-pass render: addresses first, then the revision of the canonical
+    semantic content, then the name substitution. Returns (manifest, revision)."""
+    rendered = k8s.render_template(k8s._read_manifest(TEMPLATE), netpol_variables())
+    rev = revision(rendered)
+    return rendered.replace("{{REVISION}}", rev), rev
+
+
 def render_netpol() -> str:
-    return k8s.render_template(k8s._read_manifest(TEMPLATE), netpol_variables())
+    return render_netpol_with_revision()[0]
 
 
 if __name__ == "__main__":

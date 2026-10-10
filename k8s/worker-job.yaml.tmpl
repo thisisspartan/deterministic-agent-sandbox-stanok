@@ -61,6 +61,17 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
+          # Disk bound (Package 1, operator spec 2026-10-10): the Pod's
+          # ephemeral-storage limit counts the writable container layer AND
+          # the emptyDir AND /var/log/pods TOGETHER — so it must NOT equal
+          # the emptyDir sizeLimit (2Gi): a limit equal to the volume size
+          # would evict the Pod for using the volume it was given. requests
+          # 1Gi / limits 4Gi leave headroom for the volume plus logs.
+          resources:
+            requests:
+              ephemeral-storage: "1Gi"
+            limits:
+              ephemeral-storage: "4Gi"
           volumeMounts:
             - name: ticket
               mountPath: /stanok/ticket
@@ -84,4 +95,5 @@ spec:
           configMap:
             name: {{CM_RUNNER}}
         - name: work
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 2Gi
