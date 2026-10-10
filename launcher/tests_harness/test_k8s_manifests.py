@@ -184,6 +184,17 @@ def test_fresh_job_home_tmpdir_aligned():
     assert "mkdir -p /stanok-work/work /stanok-work/home /stanok-work/tmp" in y
 
 
+# --- CC-232: Pod-only test guard marker in both Pod templates ----------
+
+def test_pod_templates_mark_in_pod():
+    # tests/** guard Pod-only invariants behind STANOK_IN_POD; both Pods must
+    # set it, or the fresh Job would skip the very tests it verifies.
+    for name in ("worker-job.yaml.tmpl", "fresh-job.yaml.tmpl"):
+        y = _read(name)
+        assert "name: STANOK_IN_POD" in y, name
+        assert 'value: "1"' in y, name
+
+
 def test_job_timeouts():
     # CC-230: auto-cleanup in both templates; the deadline is rendered from
     # job_deadline() (never a literal in the template).

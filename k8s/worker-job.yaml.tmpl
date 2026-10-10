@@ -51,6 +51,9 @@ spec:
               value: "/stanok-work/logs"
             - name: STANOK_POD_REPO
               value: "/stanok-work/repo"
+            - name: STANOK_IN_POD
+              value: "1"  # CC-232: Pod-only test guard — tests/** skip the
+              # Pod-only invariants on the host (false reds), run them here.
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
           securityContext:

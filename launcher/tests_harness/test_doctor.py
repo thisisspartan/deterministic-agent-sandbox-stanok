@@ -150,10 +150,10 @@ def test_k8s_cluster_nodes_ready():
                     "k8s runtime not expected")
     if shutil.which("kubectl") is None:
         pytest.skip("kubectl unavailable — flagged by test_kubectl_available")
-    # Same kubeconfig resolution as the launch path: the launcher relies on
-    # kubectl's own env resolution (the supervisor exports KUBECONFIG); the
-    # default /etc/rancher/k3s/k3s.yaml is not user-readable — fall back to
-    # ~/.kube/config when KUBECONFIG is unset (the operator host layout).
+    # Same kubeconfig resolution as the launch path (k8s._cluster_env,
+    # CC-232): the default /etc/rancher/k3s/k3s.yaml is not user-readable —
+    # fall back to ~/.kube/config when KUBECONFIG is unset (the operator
+    # host layout).
     env = dict(os.environ)
     kc = Path.home() / ".kube" / "config"
     if not env.get("KUBECONFIG") and kc.is_file():
@@ -165,8 +165,10 @@ def test_k8s_cluster_nodes_ready():
     assert lines, "kubectl returned no nodes"
     for ln in lines:
         fields = ln.split()
-        # columns: NAME STATUS ROLES AGE VERSION — STATUS is 2nd
-        assert "Ready" in fields[1], f"node not Ready: {ln}"
+        # columns: NAME STATUS ROLES AGE VERSION — STATUS is 2nd; exact
+        # match: "NotReady" CONTAINS "Ready" — a substring test is a false
+        # green (same fix as the CC-232 pre-flight gate).
+        assert fields[1] == "Ready", f"node not Ready: {ln}"
 
 
 def test_contract_lock_runsh():
