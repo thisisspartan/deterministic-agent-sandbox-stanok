@@ -559,14 +559,16 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         f.write(f"{int(time.time())} {os.getpid()}\n")
     _install_signal_handlers(run_state)
 
-    # A stale summary.json from an earlier run of this label must not be
-    # re-published as this run's verdict (same as run_sandboxed).
-    stale = os.path.join(live_dir, "summary.json")
-    if os.path.isfile(stale):
-        try:
-            os.replace(stale, stale + ".prev")
-        except OSError:
-            pass
+    # A stale summary.json / failures.log from an earlier run of this label
+    # must not be re-published as this run's verdict (same as run_sandboxed,
+    # CC-237).
+    for stale_name in ("summary.json", "failures.log"):
+        stale = os.path.join(live_dir, stale_name)
+        if os.path.isfile(stale):
+            try:
+                os.replace(stale, stale + ".prev")
+            except OSError:
+                pass
 
     # T3-1: the pre-run contract snapshot of the LIVE tree — the scratch
     # recompute compares against this (the live tree is untouched during the

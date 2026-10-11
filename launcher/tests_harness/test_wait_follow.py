@@ -57,7 +57,7 @@ def test_wait_done_prints_summary_fields(tmp_path, monkeypatch, capsys):
     (evidence / "summary.json").write_text(json.dumps({
         "rc": 0, "verifier": "PASS", "probe_result": "CLEAN-FIRST",
         "turns": 1, "session_id": "s1", "cache_hit_rate": "96.4%",
-        "elapsed_s": 126, "errors": [],
+        "elapsed_s": 126,
     }), encoding="utf-8")
     assert cli.cmd_wait(cfg, "run1", timeout_s=0) == 0
     st = _run_json(capsys)

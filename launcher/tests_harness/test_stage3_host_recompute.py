@@ -30,8 +30,8 @@ from pathlib import Path
 from launcher import summary, verify
 from launcher.config import Config
 
-CLEAN_WORKER = {"rc": 0, "verifier": "PASS", "probe_result": "CLEAN-FIRST",
-                "contract_lock_violations": []}
+# CC-237 (schema v2): typed worker summary — free text lives in failures.log.
+CLEAN_WORKER = {"rc": 0, "verifier": "PASS", "probe_result": "CLEAN-FIRST"}
 
 
 def _tree(tmp_path, label, summary_dict):
@@ -55,6 +55,13 @@ def _published(cfg, label):
     return json.loads(
         (Path(cfg.repo_root) / "evidence" / label / "summary.json")
         .read_text(encoding="utf-8"))
+
+
+def _published_failures(cfg, label):
+    p = Path(cfg.repo_root) / "evidence" / label / "failures.log"
+    if not p.is_file():
+        return []
+    return [line for line in p.read_text(encoding="utf-8").splitlines() if line]
 
 
 # --- 1: clean tree stays green --------------------------------------------------
@@ -98,4 +105,4 @@ def test_host_forces_fail_over_worker_pass(tmp_path):
     assert dst["verifier"] == "FAIL"
     assert dst["probe_result"] == "CONTRACT-FAIL"
     assert any("MODIFIED: tests/t_test.py" in x
-               for x in dst["contract_lock_violations"])
+               for x in _published_failures(cfg, "lbl"))

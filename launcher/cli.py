@@ -34,8 +34,8 @@ from launcher.gates import (
 from launcher.opik import opik_traces_field
 from launcher.session import _install_signal_handlers, run_continuous_session
 from launcher.summary import (
-    _publish_evidence, _rotate_stale_summary, build_summary,
-    write_env_fail_summary, write_summary,
+    _failure_lines, _publish_evidence, _rotate_stale_summary, _write_failures,
+    build_summary, write_env_fail_summary, write_summary,
 )
 from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
@@ -225,6 +225,17 @@ def cmd_run(cfg, args) -> int:
 # ==================================================================================
 # Control utilities (status, stop)
 # ==================================================================================
+def _read_failures(evidence_dir: str) -> list[str]:
+    """CC-237 (schema v2): the failure lines of a published run — plain text
+    from failures.log (one line per failure). Absent file -> [] (a clean run
+    has no failures.log)."""
+    path = os.path.join(evidence_dir, "failures.log")
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return [line for line in f.read().splitlines() if line]
+
+
 def _status_dict(cfg, label: str) -> dict:
     """The status JSON `status` prints — single source, also used by `wait`.
 
@@ -258,7 +269,9 @@ def _status_dict(cfg, label: str) -> dict:
                 "session_id": data.get("session_id"),
                 "cache_hit_rate": data.get("cache_hit_rate"),
                 "elapsed_s": data.get("elapsed_s"),
-                "errors": data.get("errors", [])
+                # CC-237 (schema v2): summary.json is typed — the free text
+                # lives in failures.log next to it.
+                "failures": _read_failures(evidence_dir),
             }
         except Exception as e:
             return {"state": "done", "error": f"summary read error: {e}"}
@@ -376,15 +389,16 @@ def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
     sandbox.reap_stopped(cfg.repo_root)
 
     # S1: the worker writes its summary into LOG_DIR/<label> (the rw mount).
-    # A stale summary.json from an earlier run must not survive: if this
-    # worker crashes before writing, the stale file would otherwise be
-    # re-published as this run's verdict.
-    stale = os.path.join(live_dir, "summary.json")
-    if os.path.isfile(stale):
-        try:
-            os.replace(stale, stale + ".prev")
-        except OSError:
-            pass
+    # A stale summary.json / failures.log from an earlier run must not
+    # survive: if this worker crashes before writing, the stale files would
+    # otherwise be re-published as this run's verdict (CC-237).
+    for stale_name in ("summary.json", "failures.log"):
+        stale = os.path.join(live_dir, stale_name)
+        if os.path.isfile(stale):
+            try:
+                os.replace(stale, stale + ".prev")
+            except OSError:
+                pass
 
     run_state = RunState(evidence_dir=evidence_dir, live_dir=live_dir,
                          marker_path=os.path.join(evidence_dir, ".running"))
@@ -640,6 +654,8 @@ def _early_abort(cfg, marker: str, label: str, ticket: str,
         }
         with open(sum_path, "w", encoding="utf-8") as f:
             json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
+        # CC-237 (schema v2): the refusal text goes to failures.log.
+        _write_failures(summary_dir, _failure_lines(job))
     return int(code)
 
 

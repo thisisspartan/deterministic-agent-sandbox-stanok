@@ -824,6 +824,14 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
                 except asyncio.TimeoutError:
                     return await _turn_timeout_verdict(client, turn_task, job, turn, cfg)
 
+                # CC-237: telemetry BEFORE the trap branch. The trap turn is a
+                # finished turn (the breaker ended it mid-way) — its usage,
+                # tool_activity and turn_telemetry must reach the summary
+                # (cc236 incident: LOOP-TRAP summary showed bash 0/0, tokens 0
+                # because _loop_trap_verdict returned before _record_turn_telemetry).
+                elapsed_turn = time.time() - t0
+                inp, live_context = _record_turn_telemetry(job, total_tokens, result, turn, elapsed_turn)
+
                 # CC-207: the loop-guard circuit breaker tripped mid-turn —
                 # the model repeated one identical call 5x in a row and the
                 # hook signalled termination. NO fix prompt, NO local retries:
@@ -837,9 +845,6 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
                     await _interrupt_client(client)
                     job["turns"] = turn
                     return _loop_trap_verdict(job, result.loop_trap)
-
-                elapsed_turn = time.time() - t0
-                inp, live_context = _record_turn_telemetry(job, total_tokens, result, turn, elapsed_turn)
 
                 # The verdict pipeline (dead-session stop, contract_lock,
                 # observability warnings, verify_gate, NO-OP/PASS/FAIL verdict,

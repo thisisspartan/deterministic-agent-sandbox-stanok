@@ -105,11 +105,11 @@ def _mock_run(tmp_path, monkeypatch, container_rc=0, write_summary=True):
                 d = logdir / "lbl"
                 d.mkdir(exist_ok=True)
                 with open(d / "summary.json", "w", encoding="utf-8") as f:
+                    # CC-237 (schema v2): typed worker summary.
                     json.dump({"label": "lbl", "ticket": "t.md",
                                "rc": container_rc, "verifier": "PASS",
                                "probe_result": "CLEAN-FIRST", "turns": 1,
-                               "contract_lock_violations": [],
-                               "errors": [], "failures": []}, f)
+                               "loop_trap": None}, f)
             return container_rc
 
     monkeypatch.setattr(sandbox, "reap_stopped", lambda *a: calls.append("reap"))

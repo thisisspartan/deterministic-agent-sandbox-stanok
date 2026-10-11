@@ -365,9 +365,11 @@ def test_runner_stale_create_rc13(tmp_path):
         rc = _launch(["run", t, label],
                      {"STANOK_REPO": str(repo),
                       "STANOK_SERVER_URL": DEAD_SERVER, "STANOK_NO_SANDBOX": "1"})
-        # rc=13 is also the "ticket not found" code — pin the REASON.
-        summary = repo / "evidence" / label / "summary.json"
-        errs = json.loads(summary.read_text(encoding="utf-8"))["errors"]
+        # rc=13 is also the "ticket not found" code — pin the REASON
+        # (CC-237: the refusal text lives in failures.log, not summary.json).
+        failures_log = repo / "evidence" / label / "failures.log"
+        errs = [line for line in failures_log.read_text(
+            encoding="utf-8").splitlines() if line]
     finally:
         _cleanup(label)
     assert rc == 13, f"expected rc=13, got rc={rc}"

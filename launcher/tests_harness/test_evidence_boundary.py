@@ -88,6 +88,7 @@ def test_publish_evidence_copies_the_verdict(tmp_path):
     container_dir.mkdir()
     (container_dir / "summary.json").write_text('{"rc": 0}', encoding="utf-8")
     (container_dir / "launcher.stdout.log").write_text("log\n", encoding="utf-8")
+    (container_dir / "failures.log").write_text("boom\n", encoding="utf-8")
     (container_dir / "session-x.jsonl").write_text("{}\n", encoding="utf-8")
 
     summary._publish_evidence(cfg, "run1", 0)
@@ -95,8 +96,21 @@ def test_publish_evidence_copies_the_verdict(tmp_path):
     published = repo / "evidence" / "run1"
     assert (published / "summary.json").read_text(encoding="utf-8") == '{"rc": 0}'
     assert (published / "launcher.stdout.log").is_file()
+    # CC-237: failures.log is part of the verdict artifacts.
+    assert (published / "failures.log").read_text(encoding="utf-8") == "boom\n"
     # The session log stays in LOG_DIR; evidence/ carries the verdict only.
     assert not (published / "session-x.jsonl").exists()
+
+
+def test_publish_evidence_stray_failures_log_not_half_published(tmp_path):
+    # CC-237: the gate stays summary.json-only — a run that died before
+    # writing its verdict publishes NOTHING, even with a stray failures.log.
+    repo, log, cfg = _host_paths(tmp_path)
+    container_dir = log / "run1"
+    container_dir.mkdir()
+    (container_dir / "failures.log").write_text("boom\n", encoding="utf-8")
+    summary._publish_evidence(cfg, "run1", 1)
+    assert not (repo / "evidence").exists()
 
 
 def test_publish_evidence_absent_is_a_noop(tmp_path):

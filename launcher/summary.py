@@ -1,4 +1,17 @@
-"""summary — the verdict artifacts: summary.json, evidence publishing, rotation.
+"""summary — the verdict artifacts: summary.json, failures.log, evidence
+publishing, rotation.
+
+CC-237 (schema v2, operator decision 2026-10-11): summary.json is TYPED —
+scalars and structured fields only, no free text. The allowlist:
+  label, ticket, rc, verifier, probe_result, turns, elapsed_s, session_id,
+  commit_sha, tokens, cache_hit_rate, inference_telemetry, tool_activity,
+  loop_trap, opik_traces  (+ patch_sha256, host-stamped in k8s mode).
+  loop_trap = {"tool": str, "hash": str, "n": int} | None — the typed
+  circuit-breaker record (the protocol reads it as LOOP-TRAP).
+All free text of a run (the error string, verify_gate failures, contract-lock
+violations, host-issued CONTRACT-FAIL/FRESH-FAIL explanations) moves to
+failures.log — one line per failure, plain text. test_summary_schema.py pins
+the allowlist and the types.
 
 build_summary/write_summary (the typed contract, S1 summary routing:
 container -> rw LOG_DIR/<label>),
@@ -52,8 +65,11 @@ def _publish_evidence(cfg, label: str, container_rc: int,
     verifier=FAIL + probe_result=FRESH-FAIL + rc=fresh rc, the tail appended
     to errors. fresh_check=None = not run."""
     src = os.path.join(cfg.log_dir, label)
-    files = ("summary.json", "launcher.stdout.log")
-    if not any(os.path.isfile(os.path.join(src, f)) for f in files):
+    files = ("summary.json", "launcher.stdout.log", "failures.log")
+    # The gate stays summary.json-only: a run that died before writing its
+    # verdict publishes nothing (status "missing" — an aborted run, not a
+    # verdict); a stray failures.log must not half-publish it.
+    if not os.path.isfile(os.path.join(src, "summary.json")):
         return
     dst = os.path.join(cfg.repo_root, "evidence", label)
     os.makedirs(dst, exist_ok=True)
@@ -83,12 +99,13 @@ def _publish_evidence(cfg, label: str, container_rc: int,
         # stays ground truth.
         summary["rc"] = container_rc or int(ExitCode.DEFECT)
         summary["probe_result"] = "CONTRACT-FAIL"
-        summary.setdefault("contract_lock_violations", []).extend(
-            contract_violations)
-        summary["error"] = (
+        # CC-237 (schema v2): the free text goes to failures.log, not to
+        # summary.json — the typed fields (verifier/rc/probe_result) are
+        # forced here, the explanation is appended to the log.
+        _append_failures(dst, [
             "HOST CONTRACT-LOCK: the tree was tampered with after the "
             "pre-run snapshot — the verdict was computed against modified "
-            "protected files")
+            "protected files", *contract_violations])
         with open(sum_dst, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
         log(f"CONTRACT-LOCK: {label}: host recompute: {contract_violations}")
@@ -103,30 +120,87 @@ def _publish_evidence(cfg, label: str, container_rc: int,
         summary["verifier"] = "FAIL"
         summary["rc"] = fresh_rc
         summary["probe_result"] = "FRESH-FAIL"
-        summary.setdefault("errors", []).append(
+        # CC-237 (schema v2): the explanation goes to failures.log.
+        _append_failures(dst, [
             f"HOST FRESH-CHECK: the suite failed in a fresh container the "
-            f"worker never touched (rc={fresh_rc}): {tail}")
+            f"worker never touched (rc={fresh_rc}): {tail}"])
         with open(sum_dst, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
         log(f"FRESH-CHECK: {label}: fresh verify rc={fresh_rc} — "
             "verdict FRESH-FAIL")
 
 
+def _loop_trap_field(job: dict):
+    """CC-237 (schema v2): the typed circuit-breaker record —
+    {"tool": str, "hash": str, "n": int} | None. The marker file may carry
+    extra keys (ts) or malformed values; anything that is not exactly the
+    typed triple publishes None (the protocol reads None as "no trap")."""
+    trap = job.get("loop_trap")
+    if not isinstance(trap, dict):
+        return None
+    tool, hash_, n = trap.get("tool"), trap.get("hash"), trap.get("n")
+    if (isinstance(tool, str) and isinstance(hash_, str)
+            and isinstance(n, int) and not isinstance(n, bool)):
+        return {"tool": tool, "hash": hash_, "n": n}
+    return None
+
+
+def _failure_lines(job: dict) -> list[str]:
+    """CC-237 (schema v2): every free-text failure of a run as plain lines —
+    the error string, verify_gate failures (verify.py entries are
+    (name, msg) tuples or plain strings), contract-lock violations.
+    summary.json stays typed; failures.log carries the text."""
+    lines = []
+    if job.get("error"):
+        lines.append(str(job["error"]))
+    for f in job.get("failures", []):
+        if isinstance(f, (tuple, list)) and len(f) == 2:
+            lines.append(f"{f[0]}: {f[1]}")
+        else:
+            lines.append(str(f))
+    lines.extend(str(v) for v in job.get("contract_lock_violations", []))
+    return lines
+
+
+def _write_failures(directory: str, lines: list[str]) -> None:
+    """Write failures.log — one line per failure, plain text. No lines ->
+    no file: a clean run has no failures.log (the publish gate skips
+    missing files)."""
+    if not lines:
+        return
+    with open(os.path.join(directory, "failures.log"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _append_failures(directory: str, lines: list[str]) -> None:
+    """Append host-issued failure lines to failures.log (create if absent) —
+    used by _publish_evidence for CONTRACT-LOCK / FRESH-CHECK."""
+    if not lines:
+        return
+    with open(os.path.join(directory, "failures.log"), "a", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line + "\n")
+
+
 def _rotate_stale_summary(cfg, label: str) -> None:
-    """Rotate a stale summary.json left by an EARLIER run of the same label
-    (a run aborted at a gate after writing its report, or a killed process).
-    Without rotation, early_abort's write-if-absent guard would keep the OLD
-    report and the supervisor would read a verdict from the previous run.
-    Only rotate when no `.running` marker is present: a live run's evidence
-    must not be touched."""
+    """Rotate a stale summary.json / failures.log left by an EARLIER run of
+    the same label (a run aborted at a gate after writing its report, or a
+    killed process). Without rotation, early_abort's write-if-absent guard
+    would keep the OLD report and the supervisor would read a verdict from
+    the previous run; a stale failures.log would receive the next run's
+    host-appended lines (CC-237). Only rotate when no `.running` marker is
+    present: a live run's evidence must not be touched."""
     evidence_dir, _ = cfg.label_paths(label)
     marker = os.path.join(evidence_dir, ".running")
-    sum_path = os.path.join(evidence_dir, "summary.json")
-    if os.path.isfile(sum_path) and not os.path.exists(marker):
-        try:
-            os.replace(sum_path, sum_path + ".prev")
-        except OSError:
-            pass
+    if os.path.exists(marker):
+        return
+    for name in ("summary.json", "failures.log"):
+        p = os.path.join(evidence_dir, name)
+        if os.path.isfile(p):
+            try:
+                os.replace(p, p + ".prev")
+            except OSError:
+                pass
 
 
 def _status_fields(rc: int, verifier: str, turns: int) -> str:
@@ -209,12 +283,13 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
         "tokens": job.get("tokens", {}),
         "cache_hit_rate": job.get("cache_hit_rate", "0.0%"),
         "inference_telemetry": inference_telemetry,
-        "contract_lock_violations": job.get("contract_lock_violations", []),
         # CC-234: the agent's own tooling activity — bash_ok==0 with a
         # verifier PASS is a PASS-BLIND verdict, not a clean acceptance.
         "tool_activity": job.get("tool_activity", {"bash_total": 0, "bash_ok": 0}),
-        "errors": [job["error"]] if job.get("error") else [],
-        "failures": job.get("failures", []),
+        # CC-237 (schema v2): the typed circuit-breaker record; free text
+        # (error / verify failures / contract violations) goes to
+        # failures.log via _write_failures, never into summary.json.
+        "loop_trap": _loop_trap_field(job),
         "opik_traces": job.get("opik_traces"),
     }
 
@@ -230,17 +305,20 @@ def write_summary(cfg, job: dict, elapsed_s: int) -> None:
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(build_summary(cfg, job, elapsed_s), f, ensure_ascii=False, indent=2)
+    # CC-237 (schema v2): the run's free text goes to failures.log.
+    _write_failures(d, _failure_lines(job))
 
 
 def write_env_fail_summary(cfg, label: str, error: str) -> None:
     """Stage 3 (T3-6): a host-side infrastructure failure — the fresh check
     could not run (EXEC_ERROR). The verdict cannot be issued: the host writes
-    an ENV-FAIL summary (rc=16) with the error text directly into the
-    evidence dir — not a verdict, call the human."""
+    an ENV-FAIL summary (rc=16) into the evidence dir, the error text in
+    failures.log (CC-237) — not a verdict, call the human."""
     evidence_dir, _ = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
     job = {"label": label, "rc": int(ExitCode.ENV_FAIL), "verifier": "FAIL",
            "probe_result": "ENV-FAIL", "turns": 0, "error": error}
     with open(os.path.join(evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
+    _write_failures(evidence_dir, [error])
 

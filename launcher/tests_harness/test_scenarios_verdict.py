@@ -16,6 +16,10 @@ Discipline (operator, 2026-10-09):
     means"): a green scenario means the tree passed the host's checks, nothing
     more.
 
+CC-237 (schema v2): summary.json is typed; the free text of a verdict
+(CONTRACT-LOCK / FRESH-CHECK / ENV-FAIL explanations) is observable in
+failures.log next to it — scenarios 3-6 assert it there.
+
 Scenarios:
   1 honest PASS: clean tree, clean worker summary, fresh green -> published
     PASS byte-identical, fresh ran;
@@ -45,17 +49,17 @@ import pytest
 from launcher import cli, sandbox, verify
 from launcher.config import Config
 
+# CC-237 (schema v2): the worker summary is TYPED — no errors/failures/
+# contract_lock_violations keys; the free text lives in failures.log.
 CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
-                "probe_result": "CLEAN-FIRST", "turns": 1,
-                "contract_lock_violations": [], "errors": [], "failures": []}
+                "probe_result": "CLEAN-FIRST", "turns": 1, "loop_trap": None}
 
 RETRY_WORKER = dict(CLEAN_WORKER, probe_result="PASS-AFTER-LOCAL-RETRY",
-                    turns=2, failures=["turn 1: test_add failed"])
+                    turns=2)
 
 HONEST_FAIL_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 1,
                       "verifier": "FAIL", "probe_result": "VERIFY-FAIL",
-                      "turns": 1, "contract_lock_violations": [], "errors": [],
-                      "failures": ["test_x failed"]}
+                      "turns": 1, "loop_trap": None}
 
 
 def _repo(tmp_path):
@@ -73,6 +77,14 @@ def _repo(tmp_path):
 def _published(repo):
     return json.loads((repo / "evidence" / "lbl" / "summary.json")
                       .read_text(encoding="utf-8"))
+
+
+def _published_failures(repo):
+    """CC-237: the published failure lines (failures.log); absent -> []."""
+    p = repo / "evidence" / "lbl" / "failures.log"
+    if not p.is_file():
+        return []
+    return [line for line in p.read_text(encoding="utf-8").splitlines() if line]
 
 
 def _mock_run(tmp_path, monkeypatch, *, during_run=None,
@@ -167,7 +179,7 @@ def test_scenario_undeclared_new_file_both_zones(tmp_path, monkeypatch, rel):
     dst = _published(repo)
     assert dst["verifier"] == "FAIL"
     assert dst["probe_result"] == "CONTRACT-FAIL"
-    assert any(f"UNDECLARED: {rel}" in x for x in dst["contract_lock_violations"])
+    assert any(f"UNDECLARED: {rel}" in x for x in _published_failures(repo))
     assert "fresh" not in calls  # a fresh run over a tampered tree is uninformative
 
 
@@ -185,7 +197,7 @@ def test_scenario_fresh_check_failure(tmp_path, monkeypatch):
     assert dst["verifier"] == "FAIL"
     assert dst["probe_result"] == "FRESH-FAIL"
     assert dst["rc"] == 1
-    assert any("FRESH-CHECK" in e for e in dst["errors"])
+    assert any("FRESH-CHECK" in e for e in _published_failures(repo))
 
 
 # --- 5: infrastructure failure ------------------------------------------------------
@@ -201,7 +213,7 @@ def test_scenario_infra_failure_fresh_unavailable(tmp_path, monkeypatch):
     dst = _published(repo)
     assert dst["probe_result"] == "ENV-FAIL"
     assert dst["rc"] == 16
-    assert any("fresh check unavailable" in e for e in dst["errors"])
+    assert any("fresh check unavailable" in e for e in _published_failures(repo))
 
 
 # --- 6: forged summary over a tampered tree ------------------------------------------
@@ -220,7 +232,7 @@ def test_scenario_forged_pass_over_tampered_tree(tmp_path, monkeypatch):
     dst = _published(repo)
     assert dst["verifier"] == "FAIL"
     assert dst["probe_result"] == "CONTRACT-FAIL"
-    assert any("tests/t_test.py" in x for x in dst["contract_lock_violations"])
+    assert any("tests/t_test.py" in x for x in _published_failures(repo))
     assert "fresh" not in calls
 
 

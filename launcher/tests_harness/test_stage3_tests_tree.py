@@ -40,9 +40,9 @@ from launcher import cli, sandbox, summary, verify
 from launcher.config import Config
 from launcher.plan import SessionPlan
 
+# CC-237 (schema v2): typed worker summary — free text lives in failures.log.
 CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
-                "probe_result": "CLEAN-FIRST", "turns": 1,
-                "contract_lock_violations": [], "errors": [], "failures": []}
+                "probe_result": "CLEAN-FIRST", "turns": 1, "loop_trap": None}
 
 
 def _repo(tmp_path):
@@ -60,6 +60,13 @@ def _repo(tmp_path):
 def _published(repo):
     return json.loads((repo / "evidence" / "lbl" / "summary.json")
                       .read_text(encoding="utf-8"))
+
+
+def _published_failures(repo):
+    p = repo / "evidence" / "lbl" / "failures.log"
+    if not p.is_file():
+        return []
+    return [line for line in p.read_text(encoding="utf-8").splitlines() if line]
 
 
 def _mock_run(tmp_path, monkeypatch, *, create_during_run=None):
@@ -127,7 +134,7 @@ def test_colorsys_substitution_end_to_end_is_contract_fail(tmp_path, monkeypatch
     assert dst["verifier"] == "FAIL"
     assert dst["probe_result"] == "CONTRACT-FAIL"
     assert any("UNDECLARED: tests/colorsys.py" in x
-               for x in dst["contract_lock_violations"])
+               for x in _published_failures(repo))
     assert "fresh" not in calls  # §1.6: a fresh run over a tampered tree
 
 

@@ -1,8 +1,5 @@
-"""CC-207: the launcher side of the circuit breaker — pure-function pins.
-
-The e2e proof is the first real run that trips the breaker (ticket acceptance
-#3); inventing a session stub harness would be a new mechanism without an
-incident. What is pinned here are the two pure helpers the session code uses:
+"""CC-207: the launcher side of the circuit breaker — pure-function pins +
+the trap-path telemetry pin (CC-237).
 
   _read_loop_trap(marker_path) -> dict | None
       missing / unreadable / non-JSON / directory -> None (best-effort read,
@@ -12,10 +9,22 @@ incident. What is pinned here are the two pure helpers the session code uses:
       test_contract_lock_forced_fail_* pattern: probe_result "LOOP-TRAP",
       verifier FAIL, error string, rc=1. No fix prompt, no retries — a retry
       re-enters the same loop (the marker is cumulative for the session).
-"""
-import json
 
-from launcher import session
+CC-237 added the session-level pin (the incident that justifies it: cc236 —
+the real LOOP-TRAP run published bash_total=0/bash_ok=0 and tokens 0 because
+_loop_trap_verdict returned BEFORE _record_turn_telemetry; the operator's
+required proof: a trap run shows bash_total=5, bash_ok=4). A fake
+ClaudeSDKClient drives run_continuous_session: 4 Bash calls with ok results,
+the 5th identical call writes the marker (the hook's channel), the mid-turn
+breaker ends the turn — the telemetry must be recorded BEFORE the trap
+branch, and the published summary (schema v2) must carry the typed
+loop_trap triple and the real tool_activity.
+"""
+import asyncio
+import json
+import types
+
+from launcher import session, summary
 
 
 MARKER = {"tool": "Read", "hash": "a" * 64, "n": 5, "ts": "2026-10-07T12:00:00"}
@@ -58,3 +67,98 @@ def test_loop_trap_verdict_sets_defect_fields():
         "LOOP-TRAP: Read repeated 5x consecutively — "
         "session terminated by the circuit breaker"
     )
+
+
+# --- CC-237: the trap path records telemetry BEFORE the verdict ------------------
+# Incident cc236: the real LOOP-TRAP run published tool_activity 0/0 and
+# tokens 0 — _loop_trap_verdict returned before _record_turn_telemetry. The
+# operator's required proof: a trap run shows bash_total=5, bash_ok=4.
+
+TRAP_MARKER = {"tool": "Bash", "hash": "b" * 64, "n": 5,
+               "ts": "2026-10-11T12:00:00"}
+
+
+class _Cfg:
+    """Minimal cfg for run_continuous_session with _agent_options patched out:
+    repo_root (no .claude/settings.json -> the hook self-check passes) and
+    turn_timeout_s."""
+
+    def __init__(self, repo_root):
+        self.repo_root = str(repo_root)
+        self.turn_timeout_s = 30
+        self.model = "test-model"
+
+
+def test_trap_path_records_telemetry_before_verdict(tmp_path, monkeypatch):
+    from claude_agent_sdk import (AssistantMessage, ToolResultBlock,
+                                  ToolUseBlock, UserMessage)
+    import claude_agent_sdk
+
+    live = tmp_path / "live"
+    live.mkdir()
+    run_state = types.SimpleNamespace(live_dir=str(live))
+    monkeypatch.setenv("CLAUDE_CODE_TMPDIR", str(tmp_path))  # Bash self-check
+    monkeypatch.setattr(session, "_agent_options", lambda cfg, rs: None)
+
+    clients = []
+
+    class _FakeClient:
+        def __init__(self, options=None):
+            clients.append(self)
+            self.interrupted = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def query(self, prompt):
+            pass
+
+        async def interrupt(self):
+            self.interrupted = True
+
+        async def receive_response(self):
+            # 4 identical Bash calls, each with an ok result
+            for i in range(1, 5):
+                yield AssistantMessage(
+                    content=[ToolUseBlock(id=f"b{i}", name="Bash",
+                                          input={"command": "true"})],
+                    model="m")
+                yield UserMessage(content=[ToolResultBlock(
+                    tool_use_id=f"b{i}", content="ok", is_error=False)])
+            # the 5th identical call: the hook writes the marker (its channel
+            # is live_dir/loop-trap.json), then the mid-turn breaker ends it
+            (live / "loop-trap.json").write_text(json.dumps(TRAP_MARKER),
+                                                 encoding="utf-8")
+            yield AssistantMessage(
+                content=[ToolUseBlock(id="b5", name="Bash",
+                                      input={"command": "true"})],
+                model="m")
+
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _FakeClient)
+
+    job = {"label": "trap-telemetry"}
+    rc = asyncio.run(session.run_continuous_session(
+        _Cfg(tmp_path), run_state, job, "prompt", 0, None))
+
+    # the trap verdict (CC-207) ...
+    assert rc == 1
+    assert job["probe_result"] == "LOOP-TRAP"
+    assert job["verifier"] == "FAIL"
+    assert job["turns"] == 1
+    assert clients and clients[0].interrupted  # the session was interrupted
+    # ... but the trap turn's telemetry was recorded FIRST (CC-237):
+    # 5 Bash calls counted, 4 ok results — the 5th never returned
+    assert job["tool_activity"] == {"bash_total": 5, "bash_ok": 4}
+    assert job["turn_telemetry"][0]["bash_total"] == 5
+    assert job["turn_telemetry"][0]["bash_ok"] == 4
+
+    # the published summary (schema v2): typed loop_trap (ts dropped) +
+    # the real tool_activity — the cc236 gap (0/0) is closed
+    monkeypatch.setenv("STANOK_START_COMMIT", "0" * 40)
+    s = summary.build_summary(_Cfg(tmp_path), job, 0)
+    assert s["probe_result"] == "LOOP-TRAP"
+    assert s["loop_trap"] == {"tool": "Bash", "hash": "b" * 64, "n": 5}
+    assert s["tool_activity"] == {"bash_total": 5, "bash_ok": 4}

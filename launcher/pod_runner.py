@@ -137,7 +137,7 @@ def main() -> int:
     # 6. The payload: one base64 block between the nonce markers.
     files = {"changes.patch": patch}
     run_dir = os.path.join(LOG_DIR, label)
-    for name in ("summary.json", "launcher.stdout.log"):
+    for name in ("summary.json", "launcher.stdout.log", "failures.log"):
         p = os.path.join(run_dir, name)
         if os.path.isfile(p):
             with open(p, "rb") as f:
