@@ -14,6 +14,7 @@ import functools
 import json
 import os
 import signal
+import subprocess
 import time
 import uuid
 from launcher.exitcodes import ExitCode
@@ -164,6 +165,10 @@ class TurnResult:
     loop_trap   — CC-207: the loop-guard termination marker read mid-turn
                   (the hook denied the 5th consecutive identical call), or
                   None if the breaker did not trip.
+    bash_total  — CC-234: count of Bash tool_use blocks in the turn.
+    bash_ok     — CC-234: count of their tool_results that came back without
+                  is_error (the agent's own tooling worked; bash_ok==0 with a
+                  verifier PASS = the agent wrote blind — PASS-BLIND).
     """
 
     usage: dict
@@ -171,6 +176,8 @@ class TurnResult:
     writes: int
     error: str
     loop_trap: dict | None
+    bash_total: int = 0
+    bash_ok: int = 0
 
 
 async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
@@ -184,6 +191,9 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
     writes = 0
     turn_error = ""
     loop_trap = None
+    bash_total = 0
+    bash_ok = 0
+    bash_ids = set()
     marker_path = _loop_trap_path(run_state)
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
@@ -222,8 +232,22 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
         content = getattr(msg, "content", None)
         if isinstance(content, list):
             for block in content:
-                if getattr(block, "name", None) in ("Write", "Edit"):
+                name = getattr(block, "name", None)
+                if name in ("Write", "Edit"):
                     writes += 1
+                elif name == "Bash":
+                    # CC-234: the agent's own tooling — count calls and their
+                    # results (ToolResultBlock carries tool_use_id/is_error).
+                    bash_total += 1
+                    tid = getattr(block, "id", None)
+                    if tid is not None:
+                        bash_ids.add(tid)
+                else:
+                    tid = getattr(block, "tool_use_id", None)
+                    if tid is not None and tid in bash_ids:
+                        bash_ids.discard(tid)  # count each result once
+                        if not getattr(block, "is_error", False):
+                            bash_ok += 1
 
         _write_stream_msg(stream_f, turn, msg)
 
@@ -241,6 +265,8 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
         writes=writes,
         error=turn_error,
         loop_trap=loop_trap,
+        bash_total=bash_total,
+        bash_ok=bash_ok,
     )
 
 
@@ -503,6 +529,17 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
             job["probe_result"] = "NO-OP-PASS"
             job["turns"] = turn
             return 1, ""
+        # CC-234 (operator spec 2026-10-11): a PASS where the agent never
+        # completed a single successful Bash call is NOT a clean acceptance —
+        # the in-process verifier hook can green the suite while the agent's
+        # own Bash is dead (the cc231/cc233 incident: every call died on the
+        # read-only /tmp, the agent wrote blind). rc/verifier stay as
+        # measured; probe_result records the demotion (decide() override).
+        activity = job.get("tool_activity") or {}
+        if activity.get("bash_ok", 0) == 0:
+            log("PASS-BLIND: verifier PASS but zero successful Bash calls "
+                "by the agent — not a clean acceptance")
+            job["probe_result"] = "PASS-BLIND"
         log("VERIFIER: PASS — All tests passed successfully!")
         job["verifier"] = "PASS"
         job["turns"] = turn
@@ -627,6 +664,12 @@ def _record_turn_telemetry(job: dict, total_tokens: dict, result: TurnResult,
         f"live window: {live_context} | "
         f"Session cache_hit: {session_hit_rate:.1f}%")
 
+    # CC-234: the agent's own tooling activity (the Bash-success metric —
+    # a PASS with bash_ok==0 is PASS-BLIND, not a clean acceptance).
+    activity = job.setdefault("tool_activity", {"bash_total": 0, "bash_ok": 0})
+    activity["bash_total"] += result.bash_total
+    activity["bash_ok"] += result.bash_ok
+
     job.setdefault("turn_telemetry", []).append({
         "turn": turn,
         "elapsed_s": round(elapsed_turn, 1),
@@ -637,13 +680,50 @@ def _record_turn_telemetry(job: dict, total_tokens: dict, result: TurnResult,
         "live_context_tokens": live_context,
         "turn_hit_rate": round(turn_hit_rate, 1),
         "writes": result.writes,
+        "bash_total": result.bash_total,
+        "bash_ok": result.bash_ok,
     })
     return inp, live_context
+
+
+def _bash_selfcheck(job: dict) -> int | None:
+    """CC-234 startup self-check (operator condition 2026-10-11): reproduce the
+    CLI Bash tool's tmp root — CLAUDE_CODE_TMPDIR || /tmp, then
+    "claude-<uid>" (cli.js 2.1.88) — BEFORE the model starts: mkdir + a probe
+    file + `bash -c pwd` in it. The cc231/cc233 incident: under a read-only
+    /tmp every Bash call died ENOENT, the agent wrote blind for the whole run
+    and the host verdict was still PASS. Fail-closed here: ENV-FAIL (rc=16)
+    before a single model token is spent. Returns None when OK."""
+    root = os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp"
+    probe_dir = os.path.join(root, f"claude-{os.getuid()}")
+    probe_file = os.path.join(probe_dir, "stanok-selfcheck")
+    try:
+        os.makedirs(probe_dir, exist_ok=True)
+        with open(probe_file, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe_file)
+        r = subprocess.run(["bash", "-c", "pwd"], cwd=probe_dir,
+                           capture_output=True, timeout=10)
+        if r.returncode != 0:
+            raise OSError(f"bash exited {r.returncode}: "
+                          f"{r.stderr.decode(errors='replace').strip()}")
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"ENV-FAIL: Bash self-check failed ({e}) — the CLI Bash tmp root "
+            f"{probe_dir} is not usable; no model call was made")
+        job["error"] = f"ENV-FAIL: Bash self-check failed: {e}"
+        job["verifier"] = "FAIL"
+        job["turns"] = 0
+        return int(ExitCode.ENV_FAIL)
+    return None
 
 
 async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
                                 max_retries: int, plan: "SessionPlan") -> int:
     from claude_agent_sdk import ClaudeSDKClient
+
+    rc = _bash_selfcheck(job)
+    if rc is not None:
+        return rc
 
     local_run_id = str(uuid.uuid4())[:8]
     stream_out_path = os.path.join(run_state.live_dir, f"session-{local_run_id}.jsonl")

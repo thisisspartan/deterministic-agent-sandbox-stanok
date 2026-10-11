@@ -13,8 +13,11 @@ identical call the hook denies AND writes a JSON marker
 no marker: outside a stanok session the hook stays a pure warning). The
 launcher reads the marker and ends the run with probe_result "LOOP-TRAP"
 (pinned in test_loop_trap.py).
-Fail-open: any parse/IO failure = exit 0; a marker write failure never
-blocks the deny.
+Fail-open: a parse failure = exit 0; a marker write failure never blocks the
+deny. CC-234: the state path follows TMPDIR (the Pod's writable emptyDir —
+the old hardcoded /tmp was dead under readOnlyRootFilesystem) and a STATE
+write failure is fail-CLOSED (exit 2): a guard that cannot persist state is
+dead. Tests are hermetic: the sid fixture points TMPDIR at pytest's tmp_path.
 """
 import json
 import os
@@ -29,10 +32,11 @@ HOOK = Path(__file__).resolve().parents[2] / ".claude" / "hooks" / "loop-guard.p
 
 
 @pytest.fixture
-def sid():
+def sid(tmp_path, monkeypatch):
+    # CC-234 hermetic: state lives under tmp_path (auto-cleaned), never /tmp.
     s = uuid.uuid4().hex
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
     yield s
-    Path(f"/tmp/claude-loop-guard/{s}.state").unlink(missing_ok=True)
 
 
 def _clean_env(extra=None):
@@ -140,9 +144,42 @@ def test_marker_fail_open(sid, tmp_path):
 
 def test_no_env_no_marker(sid, tmp_path):
     # STANOK_LOOP_TRAP_FILE unset: the deny still happens, no marker anywhere.
+    # (tmp_path now legitimately holds the state dir — only markers are
+    # asserted absent.)
     p = {"tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": sid}
     for i in range(4):
         assert call_hook(p).returncode == 0, f"call {i + 1} denied early"
     r = call_hook(p)
     assert r.returncode == 2
-    assert list(tmp_path.iterdir()) == []
+    assert not [p for p in tmp_path.rglob("*") if "loop-trap" in p.name]
+
+
+# --- CC-234: TMPDIR-based state path + fail-closed on state-write failure ----
+
+def test_state_path_follows_tmpdir(tmp_path, monkeypatch):
+    s = uuid.uuid4().hex
+    state_root = tmp_path / "custom-tmp"  # does not exist: the hook creates it
+    monkeypatch.setenv("TMPDIR", str(state_root))
+    p = {"tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": s}
+    assert call_hook(p).returncode == 0
+    state = state_root / "claude-loop-guard" / f"{s}.state"
+    assert state.is_file(), "state must live under $TMPDIR/claude-loop-guard"
+    st = json.loads(state.read_text(encoding="utf-8"))
+    assert st["n"] == 1
+    # the old hardcoded /tmp path must NOT be used
+    assert not Path(f"/tmp/claude-loop-guard/{s}.state").exists()
+
+
+def test_state_write_failure_fail_closed(tmp_path, monkeypatch):
+    # A read-only TMPDIR (the Pod pre-CC-234 situation): the state cannot be
+    # persisted -> the guard is dead -> deny loudly, never a silent pass.
+    ro = tmp_path / "ro-tmp"
+    ro.mkdir()
+    ro.chmod(0o500)
+    monkeypatch.setenv("TMPDIR", str(ro))
+    p = {"tool_name": "Bash", "tool_input": {"command": "ls"},
+         "session_id": uuid.uuid4().hex}
+    r = call_hook(p)
+    ro.chmod(0o700)  # let pytest clean up
+    assert r.returncode == 2
+    assert "не записано" in r.stderr

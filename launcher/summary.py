@@ -210,6 +210,9 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
         "cache_hit_rate": job.get("cache_hit_rate", "0.0%"),
         "inference_telemetry": inference_telemetry,
         "contract_lock_violations": job.get("contract_lock_violations", []),
+        # CC-234: the agent's own tooling activity — bash_ok==0 with a
+        # verifier PASS is a PASS-BLIND verdict, not a clean acceptance.
+        "tool_activity": job.get("tool_activity", {"bash_total": 0, "bash_ok": 0}),
         "errors": [job["error"]] if job.get("error") else [],
         "failures": job.get("failures", []),
         "opik_traces": job.get("opik_traces"),

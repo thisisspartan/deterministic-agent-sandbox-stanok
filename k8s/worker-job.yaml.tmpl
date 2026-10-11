@@ -59,9 +59,14 @@ spec:
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true  # CC-229 (SPEC-READONLY-ROOT): all Pod
-            # writes already go to the /stanok-work emptyDir (HOME/TMPDIR/CLAUDE_TMPDIR
-            # re-redirected by pod_runner.py; repo/logs under /stanok-work).
+            readOnlyRootFilesystem: true  # CC-229 (SPEC-READONLY-ROOT).
+            # CC-234 correction: the CC-229 claim "all Pod writes already go
+            # to /stanok-work" was FALSE — the CLI's Bash tool hardcodes
+            # mkdir (CLAUDE_CODE_TMPDIR||/tmp)/claude-<uid> (cli.js 2.1.88);
+            # with a read-only /tmp every Bash call died ENOENT (traces
+            # cc231/cc233). The /tmp emptyDir below + the renamed env var in
+            # pod_runner.py close it; session.py self-checks the path before
+            # the model starts (ENV-FAIL otherwise).
             capabilities:
               drop:
                 - ALL
@@ -90,6 +95,9 @@ spec:
               readOnly: true
             - name: work
               mountPath: /stanok-work
+            - name: tmp-dir
+              mountPath: /tmp  # CC-234: writable /tmp (see the correction
+              # comment at readOnlyRootFilesystem above).
       volumes:
         - name: ticket
           configMap:
@@ -103,3 +111,8 @@ spec:
         - name: work
           emptyDir:
             sizeLimit: 2Gi
+        - name: tmp-dir
+          emptyDir:
+            sizeLimit: 512Mi  # CC-234 (operator spec 2026-10-11): the CLI's
+            # Bash tool mkdirs (CLAUDE_CODE_TMPDIR||/tmp)/claude-<uid>; with a
+            # read-only /tmp every call died ENOENT (traces cc231/cc233).

@@ -11,8 +11,14 @@ CC-207 (инцидент CC-204-retry3: 31 идентичный Read, текст
 {"tool","hash","n","ts"} в STANOK_LOOP_TRAP_FILE (env не задан — маркера
 нет: вне stanok-сессии хук остаётся чистой предупреждающей заглушкой).
 Лончер читает маркер и завершает run с probe_result "LOOP-TRAP".
-Fail-open: любой сбой = exit 0; сбой записи маркера никогда не блокирует
-отказ.
+
+CC-234 (инцидент cc231/cc233): путь состояния больше не hardcoded /tmp —
+он строится из TMPDIR (Pod редиректит TMPDIR во writable emptyDir; под
+readOnlyRootFilesystem старый путь не писался никогда, счётчик молчал,
+breaker был мёртв 5 прогонов). Fail-closed на сбой записи состояния:
+гард, не способный сохранить состояние, мёртв — deny громко, а не
+молчаливый pass. Сбой разбора stdin и сбой записи маркера остаются
+fail-open (exit 0): отказ важнее маркера.
 
 Копия машинной сессии (cwd=stanok/). Копия supervisor-сессии
 (darkcast/.claude/hooks/loop-guard.py) намеренно НЕ синхронизируется
@@ -38,7 +44,10 @@ try:
 except Exception:
     sys.exit(0)
 
-p = f"/tmp/claude-loop-guard/{sid}.state"
+# CC-234: TMPDIR-based (the Pod's writable emptyDir; /tmp is read-only
+# there). Unset TMPDIR (host/Docker) -> /tmp as before.
+p = os.path.join(os.environ.get("TMPDIR") or "/tmp",
+                 "claude-loop-guard", f"{sid}.state")
 last, n = None, 0
 try:
     with open(p) as f:
@@ -57,8 +66,13 @@ try:
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w") as f:
         json.dump({"last": last, "n": n}, f)
-except OSError:
-    pass
+except OSError as e:
+    # CC-234 fail-closed: состояние не записано -> гард не может считать
+    # повторы -> deny громко (молчаливый pass и убил breaker в Pod).
+    sys.stderr.write(
+        f"loop-guard: состояние не записано ({e}) — circuit breaker не "
+        "может работать; вызов запрещён. Проверьте доступность TMPDIR.\n")
+    sys.exit(2)
 
 if n >= THRESHOLD:
     marker = os.environ.get("STANOK_LOOP_TRAP_FILE")

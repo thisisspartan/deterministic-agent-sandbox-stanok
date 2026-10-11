@@ -87,6 +87,9 @@ spec:
               readOnly: true
             - name: work
               mountPath: /stanok-work
+            - name: tmp-dir
+              mountPath: /tmp  # CC-234: writable /tmp — the suite itself may
+              # write there under readOnlyRootFilesystem (mirror of the worker).
       volumes:
         - name: tree
           configMap:
@@ -97,3 +100,6 @@ spec:
         - name: work
           emptyDir:
             sizeLimit: 2Gi
+        - name: tmp-dir
+          emptyDir:
+            sizeLimit: 512Mi  # CC-234: mirror of the worker Job.

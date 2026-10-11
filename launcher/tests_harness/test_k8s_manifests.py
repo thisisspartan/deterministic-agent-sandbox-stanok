@@ -32,6 +32,12 @@ checks (no YAML parser in the image — the checks are text invariants):
      300 in BOTH templates (auto-cleanup); activeDeadlineSeconds rendered
      from job_deadline(), default 1800 (30-min insurance), env override
      STANOK_K8S_JOB_DEADLINE_S
+  7  CC-234 (operator spec 2026-10-11): writable /tmp — an emptyDir tmp-dir
+     (512Mi) mounted at /tmp in BOTH job templates (the CLI Bash tool
+     mkdirs (CLAUDE_CODE_TMPDIR||/tmp)/claude-<uid>; a read-only /tmp
+     killed every Bash call, traces cc231/cc233); pod_runner.py sets
+     CLAUDE_CODE_TMPDIR (the name the CLI actually reads), never the old
+     CLAUDE_TMPDIR
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -258,3 +264,26 @@ def test_job_disk_bounds():
         assert 'ephemeral-storage: "1Gi"' in y
         assert 'ephemeral-storage: "4Gi"' in y
         assert 'ephemeral-storage: "2Gi"' not in y
+
+
+# --- CC-234 (operator spec 2026-10-11): writable /tmp + the CLI env name ---
+
+def test_job_templates_mount_tmp():
+    # The CLI Bash tool mkdirs (CLAUDE_CODE_TMPDIR||/tmp)/claude-<uid>
+    # (cli.js 2.1.88); under readOnlyRootFilesystem a read-only /tmp made
+    # every Bash call die ENOENT (traces cc231/cc233). Both Pods get a
+    # dedicated emptyDir at /tmp.
+    for name in ("worker-job.yaml.tmpl", "fresh-job.yaml.tmpl"):
+        y = _read(name)
+        assert "name: tmp-dir" in y, name
+        assert "mountPath: /tmp" in y, name
+        assert "sizeLimit: 512Mi" in y, name
+
+
+def test_pod_runner_sets_claude_code_tmpdir():
+    src = (Path(__file__).resolve().parents[1] / "pod_runner.py").read_text(
+        encoding="utf-8")
+    # the name the CLI Bash tool actually reads (cli.js: CLAUDE_CODE_TMPDIR
+    # || "/tmp"); the old CLAUDE_TMPDIR only reached the nested bwrap.
+    assert '"CLAUDE_CODE_TMPDIR": tmp' in src
+    assert '"CLAUDE_TMPDIR"' not in src
