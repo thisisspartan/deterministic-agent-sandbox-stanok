@@ -359,10 +359,14 @@ def _kubectl_checked(*argv, timeout: int = 60):
     return r
 
 
-def _apply_manifest(text: str) -> None:
-    r = _kubectl("apply", "-f", "-", input_text=text)
+def _create_manifest(text: str) -> None:
+    """`create`, not `apply` (operator P0 2026-10-11): create fails when the
+    object already exists, so a success proves THIS run created it — the
+    ownership proof the finally cleanup needs. An `apply` would silently
+    modify a foreign object and the cleanup would delete it."""
+    r = _kubectl("create", "-f", "-", input_text=text)
     if r.returncode != 0:
-        raise RuntimeError(f"kubectl apply failed (rc={r.returncode}): "
+        raise RuntimeError(f"kubectl create failed (rc={r.returncode}): "
                            f"{r.stderr.strip()}")
 
 
@@ -444,15 +448,17 @@ def job_deadline() -> int:
 # the same `run.sh list; run.sh test --all` pair, no model endpoint)
 # ==================================================================================
 def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
-               patch_file: str, deadline: int) -> tuple:
+               patch_file: str, deadline: int, created: list) -> tuple:
     try:
         _kubectl_checked("create", "configmap", cm_patch, "-n", ns,
                         f"--from-file=changes.patch={patch_file}")
-        _apply_manifest(render_template(_read_manifest("fresh-job.yaml.tmpl"), {
+        created.append(("configmap", cm_patch))
+        _create_manifest(render_template(_read_manifest("fresh-job.yaml.tmpl"), {
             "JOB_NAME": fresh_name.removeprefix("stanok-fresh-"),
             "IMAGE": cfg.docker_image, "NAMESPACE": ns,
             "CM_TREE": cm_tree, "CM_PATCH": cm_patch, "DEADLINE": str(deadline),
         }))
+        created.append(("job", fresh_name))
     except RuntimeError as e:
         return (1, f"EXEC_ERROR: {e}")
     if _wait_job_terminal(fresh_name, ns, deadline + 60) == "complete":
@@ -595,16 +601,25 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         f.write(tree_blob)
 
     rc = int(ExitCode.CHILD_DIED)
+    # P0 (operator 2026-10-11): the finally cleanup deletes ONLY resources
+    # whose creation by THIS run is proven — a ConfigMap create that returned
+    # success, a Job created via `create` (not `apply`: create fails if the
+    # object already exists, so success == ownership). A foreign object is
+    # never deleted.
+    created = []
     try:
         try:
             _kubectl_checked("create", "configmap", cm_ticket, "-n", ns,
                              f"--from-file=ticket.md={args.ticket_path}")
+            created.append(("configmap", cm_ticket))
             _kubectl_checked("create", "configmap", cm_tree, "-n", ns,
                              f"--from-file=tree.tar.gz.b64={tree_file}")
+            created.append(("configmap", cm_tree))
             _kubectl_checked("create", "configmap", cm_runner, "-n", ns,
                              "--from-file=pod_runner.py=" +
                              os.path.join(LAUNCHER_DIR, "pod_runner.py"))
-            _apply_manifest(render_template(
+            created.append(("configmap", cm_runner))
+            _create_manifest(render_template(
                 _read_manifest("worker-job.yaml.tmpl"), {
                     "JOB_NAME": job_name, "LABEL": label, "NONCE": nonce,
                     "IMAGE": cfg.docker_image, "NAMESPACE": ns,
@@ -615,6 +630,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                     "CM_TICKET": cm_ticket, "CM_TREE": cm_tree,
                     "CM_RUNNER": cm_runner,
                 }))
+            created.append(("job", job_name))
             pod = _pod_of_job(job_name, ns)
             if pod is not None:
                 _stream_pod_logs(pod, ns, os.path.join(live_dir, "pod-stdout.log"),
@@ -732,7 +748,8 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         fresh_infra_error = None
         if not contract_violations:
             fresh_rc, fresh_tail = _fresh_job(cfg, ns, fresh_name, cm_tree,
-                                              cm_patch, patch_file, deadline)
+                                              cm_patch, patch_file, deadline,
+                                              created)
             if fresh_tail.startswith("EXEC_ERROR:"):
                 fresh_infra_error = fresh_tail
             else:
@@ -776,11 +793,11 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     except KeyboardInterrupt:
         return run_state.interrupted_rc or 130
     finally:
-        # Best-effort cleanup: the Jobs and transport ConfigMaps are run
-        # artifacts, not cluster state to keep.
-        for kind, name in (("job", job_name), ("job", fresh_name),
-                          ("configmap", cm_ticket), ("configmap", cm_tree),
-                          ("configmap", cm_runner), ("configmap", cm_patch)):
+        # Best-effort cleanup of THIS run's artifacts only: every entry in
+        # `created` was created by a successful create (ownership proven).
+        # Resources this run never created are NOT touched — a foreign object
+        # with a colliding name survives (operator P0 2026-10-11).
+        for kind, name in created:
             _kubectl("delete", kind, name, "-n", ns, "--ignore-not-found",
                      "--wait=false")
         try:

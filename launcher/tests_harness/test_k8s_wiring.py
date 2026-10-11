@@ -16,6 +16,11 @@ is testable without a cluster. Tests:
   7  _preflight_cluster: node-Ready and manifest-test branches
   8  host_launch_k8s: gate aborts (rc=16) BEFORE any cluster call; when the
      gate passes, the cluster calls follow it (order proven)
+ P0 cleanup ownership (operator 2026-10-11):
+  9  no test reaches a real cluster: the common kubectl choke point _kubectl
+     is mocked, the direct subprocess.run points are a tripwire; the finally
+     deletes ONLY resources whose creation by this run is proven (create,
+     not apply) — a foreign object with a colliding name is never deleted
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_wiring.py -q
 """
@@ -167,6 +172,17 @@ def _k8s_args(tmp_path):
                              ticket_path=str(ticket), local_retries=0, extra=[])
 
 
+def _no_real_cluster_calls(monkeypatch):
+    """P0 (operator 2026-10-11): a test must never reach a real cluster.
+    The two direct subprocess.run points (_preflight_cluster,
+    _stream_pod_logs) are a tripwire: if any code path bypasses the mocked
+    _kubectl choke point, the test fails loudly instead of touching the
+    cluster."""
+    def guard(*a, **k):
+        raise AssertionError(f"real cluster call from test: {a[:3]}")
+    monkeypatch.setattr(k8s.subprocess, "run", guard)
+
+
 def test_gate_aborts_before_any_cluster_call(tmp_path, monkeypatch):
     repo, cfg = _k8s_repo(tmp_path)
     args = _k8s_args(tmp_path)
@@ -174,8 +190,9 @@ def test_gate_aborts_before_any_cluster_call(tmp_path, monkeypatch):
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
     monkeypatch.setattr(k8s, "_preflight_cluster",
                         lambda cfg: "cluster unreachable: mock")
-    monkeypatch.setattr(k8s, "_kubectl_checked", lambda *a, **k: calls.append(a))
-    monkeypatch.setattr(k8s, "_apply_manifest", lambda text: calls.append("apply"))
+    _no_real_cluster_calls(monkeypatch)
+    monkeypatch.setattr(k8s, "_kubectl",
+                        lambda *a, **k: calls.append(a) or _FakeCompleted(0))
     marker = str(tmp_path / ".running")
     rc = k8s.host_launch_k8s(cfg, args, marker)
     assert rc == 16  # infrastructure defect, not a ticket defect
@@ -192,11 +209,47 @@ def test_gate_runs_before_cluster_calls(tmp_path, monkeypatch):
                         lambda cfg: order.append("gate") or None)
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")  # base64 str
     monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
+    _no_real_cluster_calls(monkeypatch)
 
     def stop(*a, **k):
-        order.append("cluster")
-        raise RuntimeError("stop-here")
-    monkeypatch.setattr(k8s, "_kubectl_checked", stop)
+        order.append(a[0])
+        return _FakeCompleted(1, stderr="stop-here")  # -> _kubectl_checked raises
+    monkeypatch.setattr(k8s, "_kubectl", stop)
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
-    assert order == ["gate", "cluster"]  # gate first, resources after it
-    assert rc == 16  # the mocked cluster call raised -> infra path
+    assert order == ["gate", "create"]  # gate first, resources after it
+    assert rc == 16  # the failed cluster call -> infra path
+    # P0: nothing was created -> the finally must NOT touch the cluster.
+    # A foreign resource with a colliding name is never deleted.
+    assert "delete" not in order
+
+
+def test_cleanup_deletes_only_created_resources(tmp_path, monkeypatch):
+    # P0 (operator 2026-10-11): the finally deletes exactly the resources
+    # this run created (ownership proven by a successful create). The fresh
+    # Job / patch ConfigMap are never created here (the run aborts before
+    # the fresh check) -> their names must not appear in any delete.
+    repo, cfg = _k8s_repo(tmp_path)
+    args = _k8s_args(tmp_path)
+    monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
+    monkeypatch.setattr(k8s, "_preflight_cluster", lambda cfg: None)
+    monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
+    monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
+    _no_real_cluster_calls(monkeypatch)
+    calls = []
+
+    def fake(*a, **k):
+        calls.append(a)
+        return _FakeCompleted(0)  # every create succeeds
+    monkeypatch.setattr(k8s, "_kubectl", fake)
+    monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: None)
+    monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "failed")
+    rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
+    assert rc == 17  # no payload block -> aborted, as designed
+    creates = [a for a in calls if a[0] == "create" and a[1] == "configmap"]
+    assert {a[2] for a in creates} == {"stanok-ticket-lbl", "stanok-tree-lbl",
+                                       "stanok-runner-lbl"}
+    assert ("create", "-f", "-") in calls  # the Job lands via create, not apply
+    deletes = [a for a in calls if a[0] == "delete"]
+    assert {(a[1], a[2]) for a in deletes} == {
+        ("configmap", "stanok-ticket-lbl"), ("configmap", "stanok-tree-lbl"),
+        ("configmap", "stanok-runner-lbl"), ("job", "stanok-job-lbl")}
