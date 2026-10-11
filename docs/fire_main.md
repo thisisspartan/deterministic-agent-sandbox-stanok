@@ -1,4 +1,4 @@
-# fire_main (TASK-STANOK-CC-242 / FIRE-03)
+# fire_main (TASK-STANOK-CC-242 / FIRE-03; FIRE-04 wiring)
 
 The runnable Doom fire: the main loop that ties `src/fire_engine.py` and
 `src/fire_render.py` (imported, never modified) to a terminal — with FPS
@@ -9,7 +9,7 @@ dependencies are injectable, so the loop is fully testable without a real TTY.
 
 `src/fire_main.py`
 
-- `FireApp(out, clock, size_fn=shutil.get_terminal_size)`
+- `FireApp(out, clock, size_fn=shutil.get_terminal_size, keys=None)`
   - `out` — a sink with `.write(str)` (real app: `sys.stdout`).
   - `clock` — an object with `.perf_counter()` and `.sleep(s)` (real app: the
     `time` module).
@@ -18,6 +18,9 @@ dependencies are injectable, so the loop is fully testable without a real TTY.
     per terminal row (half-block), so a field twice as tall as the terminal
     fills it exactly.
   - `wind` — attribute, default 0, passed to `field.step(wind)`.
+  - `keys` (FIRE-04) — optional, a KeyReader-like object with `.read()`
+    returning an action or `None` (`src/fire_input.py`). `None` (default,
+    and all existing tests) → no input handling, behavior unchanged.
 
 - `run(fps=30, max_frames=None)`
   1. Installs signal handlers (SIGINT/SIGTERM → request stop; SIGWINCH → set
@@ -28,6 +31,16 @@ dependencies are injectable, so the loop is fully testable without a real TTY.
        field from a fresh `size_fn()` call — geometry is recomputed ONLY here,
        never inside step/render, so a resize can never tear a frame mid-render
        (no IndexError).
+     - **keys (FIRE-04):** if `keys` is set, poll `keys.read()` ONCE, before
+       step: `wind_left`/`wind_right` adjust `wind` by ∓1/±1 (clamped
+       `[-3, 3]`, same bound the engine applies); `intensity_up`/
+       `intensity_down` adjust an intensity level (clamped ≥ 0) implemented
+       as an extra decay applied to the field values BEFORE `step` — the
+       engine's `step` has no intensity parameter, so each level subtracts 1
+       from every value, clamped at 0, leaving the source row untouched (the
+       engine treats it as read-only); `quit` requests stop through the same
+       `_request_stop` path as SIGINT and takes effect before the frame is
+       drawn. A `quit` stop still reaches teardown exactly once (finally).
      - `field.step(wind)`; then exactly **one** `out.write(render_frame(field))`
        per frame.
      - **delta-time compensation:** absolute frame deadlines —
@@ -46,7 +59,10 @@ dependencies are injectable, so the loop is fully testable without a real TTY.
 
 - `parse_fps(argv=None) -> int` — `--fps N`, default 30.
 - `main()` — builds the real app (`sys.stdout`, `time`,
-  `shutil.get_terminal_size`) and runs it. `if __name__ == "__main__": main()`.
+  `shutil.get_terminal_size`) and runs it. A `KeyReader` is enabled on real
+  stdin ONLY when `sys.stdin.isatty()` (closed in `finally`, restoring the
+  terminal); non-tty runs (CI, PTY harness, pipes) keep `keys=None`.
+  `if __name__ == "__main__": main()`.
 
 ## Why injectable
 
@@ -74,3 +90,9 @@ applied at the next tick start.
   no sleep when a frame is already behind budget; a custom `--fps` scales the
   budget.
 - `parse_fps`: default 30, `--fps 60` honored.
+
+FIRE-04 wiring is tested in `tests/fire_input_test.py` (fake keys driving a
+bounded run with a spy field): wind adjustments and clamping observed in the
+`wind` passed to `step`, intensity decay applied to values before step,
+`quit` stopping the loop with exactly one EXIT, and `keys=None` leaving
+behavior unchanged.

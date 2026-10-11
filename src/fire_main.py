@@ -27,8 +27,14 @@ Contract:
   exactly once total; a second `teardown()` is a no-op. Signal handlers are
   restored on teardown.
 - SIGWINCH handler only sets a flag — no buffer work in the handler.
+- Interactivity (FIRE-04): FireApp gains an optional `keys` (a KeyReader-like
+  with `.read()`); once per tick, BEFORE step, `keys.read()` is polled and
+  the action applied (wind / intensity / quit). `keys=None` (default, and
+  all non-tty runs) leaves behavior unchanged.
 - parse_fps(argv=None) -> int: `--fps N`, default 30. main() builds the real
-  app (sys.stdout, time, shutil terminal size) and runs it.
+  app (sys.stdout, time, shutil terminal size) and runs it; a KeyReader is
+  enabled on real stdin ONLY when stdin is a tty (`sys.stdin.isatty()`), so
+  non-tty runs (CI, PTY harness) keep working.
 """
 
 import argparse
@@ -41,22 +47,30 @@ import time
 
 try:  # imported as part of the package (tests, `python3 -m pytest`)
     from src.fire_engine import FireField
+    from src.fire_input import KeyReader
     from src.fire_render import ENTER, EXIT, render_frame
 except ImportError:  # run directly: `python3 src/fire_main.py` puts src/ on sys.path
     from fire_engine import FireField
+    from fire_input import KeyReader
     from fire_render import ENTER, EXIT, render_frame
 
 DEFAULT_FPS = 30
+
+# Same clamp the engine applies to wind (fire_engine._WIND_LIMIT).
+_WIND_LIMIT = 3
 
 
 class FireApp:
     """The Doom fire main loop with injectable out / clock / size_fn."""
 
-    def __init__(self, out, clock, size_fn=shutil.get_terminal_size):
+    def __init__(self, out, clock, size_fn=shutil.get_terminal_size,
+                 keys=None):
         self.out = out
         self.clock = clock
         self.size_fn = size_fn
+        self.keys = keys  # KeyReader-like with .read(), or None (no input)
         self.wind = 0
+        self.intensity = 0  # extra decay level applied before each step
         self._stop = False
         self._resized = False
         self._torn_down = False
@@ -99,6 +113,41 @@ class FireApp:
                 pass  # not on the main thread: nothing left to restore
         self._prev_handlers = None
 
+    # --- keyboard input (FIRE-04) ----------------------------------------------
+
+    def _poll_keys(self):
+        """Poll the injected keys once and apply the action. No keys -> no-op
+        (behavior identical to pre-FIRE-04). 'quit' requests stop through the
+        SAME path as SIGINT, so teardown still runs exactly once."""
+        if self.keys is None:
+            return
+        action = self.keys.read()
+        if action == "wind_left":
+            self.wind = max(-_WIND_LIMIT, self.wind - 1)
+        elif action == "wind_right":
+            self.wind = min(_WIND_LIMIT, self.wind + 1)
+        elif action == "intensity_up":
+            self.intensity += 1
+        elif action == "intensity_down":
+            self.intensity = max(0, self.intensity - 1)
+        elif action == "quit":
+            self._request_stop()
+
+    def _apply_intensity(self):
+        """FireField.step has no intensity parameter, so intensity is
+        implemented here as an extra decay applied to the field values
+        BEFORE step: each intensity level subtracts 1 from every value
+        (level 0 subtracts nothing), clamped at 0. The source row is left
+        untouched — the engine treats it as read-only and the fire is
+        re-seeded from it, so intensity dims the flame, not the source."""
+        if self.intensity <= 0:
+            return
+        buf = self.field.buffer
+        width = self.field.width
+        for i in range(len(buf) - width):  # every row except the source row
+            v = buf[i] - self.intensity
+            buf[i] = v if v > 0 else 0
+
     # --- teardown ------------------------------------------------------------
 
     def teardown(self):
@@ -114,7 +163,8 @@ class FireApp:
 
     def run(self, fps=DEFAULT_FPS, max_frames=None):
         """Run the fire. ENTER once; one out.write per frame; resize applied
-        at tick start only; delta-time compensation via the injected clock;
+        at tick start only; keys polled once per tick before step (no-op when
+        keys is None); delta-time compensation via the injected clock;
         teardown guaranteed via finally (+ atexit + signal handlers)."""
         self._install_handlers()
         atexit.register(self.teardown)
@@ -127,6 +177,10 @@ class FireApp:
                 if self._resized:
                     self._resized = False
                     self.field = self._new_field(*self._dimensions())
+                self._poll_keys()  # once per tick, BEFORE step
+                if self._stop:
+                    break  # 'quit' takes effect before the frame is drawn
+                self._apply_intensity()
                 self.field.step(self.wind)
                 self.out.write(render_frame(self.field))
                 frames += 1
@@ -148,8 +202,21 @@ def parse_fps(argv=None):
 
 
 def main(argv=None):
-    app = FireApp(out=sys.stdout, clock=time, size_fn=shutil.get_terminal_size)
-    app.run(fps=parse_fps(argv))
+    # Keyboard control only on a real tty stdin: non-tty runs (CI, PTY
+    # harness, pipes) keep the pre-FIRE-04 behavior with keys=None.
+    keys = None
+    try:
+        if sys.stdin.isatty():
+            keys = KeyReader(sys.stdin.fileno())
+    except (OSError, AttributeError):
+        keys = None
+    app = FireApp(out=sys.stdout, clock=time, size_fn=shutil.get_terminal_size,
+                  keys=keys)
+    try:
+        app.run(fps=parse_fps(argv))
+    finally:
+        if keys is not None:
+            keys.close()  # restore the terminal from raw mode
 
 
 if __name__ == "__main__":
