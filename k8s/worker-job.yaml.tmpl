@@ -51,6 +51,15 @@ spec:
               value: "/stanok-work/logs"
             - name: STANOK_POD_REPO
               value: "/stanok-work/repo"
+            - name: CLAUDE_PROJECT_DIR
+              value: "/stanok-work/repo"  # CC-236 (incident cc235): the CLI does
+              # not export CLAUDE_PROJECT_DIR for hooks (cli.js 2.1.88, plugin
+              # context only); the PreToolUse command in .claude/settings.json
+              # references it — unset it expands to /.claude/hooks/... and every
+              # tool call ends with a non-blocking hook error (exit 127),
+              # killing the loop guard. Set at the Job level AND in pod_runner
+              # AND in build_agent_env (belt: the value must be right before the
+              # CLI starts).
             - name: STANOK_IN_POD
               value: "1"  # CC-232: Pod-only test guard — tests/** skip the
               # Pod-only invariants on the host (false reds), run them here.

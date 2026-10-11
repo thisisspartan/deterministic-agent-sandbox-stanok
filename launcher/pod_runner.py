@@ -115,6 +115,11 @@ def main() -> int:
         # read-only root. The dir itself is created above (line: makedirs).
         "CLAUDE_CODE_TMPDIR": tmp,
         "HOME": home,
+        # CC-236 (incident cc235): the CLI does not export CLAUDE_PROJECT_DIR
+        # for hooks (cli.js 2.1.88, plugin context only); the PreToolUse hook
+        # command in .claude/settings.json references it. Set before the CLI
+        # starts (belt with the Job env and build_agent_env).
+        "CLAUDE_PROJECT_DIR": REPO,
         "PYTHONDONTWRITEBYTECODE": "1",
     })
     subprocess.run(

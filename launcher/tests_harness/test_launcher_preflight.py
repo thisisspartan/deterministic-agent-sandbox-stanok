@@ -342,3 +342,15 @@ def test_build_agent_env_passes_auto_compact_through(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "123000")
     env = session.build_agent_env(Config(), _run_state(tmp_path))
     assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "123000"
+
+
+def test_build_agent_env_exports_claude_project_dir(tmp_path):
+    # CC-236 (incident cc235): the CLI does not export CLAUDE_PROJECT_DIR for
+    # hooks (cli.js 2.1.88, plugin context only); the PreToolUse command in
+    # .claude/settings.json references it — unset it expands to
+    # /.claude/hooks/... and every tool call ends with a non-blocking hook
+    # error (exit 127), killing the loop guard. Derived-from-runtime: the
+    # value must equal cfg.repo_root (host checkout / /stanok-work/repo).
+    cfg = Config()
+    env = session.build_agent_env(cfg, _run_state(tmp_path))
+    assert env["CLAUDE_PROJECT_DIR"] == cfg.repo_root

@@ -121,6 +121,15 @@ def build_agent_env(cfg, run_state) -> dict[str, str]:
         # it at the 5th consecutive identical call; _execute_turn reads it
         # mid-turn. Derived-from-runtime (per-run dir) -> belongs here.
         "STANOK_LOOP_TRAP_FILE": _loop_trap_path(run_state),
+        # CC-236 (incident cc235, operator trace review 2026-10-11): the CLI
+        # does NOT export CLAUDE_PROJECT_DIR for hooks (cli.js 2.1.88 exports
+        # it only in plugin context). The PreToolUse command registered in
+        # .claude/settings.json references $CLAUDE_PROJECT_DIR; unset it
+        # expands to /.claude/hooks/... -> exit 127 on every tool call
+        # (num_non_blocking_error=1) -> the loop guard is dead. Derived-from-
+        # runtime (cfg.repo_root: host checkout vs /stanok-work/repo in the
+        # Pod) -> belongs here, not in settings.
+        "CLAUDE_PROJECT_DIR": cfg.repo_root,
     }
     # PLAN-HYGIENE 2026-10-08: no hardcoded AUTO_COMPACT default (the old
     # "128000" silently overrode the settings window when the env was unset).
@@ -717,11 +726,59 @@ def _bash_selfcheck(job: dict) -> int | None:
     return None
 
 
+def _hook_selfcheck(cfg, job: dict) -> int | None:
+    """CC-236 startup self-check (operator condition 2026-10-11): every
+    command hook registered in the project settings (.claude/settings.json)
+    must resolve to a real executable file. Incident cc235 (operator trace
+    review): the CLI does not export CLAUDE_PROJECT_DIR for hooks (cli.js
+    2.1.88 exports it only in plugin context); the registered PreToolUse
+    command "$CLAUDE_PROJECT_DIR/.claude/hooks/loop-guard.py" expanded to
+    "/.claude/hooks/loop-guard.py" -> exit 127 on EVERY tool call
+    (num_non_blocking_error=1 in the trace) — the loop guard was dead and
+    the verdict was still CLEAN-FIRST. The expansion mirrors what the CLI's
+    hook shell will see: CLAUDE_PROJECT_DIR is exported by build_agent_env
+    with exactly this value (cfg.repo_root). Fail-closed: ENV-FAIL (rc=16)
+    before a single model token is spent. Returns None when OK."""
+    settings_path = os.path.join(cfg.repo_root, ".claude", "settings.json")
+    try:
+        with open(settings_path, encoding="utf-8") as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        return None  # no project settings -> no registered hooks -> nothing to resolve
+    bad = []
+    for group in (settings.get("hooks") or {}).values():
+        for entry in group or []:
+            for hook in entry.get("hooks") or []:
+                if hook.get("type") != "command" or not hook.get("command"):
+                    continue
+                cmd = hook["command"].replace(
+                    "${CLAUDE_PROJECT_DIR}", cfg.repo_root)
+                cmd = cmd.replace("$CLAUDE_PROJECT_DIR", cfg.repo_root)
+                for token in cmd.split():
+                    token = token.strip("\"'")
+                    if not token.startswith("/"):
+                        continue  # inline shell command — nothing to resolve
+                    if not (os.path.isfile(token) and os.access(token, os.X_OK)):
+                        bad.append(token)
+    if bad:
+        log(f"ENV-FAIL: hook self-check failed — registered hook command(s) "
+            f"resolve to no executable file: {bad}; no model call was made")
+        job["error"] = f"ENV-FAIL: hook self-check failed: {bad}"
+        job["verifier"] = "FAIL"
+        job["turns"] = 0
+        return int(ExitCode.ENV_FAIL)
+    return None
+
+
 async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
                                 max_retries: int, plan: "SessionPlan") -> int:
     from claude_agent_sdk import ClaudeSDKClient
 
     rc = _bash_selfcheck(job)
+    if rc is not None:
+        return rc
+
+    rc = _hook_selfcheck(cfg, job)
     if rc is not None:
         return rc
 

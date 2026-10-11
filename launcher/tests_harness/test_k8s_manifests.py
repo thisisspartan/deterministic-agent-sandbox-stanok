@@ -38,6 +38,10 @@ checks (no YAML parser in the image — the checks are text invariants):
      killed every Bash call, traces cc231/cc233); pod_runner.py sets
      CLAUDE_CODE_TMPDIR (the name the CLI actually reads), never the old
      CLAUDE_TMPDIR
+  8  CC-236 (incident cc235): CLAUDE_PROJECT_DIR=/stanok-work/repo in the
+     worker Job env and in the pod_runner session env (the CLI does not
+     export it for hooks; the PreToolUse command in .claude/settings.json
+     references it — unset it the hook dies with exit 127 on every call)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -188,6 +192,26 @@ def test_fresh_job_home_tmpdir_aligned():
     assert "name: TMPDIR" in y and "value: /stanok-work/tmp" in y
     # the dirs must exist before the tests run (read-only root, emptyDir)
     assert "mkdir -p /stanok-work/work /stanok-work/home /stanok-work/tmp" in y
+
+
+# --- CC-236 (incident cc235): CLAUDE_PROJECT_DIR for hooks ----------
+
+def test_worker_job_exports_claude_project_dir():
+    # The CLI does not export CLAUDE_PROJECT_DIR for hooks (cli.js 2.1.88,
+    # plugin context only); the PreToolUse command in .claude/settings.json
+    # references it — unset it expands to /.claude/hooks/... and every tool
+    # call ends with a non-blocking hook error (exit 127), killing the loop
+    # guard (trace cc235: num_non_blocking_error=1). The Job env must set it.
+    y = _read("worker-job.yaml.tmpl")
+    assert "name: CLAUDE_PROJECT_DIR" in y
+    assert 'value: "/stanok-work/repo"' in y
+
+
+def test_pod_runner_exports_claude_project_dir():
+    # Belt: the runner sets it in the session env before the CLI starts.
+    src = (Path(__file__).resolve().parents[1] / "pod_runner.py").read_text(
+        encoding="utf-8")
+    assert '"CLAUDE_PROJECT_DIR": REPO' in src
 
 
 # --- CC-232: Pod-only test guard marker in both Pod templates ----------
