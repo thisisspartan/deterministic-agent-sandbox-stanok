@@ -38,6 +38,12 @@ DEFAULT_DOCKER_NETWORK = "stanok-net"
 # container address, not the published one.
 DEFAULT_OPIK_HOST_IP = "192.168.122.156"
 DEFAULT_OPIK_BACKEND_IP = "172.25.0.250"
+# Operator 2026-10-12 (DOOMFIRE2 close): cc248..cc252 ran with opik_traces=0 —
+# the trace URL was an env-only opt-in (P0-launch.sh does not export it; the
+# traced cc246 needed a manual env). The default is now the contract: tracing
+# ON by default, derived from the Opik host address above; STANOK_OPIK_TRACE_URL
+# overrides, an explicit empty value disables tracing.
+DEFAULT_OPIK_TRACE_URL = f"http://{DEFAULT_OPIK_HOST_IP}:8080/v1/private/otel"
 
 @dataclass(frozen=True)
 class Config:
@@ -59,6 +65,7 @@ class Config:
     # container, not a per-command allowlist.
     curated_tools: tuple[str, ...] = ("Read", "Write", "Edit", "Glob", "Grep", "Bash")
     docker_image: str = "stanok-machine:latest"
+    opik_trace_url: str = DEFAULT_OPIK_TRACE_URL
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -85,6 +92,7 @@ class Config:
             # CLI --max-turns ceiling: max model calls (agentic turns) per query().
             max_agent_turns=int(os.environ.get("STANOK_MAX_AGENT_TURNS", "60")),
             docker_image=os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest"),
+            opik_trace_url=os.environ.get("STANOK_OPIK_TRACE_URL", DEFAULT_OPIK_TRACE_URL),
         )
 
     @property

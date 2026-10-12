@@ -661,7 +661,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                     "JOB_NAME": job_name, "LABEL": label, "NONCE": nonce,
                     "IMAGE": cfg.docker_image, "NAMESPACE": ns,
                     "SERVER_URL": cfg.server_url, "MODEL": cfg.model,
-                    "OPIK_TRACE_URL": os.environ.get("STANOK_OPIK_TRACE_URL", ""),
+                    "OPIK_TRACE_URL": cfg.opik_trace_url,
                     "START_COMMIT": os.environ.get("STANOK_START_COMMIT", ""),
                     "DEADLINE": str(deadline),
                     "CM_TICKET": cm_ticket, "CM_TREE": cm_tree,
