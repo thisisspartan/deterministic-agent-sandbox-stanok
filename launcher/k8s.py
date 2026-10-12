@@ -469,6 +469,16 @@ def job_deadline() -> int:
     return int(os.environ.get("STANOK_K8S_JOB_DEADLINE_S", "1800"))
 
 
+def _runtime_class() -> str:
+    """SPEC-GVISOR-SPIKE-2026-10-12: runtime-class knob. Unset/empty -> ""
+    (the {{RUNTIME_CLASS}} line renders empty == no runtimeClassName field ==
+    RuntimeDefault, the behavior before the knob). A value -> the rendered
+    line `runtimeClassName: <value>`. An unknown class fails at Pod creation
+    (fail-closed, rc=16 infra path — same precedent as job_deadline)."""
+    rc = os.environ.get("STANOK_K8S_RUNTIME_CLASS", "").strip()
+    return f"runtimeClassName: {rc}" if rc else ""
+
+
 # ==================================================================================
 # The fresh check as a deny-all Job (mirror of sandbox.fresh_verify_argv:
 # the same `run.sh list; run.sh test --all` pair, no model endpoint)
@@ -483,6 +493,7 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
             "JOB_NAME": fresh_name.removeprefix("stanok-fresh-"),
             "IMAGE": cfg.docker_image, "NAMESPACE": ns,
             "CM_TREE": cm_tree, "CM_PATCH": cm_patch, "DEADLINE": str(deadline),
+            "RUNTIME_CLASS": _runtime_class(),
         }))
         created.append(("job", fresh_name))
     except RuntimeError as e:
@@ -655,6 +666,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                     "DEADLINE": str(deadline),
                     "CM_TICKET": cm_ticket, "CM_TREE": cm_tree,
                     "CM_RUNNER": cm_runner,
+                    "RUNTIME_CLASS": _runtime_class(),
                 }))
             created.append(("job", job_name))
             pod = _pod_of_job(job_name, ns)

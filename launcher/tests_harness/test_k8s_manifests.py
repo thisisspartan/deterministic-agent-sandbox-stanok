@@ -42,6 +42,11 @@ checks (no YAML parser in the image — the checks are text invariants):
      worker Job env and in the pod_runner session env (the CLI does not
      export it for hooks; the PreToolUse command in .claude/settings.json
      references it — unset it the hook dies with exit 127 on every call)
+  9  SPEC-GVISOR-SPIKE-2026-10-12: runtime-class knob STANOK_K8S_RUNTIME_CLASS
+     — unset/empty renders the {{RUNTIME_CLASS}} line empty (no
+     runtimeClassName field == RuntimeDefault, the pre-knob behavior); a value
+     renders `runtimeClassName: <value>` in BOTH job templates (the fresh
+     check runs under the same class as the worker)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -311,3 +316,31 @@ def test_pod_runner_sets_claude_code_tmpdir():
     # || "/tmp"); the old CLAUDE_TMPDIR only reached the nested bwrap.
     assert '"CLAUDE_CODE_TMPDIR": tmp' in src
     assert '"CLAUDE_TMPDIR"' not in src
+
+
+# --- SPEC-GVISOR-SPIKE-2026-10-12: runtime-class knob ----------------------
+
+def test_runtime_class_default_and_knob(monkeypatch):
+    # unset/empty -> "" : the {{RUNTIME_CLASS}} line renders empty == no
+    # runtimeClassName field == RuntimeDefault (the pre-knob behavior).
+    monkeypatch.delenv("STANOK_K8S_RUNTIME_CLASS", raising=False)
+    assert k8s._runtime_class() == ""
+    monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "")
+    assert k8s._runtime_class() == ""
+    monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "gvisor")
+    assert k8s._runtime_class() == "runtimeClassName: gvisor"
+
+
+def test_job_templates_carry_runtime_class_placeholder():
+    # Both Pods get the knob — the fresh check must run under the same
+    # runtime class as the worker.
+    for name in ("worker-job.yaml.tmpl", "fresh-job.yaml.tmpl"):
+        y = _read(name)
+        assert "{{RUNTIME_CLASS}}" in y, name
+
+
+def test_k8s_renders_runtime_class_in_both_jobs():
+    # Wiring: both render dicts (worker + fresh) pass RUNTIME_CLASS.
+    src = (Path(__file__).resolve().parents[1] / "k8s.py").read_text(
+        encoding="utf-8")
+    assert src.count('"RUNTIME_CLASS": _runtime_class(),') == 2

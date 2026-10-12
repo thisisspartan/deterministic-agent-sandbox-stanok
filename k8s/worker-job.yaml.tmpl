@@ -22,6 +22,10 @@ spec:
         stanok: worker
     spec:
       restartPolicy: Never
+      # gVisor spike (SPEC-GVISOR-SPIKE-2026-10-12): runtime-class knob,
+      # rendered from STANOK_K8S_RUNTIME_CLASS (empty -> the line is omitted
+      # == RuntimeDefault, the behavior before the knob).
+      {{RUNTIME_CLASS}}
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true

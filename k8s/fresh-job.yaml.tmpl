@@ -21,6 +21,9 @@ spec:
         stanok: fresh
     spec:
       restartPolicy: Never
+      # gVisor spike (SPEC-GVISOR-SPIKE-2026-10-12): same knob as the worker
+      # Job — the fresh check runs under the same runtime class.
+      {{RUNTIME_CLASS}}
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
