@@ -13,6 +13,7 @@ import dataclasses
 import functools
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -159,6 +160,94 @@ def _extract_usage(msg) -> dict:
     return {}
 
 
+# ==================================================================================
+# CC-247: the test-fit proxy metric (operator trace review of cc246).
+# Count test-file edits that happen AFTER the first GREEN run of
+# `scripts/run.sh test` observed in the agent's own Bash stream. Proxy only:
+# typed counters in summary.json, no gate, no text. The anchor is the agent's
+# Bash output — the in-process hook-green was rejected on the trace: the
+# PostToolUse hook fires AFTER the edit it would need to anchor (its first
+# green in cc246 lands on the tie Edit itself, so it can never count it).
+# Documented skips: greens whose last shell segment is not run.sh and that
+# carry no rc echo (`run.sh test --all | tail`); greens observed only by the
+# in-process verifier hook (silent on rc=0); greens observed only by the host
+# verify_gate (runs after the turn ends).
+# ==================================================================================
+_RUN_SH_TEST_RE = re.compile(r"\brun\.sh\s+test\b")
+_SHELL_SEGMENT_RE = re.compile(r"[;&|\n]+")
+
+
+def _shell_last_segment(command: str) -> str:
+    """The last shell segment of a command line (split on ; | && || and
+    newlines). If it is the run.sh test call, the exit code the CLI reports
+    IS run.sh's rc."""
+    segments = [s for s in _SHELL_SEGMENT_RE.split(command) if s.strip()]
+    return segments[-1].strip() if segments else ""
+
+
+def _bash_test_green(command, is_error: bool, result_text: str) -> bool:
+    """CC-247 anchor: did this Bash call run `run.sh test` GREEN?
+
+    1. the command must invoke `run.sh test`;
+    2. if the LAST shell segment is the run.sh test call, the exit code the
+       CLI reports IS run.sh's rc -> green iff is_error is False;
+    3. masked forms (`; echo "rc=$?"` — the cc246 idiom, which masks the
+       exit code) are trusted only via an explicit `rc=0` in the output."""
+    if not isinstance(command, str) or not _RUN_SH_TEST_RE.search(command):
+        return False
+    if _RUN_SH_TEST_RE.search(_shell_last_segment(command)):
+        return not is_error
+    if "rc=$?" in command and re.search(r"\brc=0\b", result_text or ""):
+        return True
+    return False
+
+
+def _test_write_kind(cfg, tool_name: str, tool_input) -> "str | None":
+    """Classify a Write/Edit tool_use against the tests/ tree:
+    "edit" — the target file EXISTS (editing an already-green test: the
+    test-fitting signal; a Write over an existing file is an edit too);
+    "new"  — a Write creating a NEW file under tests/ (normal TDD growth);
+    None   — not a tests/ write (src/, docs/, no path) or an Edit to a
+    file that does not exist (it edits nothing)."""
+    if tool_name not in ("Write", "Edit") or not isinstance(tool_input, dict):
+        return None
+    fp = tool_input.get("file_path")
+    if not fp or not isinstance(fp, str):
+        return None
+    if not fp.startswith("/"):
+        fp = os.path.join(cfg.repo_root, fp)
+    abs_path = os.path.realpath(fp)
+    tests_dir = os.path.join(cfg.repo_root, "tests")
+    if not abs_path.startswith(tests_dir + os.sep):
+        return None
+    if os.path.isfile(abs_path):
+        return "edit"
+    if tool_name == "Write":
+        return "new"
+    return None
+
+
+def _tool_result_text(block) -> str:
+    """The text of a ToolResultBlock: str content, or a list of
+    str / {"type":"text","text":...} / TextBlock items."""
+    content = getattr(block, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+            else:
+                t = getattr(item, "text", None)
+                if isinstance(t, str):
+                    parts.append(t)
+        return "\n".join(parts)
+    return ""
+
+
 @dataclasses.dataclass
 class TurnResult:
     """The typed outcome of one agent turn (what _execute_turn returns).
@@ -178,6 +267,11 @@ class TurnResult:
     bash_ok     — CC-234: count of their tool_results that came back without
                   is_error (the agent's own tooling worked; bash_ok==0 with a
                   verifier PASS = the agent wrote blind — PASS-BLIND).
+    test_edits_after_green / test_new_tests_after_green — CC-247: the
+                  test-fit counters of this turn (edits of an EXISTING file
+                  under tests/ after the first observed green / new test
+                  files created after it; the green flag lives in
+                  job["_green_seen"], session-scoped).
     """
 
     usage: dict
@@ -187,10 +281,12 @@ class TurnResult:
     loop_trap: dict | None
     bash_total: int = 0
     bash_ok: int = 0
+    test_edits_after_green: int = 0
+    test_new_tests_after_green: int = 0
 
 
 async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
-                       run_state) -> TurnResult:
+                       run_state, cfg) -> TurnResult:
     """Run one turn on the live client; return its TurnResult."""
     from claude_agent_sdk import ResultMessage
 
@@ -203,6 +299,10 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
     bash_total = 0
     bash_ok = 0
     bash_ids = set()
+    # CC-247: run.sh-test Bash calls awaiting their tool_result (id -> command)
+    test_bash_cmds = {}
+    test_edits_after_green = 0
+    test_new_tests_after_green = 0
     marker_path = _loop_trap_path(run_state)
     async for msg in client.receive_response():
         sid = getattr(msg, "session_id", None)
@@ -244,6 +344,15 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
                 name = getattr(block, "name", None)
                 if name in ("Write", "Edit"):
                     writes += 1
+                    # CC-247: after the first observed green, a write to an
+                    # EXISTING tests/ file is the test-fitting signal; a new
+                    # tests/ file is normal TDD growth (counted separately).
+                    if job.get("_green_seen"):
+                        kind = _test_write_kind(cfg, name, getattr(block, "input", None))
+                        if kind == "edit":
+                            test_edits_after_green += 1
+                        elif kind == "new":
+                            test_new_tests_after_green += 1
                 elif name == "Bash":
                     # CC-234: the agent's own tooling — count calls and their
                     # results (ToolResultBlock carries tool_use_id/is_error).
@@ -251,12 +360,24 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
                     tid = getattr(block, "id", None)
                     if tid is not None:
                         bash_ids.add(tid)
+                        # CC-247: remember run.sh-test commands; their result
+                        # is the green anchor.
+                        tool_input = getattr(block, "input", None)
+                        cmd = tool_input.get("command") if isinstance(tool_input, dict) else None
+                        if isinstance(cmd, str) and _RUN_SH_TEST_RE.search(cmd):
+                            test_bash_cmds[tid] = cmd
                 else:
                     tid = getattr(block, "tool_use_id", None)
                     if tid is not None and tid in bash_ids:
                         bash_ids.discard(tid)  # count each result once
                         if not getattr(block, "is_error", False):
                             bash_ok += 1
+                    if tid is not None and tid in test_bash_cmds:
+                        # CC-247 anchor: the first green sets the session flag.
+                        cmd = test_bash_cmds.pop(tid)
+                        if _bash_test_green(cmd, getattr(block, "is_error", False),
+                                           _tool_result_text(block)):
+                            job["_green_seen"] = True
 
         _write_stream_msg(stream_f, turn, msg)
 
@@ -276,6 +397,8 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
         loop_trap=loop_trap,
         bash_total=bash_total,
         bash_ok=bash_ok,
+        test_edits_after_green=test_edits_after_green,
+        test_new_tests_after_green=test_new_tests_after_green,
     )
 
 
@@ -679,6 +802,12 @@ def _record_turn_telemetry(job: dict, total_tokens: dict, result: TurnResult,
     activity["bash_total"] += result.bash_total
     activity["bash_ok"] += result.bash_ok
 
+    # CC-247: the test-fit proxy counters (typed, no gate — the summary
+    # field is built by summary._test_fit_field from this job entry).
+    fit = job.setdefault("test_fit", {"edits_after_green": 0, "new_tests_after_green": 0})
+    fit["edits_after_green"] += result.test_edits_after_green
+    fit["new_tests_after_green"] += result.test_new_tests_after_green
+
     job.setdefault("turn_telemetry", []).append({
         "turn": turn,
         "elapsed_s": round(elapsed_turn, 1),
@@ -812,7 +941,7 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
 
                 t0 = time.time()
                 turn_task = asyncio.create_task(
-                    _execute_turn(client, current_prompt, turn, stream_f, job, run_state)
+                    _execute_turn(client, current_prompt, turn, stream_f, job, run_state, cfg)
                 )
 
                 # Shielded Turn Watchdog (guarantee 5): asyncio.shield keeps the

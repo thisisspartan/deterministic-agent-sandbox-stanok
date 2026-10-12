@@ -5,9 +5,11 @@ CC-237 (schema v2, operator decision 2026-10-11): summary.json is TYPED —
 scalars and structured fields only, no free text. The allowlist:
   label, ticket, rc, verifier, probe_result, turns, elapsed_s, session_id,
   commit_sha, tokens, cache_hit_rate, inference_telemetry, tool_activity,
-  loop_trap, opik_traces  (+ patch_sha256, image_digest, host-stamped in
-  k8s mode — k8s.py: the Pod's containerStatuses imageID, None when
-  unavailable).
+  loop_trap, test_fit, opik_traces  (+ patch_sha256, image_digest,
+  host-stamped in k8s mode — k8s.py: the Pod's containerStatuses imageID,
+  None when unavailable).
+  test_fit = {"edits_after_green": int>=0, "new_tests_after_green": int>=0}
+  — CC-247 proxy counters (no gate); malformed -> zeros.
   loop_trap = {"tool": str, "hash": str, "n": int} | None — the typed
   circuit-breaker record (the protocol reads it as LOOP-TRAP).
 All free text of a run (the error string, verify_gate failures, contract-lock
@@ -145,6 +147,25 @@ def _loop_trap_field(job: dict):
             and isinstance(n, int) and not isinstance(n, bool)):
         return {"tool": tool, "hash": hash_, "n": n}
     return None
+
+
+def _test_fit_field(job: dict) -> dict:
+    """CC-247: the typed test-fit counters —
+    {"edits_after_green": int>=0, "new_tests_after_green": int>=0}. Proxy
+    metric only: no gate, no text. Anything malformed (negative, bool, str,
+    missing key, not a dict) publishes zeros — the protocol reads zeros as
+    "no signal"."""
+    zeros = {"edits_after_green": 0, "new_tests_after_green": 0}
+    fit = job.get("test_fit")
+    if not isinstance(fit, dict):
+        return zeros
+    out = {}
+    for key in ("edits_after_green", "new_tests_after_green"):
+        v = fit.get(key)
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            return zeros  # a partial/malformed record is not a signal
+        out[key] = v
+    return out
 
 
 def _failure_lines(job: dict) -> list[str]:
@@ -292,6 +313,9 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
         # (error / verify failures / contract violations) goes to
         # failures.log via _write_failures, never into summary.json.
         "loop_trap": _loop_trap_field(job),
+        # CC-247: the test-fit proxy counters (typed, no gate) — test-file
+        # edits after the first observed green vs new test files after it.
+        "test_fit": _test_fit_field(job),
         "opik_traces": job.get("opik_traces"),
     }
 

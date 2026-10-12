@@ -34,7 +34,8 @@ from launcher.config import Config
 ALLOWLIST = {
     "label", "ticket", "rc", "verifier", "probe_result", "turns", "elapsed_s",
     "session_id", "commit_sha", "tokens", "cache_hit_rate",
-    "inference_telemetry", "tool_activity", "loop_trap", "opik_traces",
+    "inference_telemetry", "tool_activity", "loop_trap", "test_fit",
+    "opik_traces",
 }
 
 FULL_JOB = {
@@ -87,6 +88,8 @@ def test_build_summary_emits_exactly_the_allowlist(monkeypatch):
     assert isinstance(it, dict) and it["aggregate"]["turns"] == 1
     assert s["tool_activity"] == {"bash_total": 3, "bash_ok": 2}
     assert s["loop_trap"] is None
+    # CC-247: a job without test_fit publishes typed zeros ("no signal")
+    assert s["test_fit"] == {"edits_after_green": 0, "new_tests_after_green": 0}
     assert s["opik_traces"] == ["trace-1"]
 
 
