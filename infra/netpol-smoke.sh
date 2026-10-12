@@ -50,7 +50,13 @@
 #        STANOK_KUBECTL (default kubectl), STANOK_NAMESPACE (default),
 #        STANOK_IMAGE (default stanok-machine:latest — the image the Jobs use;
 #        probe Pods pin imagePullPolicy: IfNotPresent, kubectl run would force
-#        Always for :latest and fail with ErrImagePull).
+#        Always for :latest and fail with ErrImagePull),
+#        STANOK_K8S_RUNTIME_CLASS (CC-253: same knob as the Job renderer —
+#        set -> probe Pods get runtimeClassName: <value>, so the netpol
+#        measurements run under that runtime class; unset = RuntimeDefault.
+#        After the Pods are Ready the script echoes each Pod's
+#        .spec.runtimeClassName read back from the API — the proof lands in
+#        results.txt).
 # Exit: 0 = every hard check matched its expectation; 1 = a mismatch;
 #       2 = preflight/cutover failed (cluster/image/apply — infrastructure).
 set -uo pipefail
@@ -133,6 +139,12 @@ apply_pod() { # $1=name $2=stanok-label ("" = unlabeled control)
     labels_block="  labels:
     stanok: $2"
   fi
+  # CC-253: runtime-class knob (same env as the Job renderer) — the probe
+  # Pods run under the same class the Jobs would use.
+  local runtime_block=""
+  if [[ -n "${STANOK_K8S_RUNTIME_CLASS:-}" ]]; then
+    runtime_block="  runtimeClassName: $STANOK_K8S_RUNTIME_CLASS"
+  fi
   "$KUBECTL" apply -n "$NS" -f - >/dev/null <<EOF || die "pod $1 create failed"
 apiVersion: v1
 kind: Pod
@@ -142,6 +154,7 @@ metadata:
 $labels_block
 spec:
   restartPolicy: Never
+$runtime_block
   containers:
     - name: probe
       image: $IMAGE
@@ -160,6 +173,10 @@ apply_pod netpol-probe-worker worker
 apply_pod netpol-probe-control ""
 apply_pod netpol-probe-fresh fresh
 echo "probe pods Ready (listener on :8080)"
+# CC-253: read the runtime class back from the API — proof in results.txt
+for p in "${PODS[@]}"; do
+  echo "runtime-class proof: $p .spec.runtimeClassName=$("$KUBECTL" get pod "$p" -n "$NS" -o jsonpath='{.spec.runtimeClassName}' 2>/dev/null || echo '<unset>')"
+done
 
 RESOLVER="$("$KUBECTL" exec -n "$NS" netpol-probe-worker -- sed -n 's/^nameserver \([0-9.]\{1,\}\).*/\1/p' /etc/resolv.conf 2>/dev/null | head -1)"
 [[ -n "$RESOLVER" ]] || die "no nameserver in the probe Pod's /etc/resolv.conf"
