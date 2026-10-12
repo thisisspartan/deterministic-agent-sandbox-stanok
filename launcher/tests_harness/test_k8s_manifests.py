@@ -42,11 +42,12 @@ checks (no YAML parser in the image — the checks are text invariants):
      worker Job env and in the pod_runner session env (the CLI does not
      export it for hooks; the PreToolUse command in .claude/settings.json
      references it — unset it the hook dies with exit 127 on every call)
-  9  SPEC-GVISOR-SPIKE-2026-10-12: runtime-class knob STANOK_K8S_RUNTIME_CLASS
-     — unset/empty renders the {{RUNTIME_CLASS}} line empty (no
-     runtimeClassName field == RuntimeDefault, the pre-knob behavior); a value
-     renders `runtimeClassName: <value>` in BOTH job templates (the fresh
-     check runs under the same class as the worker)
+  9  SPEC-GVISOR-SPIKE-2026-10-12 + CC-256 (default switch): the DEFAULT
+     runtime class is gvisor — unset/empty renders `runtimeClassName: gvisor`
+     in BOTH job templates (the fresh check runs under the same class as the
+     worker); STANOK_K8S_RUNTIME_CLASS=runc renders the {{RUNTIME_CLASS}} line
+     empty (no runtimeClassName field == RuntimeDefault, the pre-gVisor
+     behavior); any other value renders `runtimeClassName: <value>`
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -321,11 +322,14 @@ def test_pod_runner_sets_claude_code_tmpdir():
 # --- SPEC-GVISOR-SPIKE-2026-10-12: runtime-class knob ----------------------
 
 def test_runtime_class_default_and_knob(monkeypatch):
-    # unset/empty -> "" : the {{RUNTIME_CLASS}} line renders empty == no
-    # runtimeClassName field == RuntimeDefault (the pre-knob behavior).
+    # CC-256: unset/empty -> gvisor (the new default); runc -> "" (the
+    # {{RUNTIME_CLASS}} line renders empty == RuntimeDefault, pre-gVisor);
+    # any other value renders `runtimeClassName: <value>`.
     monkeypatch.delenv("STANOK_K8S_RUNTIME_CLASS", raising=False)
-    assert k8s._runtime_class() == ""
+    assert k8s._runtime_class() == "runtimeClassName: gvisor"
     monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "")
+    assert k8s._runtime_class() == "runtimeClassName: gvisor"
+    monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "runc")
     assert k8s._runtime_class() == ""
     monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "gvisor")
     assert k8s._runtime_class() == "runtimeClassName: gvisor"

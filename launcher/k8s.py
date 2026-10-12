@@ -475,13 +475,21 @@ def job_deadline() -> int:
     return int(os.environ.get("STANOK_K8S_JOB_DEADLINE_S", "1800"))
 
 
+def _runtime_class_name() -> str:
+    """CC-256 (operator 2026-10-12): the DEFAULT runtime class is "gvisor" —
+    two clean wave-runs under gVisor (cc254, cc255: rc=0 PASS CLEAN-FIRST,
+    worker+fresh Pods gvisor by API read-back, clean hooks, comparable time).
+    STANOK_K8S_RUNTIME_CLASS=runc opts out to "" (no runtimeClassName field
+    == RuntimeDefault, the pre-gVisor behavior); any other value is used as-is.
+    An unknown class fails at preflight (_preflight_runtime_class)."""
+    rc = os.environ.get("STANOK_K8S_RUNTIME_CLASS", "").strip() or "gvisor"
+    return "" if rc == "runc" else rc
+
+
 def _runtime_class() -> str:
-    """SPEC-GVISOR-SPIKE-2026-10-12: runtime-class knob. Unset/empty -> ""
-    (the {{RUNTIME_CLASS}} line renders empty == no runtimeClassName field ==
-    RuntimeDefault, the behavior before the knob). A value -> the rendered
-    line `runtimeClassName: <value>`. An unknown class fails at Pod creation
-    (fail-closed, rc=16 infra path — same precedent as job_deadline)."""
-    rc = os.environ.get("STANOK_K8S_RUNTIME_CLASS", "").strip()
+    """Rendered manifest line for the effective class: "" -> the
+    {{RUNTIME_CLASS}} line renders empty == RuntimeDefault."""
+    rc = _runtime_class_name()
     return f"runtimeClassName: {rc}" if rc else ""
 
 
@@ -639,16 +647,17 @@ def _preflight_opik(cfg):
 
 
 def _preflight_runtime_class(cfg):
-    """The runtime-class knob (SPEC-GVISOR-SPIKE): when STANOK_K8S_RUNTIME_CLASS
-    is set, the class must EXIST — the former behavior (unknown class fails at
-    Pod creation, mid-run) burned the whole run for a name typo."""
-    rc = os.environ.get("STANOK_K8S_RUNTIME_CLASS", "").strip()
+    """The effective runtime class (default gvisor, CC-256) must EXIST — the
+    former behavior (unknown class fails at Pod creation, mid-run) burned the
+    whole run for a name typo. The runc opt-out (effective class "") skips
+    the check."""
+    rc = _runtime_class_name()
     if not rc:
         return None
     r = _kubectl("get", "runtimeclass", rc, "--no-headers")
     if r.returncode != 0:
         return (f"runtimeclass {rc!r} not in the cluster — fix: create it or "
-                "unset STANOK_K8S_RUNTIME_CLASS")
+                "set STANOK_K8S_RUNTIME_CLASS=runc")
     return None
 
 

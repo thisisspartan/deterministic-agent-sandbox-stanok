@@ -129,10 +129,20 @@ def test_opik_http_answer_even_error_is_reachable(tmp_path, monkeypatch):
         _cfg(tmp_path, opik_trace_url="http://192.168.122.156:8080/v1/private/otel")) is None
 
 
-# --- RuntimeClass existence (only when the knob is set) ---------------------------
+# --- RuntimeClass existence (default gvisor, CC-256; runc opt-out skips) ---------
 
-def test_runtimeclass_unset_skips_the_check(monkeypatch):
+def test_runtimeclass_default_gvisor_is_checked(monkeypatch):
+    # CC-256: unset -> the effective class is gvisor -> the check RUNS.
     monkeypatch.delenv("STANOK_K8S_RUNTIME_CLASS", raising=False)
+    calls = []
+    monkeypatch.setattr(k8s, "_kubectl",
+                        lambda *a, **k: calls.append(a) or _FakeCompleted(0, "gvisor"))
+    assert k8s._preflight_runtime_class(None) is None
+    assert calls and calls[0][:2] == ("get", "runtimeclass") and calls[0][2] == "gvisor"
+
+
+def test_runtimeclass_runc_optout_skips_the_check(monkeypatch):
+    monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "runc")
     calls = []
     monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: calls.append(a) or _FakeCompleted(0))
     assert k8s._preflight_runtime_class(None) is None

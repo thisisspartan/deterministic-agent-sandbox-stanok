@@ -51,9 +51,10 @@
 #        STANOK_IMAGE (default stanok-machine:latest — the image the Jobs use;
 #        probe Pods pin imagePullPolicy: IfNotPresent, kubectl run would force
 #        Always for :latest and fail with ErrImagePull),
-#        STANOK_K8S_RUNTIME_CLASS (CC-253: same knob as the Job renderer —
-#        set -> probe Pods get runtimeClassName: <value>, so the netpol
-#        measurements run under that runtime class; unset = RuntimeDefault.
+#        STANOK_K8S_RUNTIME_CLASS (CC-253 knob, CC-256 default: same logic as
+#        the Job renderer — unset/empty = gvisor (the launcher default), runc =
+#        RuntimeDefault opt-out, any other value = that class; probe Pods get
+#        the effective class so the netpol measurements run under it).
 #        After the Pods are Ready the script echoes each Pod's
 #        .spec.runtimeClassName read back from the API — the proof lands in
 #        results.txt).
@@ -139,11 +140,13 @@ apply_pod() { # $1=name $2=stanok-label ("" = unlabeled control)
     labels_block="  labels:
     stanok: $2"
   fi
-  # CC-253: runtime-class knob (same env as the Job renderer) — the probe
-  # Pods run under the same class the Jobs would use.
+  # CC-253 knob + CC-256 default (same logic as the Job renderer): unset =
+  # gvisor, runc = RuntimeDefault opt-out, any other value = that class.
+  local effective_class="${STANOK_K8S_RUNTIME_CLASS:-gvisor}"
+  [[ "$effective_class" == "runc" ]] && effective_class=""
   local runtime_block=""
-  if [[ -n "${STANOK_K8S_RUNTIME_CLASS:-}" ]]; then
-    runtime_block="  runtimeClassName: $STANOK_K8S_RUNTIME_CLASS"
+  if [[ -n "$effective_class" ]]; then
+    runtime_block="  runtimeClassName: $effective_class"
   fi
   "$KUBECTL" apply -n "$NS" -f - >/dev/null <<EOF || die "pod $1 create failed"
 apiVersion: v1
