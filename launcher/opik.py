@@ -7,6 +7,8 @@ import json
 import os
 import urllib.request
 
+from launcher import config
+
 
 
 def _opik_trace_count() -> int | None:
@@ -17,16 +19,18 @@ def _opik_trace_count() -> int | None:
     after the verdict is formed (no pre-run baseline, no settle loop) — an
     unreachable backend (None) never delays or alters the run.
 
-    Port map (PLAN-AUDIT B5 decision, 2026-10-08): the self-hosted Opik
-    backend is pinned at :8080 on the supervisor host — both tracing points
-    default to it in ONE decision: STANOK_OPIK_URL below and
-    BETA_TRACING_ENDPOINT in .claude/settings.stanok.json (the machine's
-    OTLP export target). llama-server is moved off :8080 by
-    STANOK_SERVER_URL/--host; the defaults collide only if llama-server is
-    run locally on :8080 — the port map is a deploy decision, not code."""
+    Port map (PLAN-AUDIT B5 decision, 2026-10-08; RA-1 closure 2026-10-12):
+    the self-hosted Opik backend is pinned at :8080 BOUND TO THE NODE
+    INTERFACE (config.DEFAULT_OPIK_HOST_IP) — the backend has no auth, so
+    0.0.0.0 was the RA-1 risk; localhost:8080 is closed since the rebinding.
+    Both tracing points default to the node address in ONE decision:
+    STANOK_OPIK_URL below and BETA_TRACING_ENDPOINT (the machine's OTLP
+    export target, host-rewritten in k8s mode). llama-server is moved off
+    :8080 by STANOK_SERVER_URL/--host — the port map is a deploy decision,
+    not code."""
     if os.environ.get("STANOK_SKIP_OPIK_CHECK") == "1":
         return None
-    base = os.environ.get("STANOK_OPIK_URL", "http://localhost:8080")
+    base = os.environ.get("STANOK_OPIK_URL", f"http://{config.DEFAULT_OPIK_HOST_IP}:8080")
     url = f"{base}/v1/private/traces?project_name=stanok&limit=1"
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -55,7 +59,7 @@ def session_trace_count(session_id: str, since_iso: str) -> int | None:
     never arrived."""
     if os.environ.get("STANOK_SKIP_OPIK_CHECK") == "1":
         return None
-    base = os.environ.get("STANOK_OPIK_URL", "http://localhost:8080")
+    base = os.environ.get("STANOK_OPIK_URL", f"http://{config.DEFAULT_OPIK_HOST_IP}:8080")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     count = 0
     page = 1
