@@ -23,7 +23,8 @@ is testable without a cluster. Tests:
      not apply) — a foreign object with a colliding name is never deleted
  Image provenance (operator plan 2026-10-12):
   10 _pod_image_id: reads the Pod's own containerStatuses.imageID (the
-     runtime's record of the image the Job ran); fail-soft -> None
+     runtime's record of the image the Job ran); accepts both runtime forms
+     (docker bare "sha256:…", containerd "<repo>@sha256:…"); fail-soft -> None
  Image delivery (operator 2026-10-12): the two gate-passing wiring tests mock
      _image_ref (the docker inspect point is not a cluster call) — the
      delivery logic itself lives in test_k8s_image_delivery.py
@@ -284,6 +285,16 @@ def test_pod_image_id_reads_the_pod_record(monkeypatch):
     assert k8s._pod_image_id("pod-x", "default") == "sha256:913ad405b489"
     assert seen == [("get", "pod", "pod-x", "-n", "default",
                      "-o", "jsonpath={.status.containerStatuses[0].imageID}")]
+
+
+def test_pod_image_id_accepts_containerd_registry_qualified_form(monkeypatch):
+    # live defect (verify-registry run, 2026-10-12): containerd/k3s reports
+    # "<repo>@sha256:<hex>", not the bare docker form — the DEFAULT runtime
+    # must be accepted (it is the stronger proof: it names the registry).
+    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(
+        0, "192.168.122.156:5000/stanok-machine@sha256:20a61e6943f4\n"))
+    assert k8s._pod_image_id("pod-x", "default") == \
+        "192.168.122.156:5000/stanok-machine@sha256:20a61e6943f4"
 
 
 def test_pod_image_id_fail_soft_is_none(monkeypatch):

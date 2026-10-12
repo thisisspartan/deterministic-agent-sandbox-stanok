@@ -396,15 +396,19 @@ def _pod_image_id(pod, ns: str):
     recorded for THIS run's Pod — `status.containerStatuses[0].imageID`, the
     kubelet/CRI's own record, not the host docker store's idea of the image.
     A content-addressed image ID is identical across runtimes, so this is the
-    digest of the image the Job actually ran. Fail-soft: no pod, kubectl
-    error, or a value that is not a sha256 digest -> None (explicit, like
-    commit_sha — never a guess)."""
+    digest of the image the Job actually ran. Two runtime forms are valid:
+    docker reports a bare "sha256:<hex>"; containerd/k3s (the DEFAULT runtime,
+    live verify-registry run 2026-10-12) reports "<repo>@sha256:<hex>" — the
+    registry-qualified form is the stronger proof (it names the registry the
+    kubelet pulled from). Fail-soft: no pod, kubectl error, or a value whose
+    tail is not a sha256 digest -> None (explicit, like commit_sha — never a
+    guess)."""
     if not pod:
         return None
     r = _kubectl("get", "pod", pod, "-n", ns, "-o",
                  "jsonpath={.status.containerStatuses[0].imageID}")
     out = (r.stdout or "").strip()
-    if r.returncode != 0 or not out.startswith("sha256:"):
+    if r.returncode != 0 or not re.search(r"(?:^|@)sha256:[0-9a-f]+$", out):
         return None
     return out
 
