@@ -5,6 +5,37 @@ what". Operational docs (setup, run commands, env table, triage) stay in
 `README.md`; the machine's own rules are in `CLAUDE.md` (auto-loaded into
 the machine session — do not move them here).
 
+## Runtime (CC-231 production cutover, 2026-10-10)
+
+The DEFAULT runtime is **k8s**: the host orchestrator `launcher/k8s.py`
+creates kubectl Jobs in the local k3s cluster (worker Job + fresh-check Job,
+NetworkPolicy-bounded). The switch is `cli._runtime_mode()`: any value or
+absence of `STANOK_RUNTIME` means k8s; only an explicit `STANOK_RUNTIME=docker`
+selects the **deprecated Docker fallback** (loud WARNING; removal scheduled
+2026-12-01, `specs/RISK-ACCEPTANCES.md` RA-3). Both runtimes use the same
+hermetic machine image and the same host-issued verdict pipeline; they differ
+in transport and mounts:
+
+- **k8s (default):** the tracked tree travels as `git archive HEAD | gzip |
+  base64` (~240KB, under the ConfigMap size guard) plus the ticket, via a
+  ConfigMap; the Pod works on the transported copy (no host `.git` — it
+  re-inits git only to produce `changes.patch`); the Pod returns evidence +
+  patch as a nonce-marked base64 payload; the live tree is never touched
+  during the run. The host applies the patch to a scratch tree for the
+  contract recompute and lands it on the live tree ONLY on a clean verdict.
+  Echelon 1 (`:ro` file binds) is abolished in k8s mode (operator decision
+  2026-10-10): the contract recompute is host-side on the scratch tree, same
+  `_tests_manifest`/`_compare_manifests` code path. Cluster preflight
+  (`_preflight_cluster`, rc=16) runs before any resource is created; cleanup
+  deletes only resources this run provably created (`create`-not-`apply`,
+  P0 2026-10-11).
+- **Docker (deprecated fallback):** bind-mounts instead of transport — repo
+  `:ro` + per-ticket `:rw` carve-outs, `:ro` re-binds of protected files
+  (Echelon 1), worker on the `stanok-net` bridge, fresh-check container
+  `--network=none`.
+
+The chain below describes both; Docker-specific steps are marked.
+
 ## Guarantees (runner-level; moved from the hub docstring — ARCH-REVIEW C, 2026-10-08)
 
 1. Single Continuous Session (ClaudeSDKClient): retries inside ONE session (99% KV cache) — `session.py`.
@@ -13,7 +44,7 @@ the machine session — do not move them here).
 4. Cumulative Token & Cache Telemetry: exact session_hit_rate calculation — `session.py`.
 5. Shielded Turn Watchdog: the turn timeout (default 1800s) is a terminal DoS circuit breaker — asyncio.shield() keeps the turn task alive past wait_for, so client.interrupt() runs cleanly and summary.json is written with the TURN-TIMEOUT code (rc=1) without the process dying on CancelledError — `session.py`.
 6. Verifier-output compression: last-N raw tail, no pattern heuristics at all (REVIEW-KISS-CLI-FIRST §3.3; the last substring filter — CC-138) — `verify.py`.
-7. Process cleanup: guaranteed at the container boundary via `docker stop -t 5` (client processes spawned with start_new_session=True are outside the host process group — the Reaper's os.killpg(0) does not reach them) — `cli.py`.
+7. Process cleanup: guaranteed at the sandbox boundary — Docker: `docker stop -t 5` (client processes spawned with start_new_session=True are outside the host process group — the Reaper's os.killpg(0) does not reach them); k8s: Job deadline + the tracked-resource cleanup in `host_launch_k8s`'s finally (deletes only resources this run created) — `cli.py`, `k8s.py`.
 
 ## The chain of one run
 
@@ -28,12 +59,20 @@ label guard (rc=15) -> role-leak (rc=24) -> ticket resolution (rc=13)
 -> ticket header + declared-path validation (rc=13)
 -> server /props preflight (rc=20)
 -> network preflight (rc=16; rc=20 only when the server is down for the host too)
--> run_sandboxed -> sandbox.sandbox_argv -> docker run
+-> runtime dispatch (cli._runtime_mode):
+   k8s (default): k8s.host_launch_k8s — cluster preflight -> ConfigMap
+     (tree + ticket) -> worker Job -> payload (evidence + changes.patch) ->
+     patch gate -> scratch recompute -> fresh Job -> publish -> live apply
+   docker (deprecated): run_sandboxed -> sandbox.sandbox_argv -> docker run
 ```
 
 The image preflight is NOT on this path (doctor-only, CC-106).
 
-- Network policy (S4, SPEC-NETWORK-2026-10-09): the worker runs on the
+- Network policy. k8s (default): the worker Job is bounded by the
+  NetworkPolicy `k8s/networkpolicy.yaml.tmpl` (rendered by
+  `launcher/netpol.py`; only the model server and the Opik backend are
+  reachable; the fresh Job runs with no network). Docker fallback (S4,
+  SPEC-NETWORK-2026-10-09): the worker runs on the
   dedicated bridge `stanok-net` (172.28.0.0/16, `config.DEFAULT_DOCKER_NETWORK`,
   env override `STANOK_DOCKER_NETWORK`), NOT on `host`. The iptables chain
   STANOK-NET (jumps at DOCKER-USER 1 + INPUT 1; the installer scripts
@@ -94,7 +133,8 @@ The image preflight is NOT on this path (doctor-only, CC-106).
   `launcher/tests_harness/test_zone_symlink_ban.py` (the two former GAP
   tests in test_ticket_zone.py are green with the ban).
 
-CONTAINER (the same `cli.main` re-runs inside the image):
+SANDBOX (the same `cli.main` re-runs inside the image — the worker Pod in k8s
+mode, the container in Docker mode):
 
 ```
 gates re-run + lock (rc=21) -> session.run_continuous_session:
@@ -121,15 +161,19 @@ cfg.label_paths already routes every other writer; commit_sha is captured on
 the HOST by cli._capture_start_commit before any launch and passed via the
 STANOK_START_COMMIT env — the container never runs git, plan 2026-10-08)
 
-HOST (cli.run_sandboxed, one finally): reap_stopped -> verify.contract_snapshot
-(pre-run, host process MEMORY only) -> docker run (--rm) -> wait
-(container_rc = ground truth) -> stop (abnormal-path trap) -> summary-presence
-check (no summary = aborted run: nothing published, status `missing`) ->
-verify.host_contract_check (recompute vs the snapshot) -> verify.fresh_verify
-(fresh container, T3-3; runs ONLY when the summary exists AND the
+HOST (cli.run_sandboxed / k8s.host_launch_k8s, one finally): reap_stopped ->
+verify.contract_snapshot (pre-run, host process MEMORY only) -> worker start
+(Docker: `docker run --rm`; k8s: worker Job, payload returns evidence +
+changes.patch) -> wait (container_rc = ground truth) -> stop (abnormal-path
+trap) -> summary-presence check (no summary = aborted run: nothing published,
+status `missing`) -> verify.host_contract_check (recompute vs the snapshot; in
+k8s mode against the scratch tree = transported tree + `git apply` of the
+Pod's patch, same `_compare_manifests` code path) -> verify.fresh_verify
+(fresh container / fresh Job, T3-3; runs ONLY when the summary exists AND the
 contract is intact — spec §1.6) -> summary._publish_evidence (the HOST issues
 the final verdict, Authority below; publishes nothing when the files are
-absent) -> marker removal
+absent) -> (k8s: patch lands on the live tree ONLY on a clean verdict) ->
+marker removal
 
 -> evidence/<label>/summary.json is read exactly once by the supervisor
 (CLAUDE.supervisor.md §3)
@@ -159,9 +203,11 @@ closes the trust boundary opened by `b7ae392`).** The final
 independent host checks, both against state the worker cannot rewrite:
 
 1. **Contract recompute (T3-1/T3-2).** `verify.contract_snapshot` snapshots
-   the protected files (`_protected_files`, the one source) BEFORE `docker
-   run`, kept in host process MEMORY only (a LOG_DIR file could be forged);
-   `verify.host_contract_check` recomputes after the container exits.
+   the protected files (`_protected_files`, the one source) BEFORE the worker
+   starts, kept in host process MEMORY only (a LOG_DIR file could be forged);
+   `verify.host_contract_check` recomputes after the worker exits (k8s mode:
+   against the scratch tree — transported tree + `git apply` of the Pod's
+   patch; the live tree is untouched during the run).
    Non-empty violations force `verifier=FAIL` + `probe_result=CONTRACT-FAIL`
    regardless of the worker's claims — the judge is not the defendant. The
    fresh check is SKIPPED when the contract is violated (spec §1.6: a fresh
@@ -191,11 +237,12 @@ independent host checks, both against state the worker cannot rewrite:
    `run_sandboxed` aligns the exit rc (the T3-6 exit-equals-verdict
    principle). Pinned by `test_stage3_tests_tree.py` +
    `test_stage3_src_tree.py`.
-2. **Fresh check (T3-3/T3-6).** `sandbox.fresh_verify_argv` +
-   `verify.fresh_verify`: a NEW container the worker never touched (same
-   image, `--rm`, `--network=none`, WHOLE repo `:ro` no carve-outs, no
-   LOG_DIR bind, no STANOK_* env, tmpfs home+tmp) re-runs `run.sh list` +
-   `test --all` on the final tree. Runs only when the summary was retrieved
+2. **Fresh check (T3-3/T3-6).** `sandbox.fresh_verify_argv` /
+   `k8s._fresh_job` + `verify.fresh_verify`: a NEW container or Job the
+   worker never touched (same image; Docker: `--rm`, `--network=none`, WHOLE
+   repo `:ro` no carve-outs, no LOG_DIR bind, no STANOK_* env, tmpfs
+   home+tmp; k8s: fresh Job on the scratch tree, no model endpoint, deny-all
+   network) re-runs `run.sh list` + `test --all` on the final tree. Runs only when the summary was retrieved
    AND the contract is intact. A fresh suite failure overrides the worker's
    claim: `probe_result=FRESH-FAIL`, `rc=rc_fresh`; the run's exit rc is set
    to the published verdict's rc (the process exit must not contradict the
@@ -245,7 +292,9 @@ promise code correctness.
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
 | `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight, network preflight (S4: probe classification, host-only) |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
-| `launcher/sandbox.py` | the Docker boundary: mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker network (`--network=stanok-net`, S4) + `probe_argv` (the policy probe container); worker lifecycle (`--rm`, the stop trap, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
+| `launcher/k8s.py` | the default runtime: kubectl Jobs (worker + fresh), ConfigMap transport (`pack_tree`/payload nonce rules), patch gate + `patch_sha256`, scratch recompute, cluster preflight, tracked-resource cleanup (`create`-not-`apply` ownership proof) |
+| `launcher/netpol.py` | NetworkPolicy template rendering (addresses from config/env, never hardcoded) |
+| `launcher/sandbox.py` | the Docker-fallback boundary (deprecated): mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker network (`--network=stanok-net`, S4) + `probe_argv` (the policy probe container); worker lifecycle (`--rm`, the stop trap, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
 | `launcher/session.py` | the one Claude session: turns, TDD hook, retry prompt, loop-guard |
 | `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts); host trust boundary: `contract_snapshot`/`host_contract_check` (T3-1/T3-2) + structural tests/+src/ rule (T3-9/T3-10), `fresh_verify` (T3-3) |
 | `launcher/summary.py` | the summary.json schema (`decide`/`_status_fields`), host-issued verdict priority + `write_env_fail_summary` (T3-5/T3-6), evidence publishing, rotation |
