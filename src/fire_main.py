@@ -7,6 +7,10 @@ The loop logic is injectable — `out` (a sink with `.write(str)`), `clock`
 can drive it frame by frame without a real TTY.
 
 Depends on src/fire_engine.py and src/fire_render.py; neither is modified.
+
+Interactivity (TASK-STANOK-CC-251, FIRE2-04): an optional `keys` source (a
+KeyReader-like with `.read()`, see src/fire_input.py) is polled once per tick
+before step; `main()` enables it on real stdin only when stdin is a tty.
 """
 
 import argparse
@@ -16,7 +20,8 @@ import signal
 import sys
 import time
 
-from fire_engine import FireField
+from fire_engine import WIND_LIMIT, FireField
+from fire_input import KeyReader
 from fire_render import ENTER, EXIT, render_frame
 
 DEFAULT_FPS = 30
@@ -36,16 +41,27 @@ class FireApp:
         buffer work in the handler. The new geometry is rebuilt at the START
         of the next tick, never inside step/render.
 
+    Keys (FIRE2-04): `keys` is an optional source with `.read()` returning
+    an action name or None (a `fire_input.KeyReader`, or any stand-in).
+    Once per tick, BEFORE step, it is polled and the action applied:
+    wind_left/wind_right move `self.wind` (clamped to [-WIND_LIMIT,
+    WIND_LIMIT]); intensity_up/down adjust a decay level applied to every
+    field value before step (see `_apply_intensity_decay`); "quit" requests
+    a stop through the same path as SIGINT. `keys=None` (the default)
+    changes nothing.
+
     Teardown is guaranteed (finally + atexit + the signal handlers) and
     idempotent: EXIT is written at most once per run, and only if ENTER was
     written.
     """
 
-    def __init__(self, out=None, clock=None, size_fn=None, wind=0):
+    def __init__(self, out=None, clock=None, size_fn=None, wind=0, keys=None):
         self.out = sys.stdout if out is None else out
         self.clock = time if clock is None else clock
         self.size_fn = shutil.get_terminal_size if size_fn is None else size_fn
         self.wind = wind
+        self.keys = keys
+        self.intensity = 0
         self.field = None
         self._stop_requested = False
         self._resize_pending = False
@@ -66,9 +82,10 @@ class FireApp:
     def run(self, fps=DEFAULT_FPS, max_frames=None):
         """Animate until `max_frames` frames are drawn or a stop is requested.
 
-        Per frame: (resize flag? -> rebuild geometry at TICK START) -> step ->
-        exactly one `out.write(render_frame(...))` -> sleep the remainder of
-        the 1/fps budget, measured with the injected clock.
+        Per frame: (resize flag? -> rebuild geometry at TICK START) -> poll
+        `keys` once and apply the action (FIRE2-04) -> step -> exactly one
+        `out.write(render_frame(...))` -> sleep the remainder of the 1/fps
+        budget, measured with the injected clock.
         """
         if fps <= 0:
             raise ValueError(f"fps must be positive, got {fps}")
@@ -91,6 +108,9 @@ class FireApp:
                 if self._resize_pending:
                     self._resize_pending = False
                     self._build_field()  # new geometry at TICK START only
+                if self.keys is not None:
+                    self._apply_key(self.keys.read())  # once per tick, before step
+                self._apply_intensity_decay()
                 self.field.step(self.wind)
                 self.out.write(render_frame(self.field))
                 frames += 1
@@ -115,6 +135,37 @@ class FireApp:
             pass  # teardown also runs from atexit: it must not raise there
 
     # --- internals -------------------------------------------------------------
+
+    def _apply_key(self, action):
+        """Apply one polled key action (FIRE2-04); None is a no-op."""
+        if action is None:
+            return
+        if action == "wind_left":
+            self.wind = max(-WIND_LIMIT, self.wind - 1)
+        elif action == "wind_right":
+            self.wind = min(WIND_LIMIT, self.wind + 1)
+        elif action == "intensity_up":
+            self.intensity += 1
+        elif action == "intensity_down":
+            self.intensity = max(0, self.intensity - 1)
+        elif action == "quit":
+            self.handle_stop()  # the same stop path as SIGINT
+
+    def _apply_intensity_decay(self):
+        """Extra decay applied to every field value before step.
+
+        Documented choice (the ticket's fallback): `FireField.step` has no
+        intensity parameter, so the intensity level is implemented as an
+        extra decay applied to the value before step — `value -= 1` per
+        intensity level, clamped at 0. Level 0 (the default, and every
+        run without intensity keys) changes nothing.
+        """
+        if self.intensity <= 0:
+            return
+        buf = self.field.buffer
+        for i in range(len(buf)):
+            if buf[i]:
+                buf[i] = max(0, buf[i] - self.intensity)
 
     def _build_field(self):
         cols, rows = self.size_fn()
@@ -154,8 +205,22 @@ def main(argv=None):
         help="target frames per second (default: %(default)s)",
     )
     args = parser.parse_args(argv)
-    app = FireApp(out=sys.stdout, clock=time, size_fn=shutil.get_terminal_size)
-    app.run(fps=args.fps)
+    # Keys only on a real tty: non-tty runs (CI, pipes, the PTY harness)
+    # keep the previous behavior with keys=None.
+    keys = None
+    try:
+        if sys.stdin.isatty():
+            keys = KeyReader(sys.stdin.fileno())
+    except (OSError, AttributeError):
+        keys = None
+    app = FireApp(
+        out=sys.stdout, clock=time, size_fn=shutil.get_terminal_size, keys=keys
+    )
+    try:
+        app.run(fps=args.fps)
+    finally:
+        if keys is not None:
+            keys.close()  # restore the terminal from raw mode
 
 
 if __name__ == "__main__":
