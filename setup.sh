@@ -93,7 +93,8 @@ docker build -t "$IMAGE_NAME" -f "$DIR/Dockerfile" "$DIR" \
 # pulls BY DIGEST (launcher/k8s.py resolves the RepoDigest at launch). This
 # retires the manual `docker save | sudo k3s ctr import` and survives kubelet
 # image GC. The registry container is ensured here (docker group, no sudo);
-# the one-time k3s registries.yaml is k8s/setup-registry.sh (root, operator).
+# the one-time root step (k3s registries.yaml + docker insecure-registries —
+# plain HTTP on both sides) is k8s/setup-registry.sh (root, operator).
 REGISTRY="${STANOK_REGISTRY:-192.168.122.156:5000}"
 if ! docker inspect stanok-registry >/dev/null 2>&1; then
     docker run -d --name stanok-registry --restart unless-stopped \
