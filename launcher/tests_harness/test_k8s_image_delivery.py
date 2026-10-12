@@ -99,7 +99,9 @@ def _k8s_args(tmp_path):
 
 def _mock_launch_env(monkeypatch):
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight_cluster", lambda cfg: None)
+    # the unified preflight is mocked out here — these tests target the
+    # delivery point (_image_ref); the preflight checks: test_k8s_preflight.py
+    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
     monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
 

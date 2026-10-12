@@ -53,9 +53,11 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.error
+import urllib.request
 import uuid
 
-from launcher import opik, verify
+from launcher import gates, opik, verify
 from launcher.config import RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
@@ -543,6 +545,159 @@ def _preflight_cluster(cfg):
 
 
 # ==================================================================================
+# Unified launch preflight (operator spec 2026-10-12): every check that turns a
+# mid-run infrastructure failure into a pre-launch ENV-FAIL with the fix named.
+# _preflight runs the checks in order (cheap host-side first, cluster-side
+# after) and returns the FIRST reason; host_launch_k8s aborts rc=16 on it.
+# Two items of the operator list are NOT duplicated here — they are already
+# enforced upstream in cli.cmd_run before this function is ever reached:
+# clean tree (dirty_tree_gate, rc=22) and start commit capture
+# (_capture_start_commit -> STANOK_START_COMMIT). A preflight check is added
+# only for a failure class that has no upstream guard.
+# ==================================================================================
+DISK_MAX_PERCENT = 80  # the cc248 GC incident fired at 85% — the guard is lower
+
+
+def _disk_path(cfg) -> str:
+    """The filesystem the kubelet image GC evicts from: the k3s data dir when
+    it exists on this host (single-node k3s == the operator host), else the
+    repo filesystem."""
+    for p in ("/var/lib/rancher/k3s", cfg.repo_root):
+        if os.path.isdir(p):
+            return p
+    return "/"
+
+
+def _preflight_disk(cfg):
+    path = _disk_path(cfg)
+    r = subprocess.run(["df", "--output=pcent", path], capture_output=True,
+                       text=True, timeout=15)
+    if r.returncode != 0:
+        return (f"cannot measure disk usage (df rc={r.returncode} on {path}) — "
+                "infrastructure defect")
+    try:
+        pct = int(r.stdout.strip().splitlines()[-1].strip().rstrip("%"))
+    except (IndexError, ValueError):
+        return f"cannot parse df output for {path} — infrastructure defect"
+    if pct >= DISK_MAX_PERCENT:
+        return (f"disk usage {pct}% >= {DISK_MAX_PERCENT}% on {path} — kubelet "
+                "image GC will evict the image mid-run (the cc248 precedent); "
+                "fix: free disk space or prune images (sudo k3s ctr images prune)")
+    return None
+
+
+def _preflight_image_label(cfg):
+    """Image staleness: the built image must carry the stanok.digest LABEL
+    equal to sha256 over gates.DIGEST_INPUTS re-computed from the CURRENT
+    tree — an image older than the Dockerfile/run.sh/stacks/lock must not
+    reach the cluster (the pull would run an old entrypoint). CC-106 moved
+    this to doctor for the Docker path; the operator preflight spec (2026-10-12)
+    puts it back on the k8s launch path, where a stale digest pull is silent."""
+    try:
+        want = gates._image_digest(cfg)
+    except OSError as e:
+        return f"cannot compute the image digest from the current tree: {e}"
+    r = subprocess.run(["docker", "inspect", "--format",
+                        '{{index .Config.Labels "stanok.digest"}}',
+                        cfg.docker_image],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return (f"image {cfg.docker_image!r} not found locally — "
+                "run setup.sh (build)")
+    got = r.stdout.strip()
+    if got != want:
+        return (f"image {cfg.docker_image!r} is stale: label {got!r} != "
+                f"sha256(current build inputs) {want!r} — fix: rebuild+push "
+                "via ./setup.sh")
+    return None
+
+
+def _preflight_opik(cfg):
+    """Tracing is ON by default (operator 2026-10-12) — so the trace endpoint
+    must be reachable BEFORE the run, not silently dropped mid-run (OTLP drops
+    spans when the endpoint is unreachable). An explicit empty
+    STANOK_OPIK_TRACE_URL disables tracing and this check is skipped.
+    Any HTTP answer (even 405) proves reachability; only a connection failure
+    is a defect. Proxy-bypassed: the endpoint is node-local, the supervisor's
+    http_proxy must not route (or fake) it."""
+    url = (cfg.opik_trace_url or "").strip()
+    if not url:
+        return None
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        opener.open(urllib.request.Request(url, method="HEAD"), timeout=5)
+    except urllib.error.HTTPError:
+        return None  # answered — reachable
+    except (urllib.error.URLError, OSError) as e:
+        return (f"Opik unreachable at {url}: {e} — fix: start Opik (~/opik) "
+                "or disable tracing with STANOK_OPIK_TRACE_URL=''")
+    return None
+
+
+def _preflight_runtime_class(cfg):
+    """The runtime-class knob (SPEC-GVISOR-SPIKE): when STANOK_K8S_RUNTIME_CLASS
+    is set, the class must EXIST — the former behavior (unknown class fails at
+    Pod creation, mid-run) burned the whole run for a name typo."""
+    rc = os.environ.get("STANOK_K8S_RUNTIME_CLASS", "").strip()
+    if not rc:
+        return None
+    r = _kubectl("get", "runtimeclass", rc, "--no-headers")
+    if r.returncode != 0:
+        return (f"runtimeclass {rc!r} not in the cluster — fix: create it or "
+                "unset STANOK_K8S_RUNTIME_CLASS")
+    return None
+
+
+def _preflight_dangling(cfg):
+    """No dangling stanok Jobs/Pods: the run lock serializes runs, so any
+    stanok-labeled ACTIVE resource at preflight time is a leftover of a
+    crashed run (a finished Job awaiting its TTL is not dangling — it is
+    already inert). A leftover Pod/Job collides with the new run's names or
+    holds the node's resources — refuse with the cleanup named."""
+    ns = _namespace()
+    leftovers = []
+    r = _kubectl("get", "jobs", "-n", ns, "-l", "stanok", "-o",
+                 "jsonpath={range .items[*]}{.metadata.name} "
+                 "{.status.active}{\"\\n\"}{end}")
+    if r.returncode != 0:
+        return (f"cannot list stanok Jobs in namespace {ns} "
+                f"(rc={r.returncode}) — infrastructure defect")
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) > 0:
+            leftovers.append(f"job/{parts[0]}")
+    r = _kubectl("get", "pods", "-n", ns, "-l", "stanok", "-o",
+                 "jsonpath={range .items[*]}{.metadata.name} "
+                 "{.status.phase}{\"\\n\"}{end}")
+    if r.returncode != 0:
+        return (f"cannot list stanok Pods in namespace {ns} "
+                f"(rc={r.returncode}) — infrastructure defect")
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] in ("Running", "Pending", "Unknown"):
+            leftovers.append(f"pod/{parts[0]}")
+    if leftovers:
+        return (f"dangling stanok resources in namespace {ns}: "
+                f"{', '.join(leftovers)} — leftovers of a crashed run; fix: "
+                "launch.sh stop <label> or kubectl delete them")
+    return None
+
+
+def _preflight(cfg):
+    """The unified gate (operator spec 2026-10-12): host-side checks first
+    (disk, image staleness, Opik), then the cluster checks (health+manifest,
+    RuntimeClass, dangling). Returns None when launch-ready, else the first
+    reason — an infrastructure defect (rc=16), never a ticket defect."""
+    for check in (_preflight_disk, _preflight_image_label, _preflight_opik,
+                  _preflight_cluster, _preflight_runtime_class,
+                  _preflight_dangling):
+        reason = check(cfg)
+        if reason:
+            return reason
+    return None
+
+
+# ==================================================================================
 # Image delivery (operator 2026-10-12): the Job image reference, by DIGEST.
 # The incident: cc248 ImagePullBackOff — kubelet GC evicted the tag-pinned
 # image and the manual `k3s ctr import` transport was invisible to the launch.
@@ -619,14 +774,16 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         return _early_abort(cfg, marker, label, args.ticket, ExitCode.TICKET,
                             f"ERROR: ticket parse error: {e}")
 
-    # CC-232 pre-flight doctor gate (fail-closed): cluster health + manifest
-    # contract BEFORE any ConfigMap/Job is created — a dead cluster or a
-    # drifted template must not produce cluster resources. Infrastructure
-    # defect: rc=16, no marker, no evidence dir.
-    preflight = _preflight_cluster(cfg)
-    if preflight:
+    # Unified launch preflight (operator spec 2026-10-12; CC-232 subsumed):
+    # disk, image staleness, Opik reachability, cluster health + manifest
+    # contract, RuntimeClass, dangling stanok resources — BEFORE any
+    # ConfigMap/Job is created. Infrastructure defect: rc=16, no marker, no
+    # evidence dir. Clean tree + start commit are enforced upstream in
+    # cli.cmd_run (rc=22 / STANOK_START_COMMIT) — not duplicated here.
+    reason = _preflight(cfg)
+    if reason:
         return _early_abort(cfg, marker, label, args.ticket, ExitCode.ENV_FAIL,
-                            f"ERROR: PREFLIGHT: {preflight}")
+                            f"ERROR: PREFLIGHT: {reason}")
 
     # Image delivery (operator 2026-10-12): the digest reference is resolved
     # BEFORE any cluster resource — an image not pushed to the registry aborts

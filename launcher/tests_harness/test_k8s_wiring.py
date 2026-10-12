@@ -27,6 +27,10 @@ is testable without a cluster. Tests:
  Image delivery (operator 2026-10-12): the two gate-passing wiring tests mock
      _image_ref (the docker inspect point is not a cluster call) — the
      delivery logic itself lives in test_k8s_image_delivery.py
+ Unified launch preflight (operator spec 2026-10-12): the gate is now the
+     unified k8s._preflight (disk/image/Opik/cluster/RuntimeClass/dangling) —
+     the wiring tests mock it; the check logic itself lives in
+     test_k8s_preflight.py, the _preflight_cluster branches stay tested here
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_wiring.py -q
 """
@@ -194,7 +198,7 @@ def test_gate_aborts_before_any_cluster_call(tmp_path, monkeypatch):
     args = _k8s_args(tmp_path)
     calls = []
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight_cluster",
+    monkeypatch.setattr(k8s, "_preflight",
                         lambda cfg: "cluster unreachable: mock")
     _no_real_cluster_calls(monkeypatch)
     monkeypatch.setattr(k8s, "_kubectl",
@@ -211,7 +215,7 @@ def test_gate_runs_before_cluster_calls(tmp_path, monkeypatch):
     args = _k8s_args(tmp_path)
     order = []
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight_cluster",
+    monkeypatch.setattr(k8s, "_preflight",
                         lambda cfg: order.append("gate") or None)
     # image delivery: the digest resolution is a docker call, not a cluster
     # call — mocked here (the delivery logic itself: test_k8s_image_delivery.py)
@@ -241,7 +245,7 @@ def test_cleanup_deletes_only_created_resources(tmp_path, monkeypatch):
     repo, cfg = _k8s_repo(tmp_path)
     args = _k8s_args(tmp_path)
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight_cluster", lambda cfg: None)
+    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref",
                         lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
