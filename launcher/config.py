@@ -38,6 +38,14 @@ DEFAULT_DOCKER_NETWORK = "stanok-net"
 # container address, not the published one.
 DEFAULT_OPIK_HOST_IP = "192.168.122.156"
 DEFAULT_OPIK_BACKEND_IP = "172.25.0.250"
+# Image delivery (operator 2026-10-12): node-local docker registry. setup.sh
+# pushes the built image here; k8s.py renders the Job image by DIGEST (the
+# RepoDigest docker records on push), so kubelet re-pulls the exact image after
+# its own GC — manual `docker save | k3s ctr import` and GC eviction stop being
+# launch hazards. Plain HTTP: k3s needs the one-time registries.yaml
+# (k8s/setup-registry.sh, root). Same node address as Opik above (the address
+# Pods and the host both reach).
+DEFAULT_REGISTRY = f"{DEFAULT_OPIK_HOST_IP}:5000"
 # Operator 2026-10-12 (DOOMFIRE2 close): cc248..cc252 ran with opik_traces=0 —
 # the trace URL was an env-only opt-in (P0-launch.sh does not export it; the
 # traced cc246 needed a manual env). The default is now the contract: tracing
@@ -65,6 +73,7 @@ class Config:
     # container, not a per-command allowlist.
     curated_tools: tuple[str, ...] = ("Read", "Write", "Edit", "Glob", "Grep", "Bash")
     docker_image: str = "stanok-machine:latest"
+    registry: str = DEFAULT_REGISTRY
     opik_trace_url: str = DEFAULT_OPIK_TRACE_URL
 
     @classmethod
@@ -92,6 +101,7 @@ class Config:
             # CLI --max-turns ceiling: max model calls (agentic turns) per query().
             max_agent_turns=int(os.environ.get("STANOK_MAX_AGENT_TURNS", "60")),
             docker_image=os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest"),
+            registry=os.environ.get("STANOK_REGISTRY", DEFAULT_REGISTRY),
             opik_trace_url=os.environ.get("STANOK_OPIK_TRACE_URL", DEFAULT_OPIK_TRACE_URL),
         )
 

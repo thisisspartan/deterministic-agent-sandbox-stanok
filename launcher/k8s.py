@@ -484,14 +484,15 @@ def _runtime_class() -> str:
 # the same `run.sh list; run.sh test --all` pair, no model endpoint)
 # ==================================================================================
 def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
-               patch_file: str, deadline: int, created: list) -> tuple:
+               patch_file: str, deadline: int, created: list,
+               image_ref: str) -> tuple:
     try:
         _kubectl_checked("create", "configmap", cm_patch, "-n", ns,
                         f"--from-file=changes.patch={patch_file}")
         created.append(("configmap", cm_patch))
         _create_manifest(render_template(_read_manifest("fresh-job.yaml.tmpl"), {
             "JOB_NAME": fresh_name.removeprefix("stanok-fresh-"),
-            "IMAGE": cfg.docker_image, "NAMESPACE": ns,
+            "IMAGE": image_ref, "NAMESPACE": ns,
             "CM_TREE": cm_tree, "CM_PATCH": cm_patch, "DEADLINE": str(deadline),
             "RUNTIME_CLASS": _runtime_class(),
         }))
@@ -539,6 +540,40 @@ def _preflight_cluster(cfg):
         return (f"manifest contract tests failed (rc={t.returncode}) — the "
                 f"k8s templates drifted from the contract: {tail}")
     return None
+
+
+# ==================================================================================
+# Image delivery (operator 2026-10-12): the Job image reference, by DIGEST.
+# The incident: cc248 ImagePullBackOff — kubelet GC evicted the tag-pinned
+# image and the manual `k3s ctr import` transport was invisible to the launch.
+# A digest reference makes the pull self-sufficient: containerd fetches the
+# exact manifest from the node-local registry after any GC. Fail-closed here
+# (before any cluster resource): an image not pushed to the registry is an
+# infrastructure defect (rc=16) with the fix named — never a silent pull wait.
+# ==================================================================================
+def _image_ref(cfg):
+    """Resolve the pushed RepoDigest for cfg.docker_image at cfg.registry.
+    Returns (ref, None) on success, (None, reason) when the image is absent
+    locally or not pushed — the reason text names the fix (setup.sh)."""
+    r = subprocess.run(["docker", "inspect", "--format={{json .RepoDigests}}",
+                        cfg.docker_image],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return None, (f"image {cfg.docker_image!r} not found locally — "
+                      "run setup.sh (build)")
+    try:
+        # `docker inspect --format={{json .RepoDigests}}` prints `null` for an
+        # image that exists but was never pushed — `or []` normalizes it.
+        digests = json.loads(r.stdout) or []
+    except json.JSONDecodeError:
+        digests = []
+    ref = next((d for d in digests if isinstance(d, str)
+                and d.startswith(cfg.registry + "/")), None)
+    if ref is None:
+        return None, (f"image {cfg.docker_image!r} is not pushed to the registry "
+                      f"{cfg.registry!r} — run setup.sh (build+push); one-time "
+                      "root step: k8s/setup-registry.sh")
+    return ref, None
 
 
 # ==================================================================================
@@ -592,6 +627,14 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     if preflight:
         return _early_abort(cfg, marker, label, args.ticket, ExitCode.ENV_FAIL,
                             f"ERROR: PREFLIGHT: {preflight}")
+
+    # Image delivery (operator 2026-10-12): the digest reference is resolved
+    # BEFORE any cluster resource — an image not pushed to the registry aborts
+    # with rc=16 and names the fix (setup.sh), never a silent ImagePullBackOff.
+    image_ref, image_err = _image_ref(cfg)
+    if image_err:
+        return _early_abort(cfg, marker, label, args.ticket, ExitCode.ENV_FAIL,
+                            f"ERROR: PREFLIGHT: {image_err}")
 
     evidence_dir, live_dir = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
@@ -659,7 +702,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             _create_manifest(render_template(
                 _read_manifest("worker-job.yaml.tmpl"), {
                     "JOB_NAME": job_name, "LABEL": label, "NONCE": nonce,
-                    "IMAGE": cfg.docker_image, "NAMESPACE": ns,
+                    "IMAGE": image_ref, "NAMESPACE": ns,
                     "SERVER_URL": cfg.server_url, "MODEL": cfg.model,
                     "OPIK_TRACE_URL": cfg.opik_trace_url,
                     "START_COMMIT": os.environ.get("STANOK_START_COMMIT", ""),
@@ -795,7 +838,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         if not contract_violations:
             fresh_rc, fresh_tail = _fresh_job(cfg, ns, fresh_name, cm_tree,
                                               cm_patch, patch_file, deadline,
-                                              created)
+                                              created, image_ref)
             if fresh_tail.startswith("EXEC_ERROR:"):
                 fresh_infra_error = fresh_tail
             else:

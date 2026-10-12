@@ -85,8 +85,27 @@ echo "--- building the machine image (Docker boundary) ---"
 # test_docker_image_digest_matches fails a stale image (CC-106: the check
 # lives in doctor, not the launch path).
 STANOK_DIGEST="$(cat "$DIR/Dockerfile" "$DIR/scripts/run.sh" $(ls "$DIR"/scripts/stacks/*.toml | sort) "$DIR/image-requirements.lock" | sha256sum | cut -d' ' -f1)"
-docker build -t "${STANOK_DOCKER_IMAGE:-stanok-machine:latest}" -f "$DIR/Dockerfile" "$DIR" \
+IMAGE_NAME="${STANOK_DOCKER_IMAGE:-stanok-machine:latest}"
+docker build -t "$IMAGE_NAME" -f "$DIR/Dockerfile" "$DIR" \
     --build-arg STANOK_DIGEST="$STANOK_DIGEST"
+
+# Image delivery (operator 2026-10-12): push to the node-local registry so k3s
+# pulls BY DIGEST (launcher/k8s.py resolves the RepoDigest at launch). This
+# retires the manual `docker save | sudo k3s ctr import` and survives kubelet
+# image GC. The registry container is ensured here (docker group, no sudo);
+# the one-time k3s registries.yaml is k8s/setup-registry.sh (root, operator).
+REGISTRY="${STANOK_REGISTRY:-192.168.122.156:5000}"
+if ! docker inspect stanok-registry >/dev/null 2>&1; then
+    docker run -d --name stanok-registry --restart unless-stopped \
+        -p "${REGISTRY}:5000" -v stanok-registry-data:/var/lib/registry \
+        registry:2
+fi
+docker tag "$IMAGE_NAME" "${REGISTRY}/${IMAGE_NAME}"
+docker push "${REGISTRY}/${IMAGE_NAME}"
+docker inspect --format='{{json .RepoDigests}}' "$IMAGE_NAME" \
+    | grep -o "\"${REGISTRY}[^\"]*\"" >/dev/null \
+    || { echo "FATAL: image not pushed to ${REGISTRY} — RepoDigest unresolved" >&2; exit 1; }
+echo "Image pushed: ${REGISTRY}/${IMAGE_NAME} (k8s resolves the digest at launch)"
 
 echo
 echo "Environment ready. Machine check:"

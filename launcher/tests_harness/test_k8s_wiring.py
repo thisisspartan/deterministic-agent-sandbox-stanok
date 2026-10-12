@@ -24,6 +24,9 @@ is testable without a cluster. Tests:
  Image provenance (operator plan 2026-10-12):
   10 _pod_image_id: reads the Pod's own containerStatuses.imageID (the
      runtime's record of the image the Job ran); fail-soft -> None
+ Image delivery (operator 2026-10-12): the two gate-passing wiring tests mock
+     _image_ref (the docker inspect point is not a cluster call) — the
+     delivery logic itself lives in test_k8s_image_delivery.py
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_wiring.py -q
 """
@@ -210,6 +213,10 @@ def test_gate_runs_before_cluster_calls(tmp_path, monkeypatch):
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
     monkeypatch.setattr(k8s, "_preflight_cluster",
                         lambda cfg: order.append("gate") or None)
+    # image delivery: the digest resolution is a docker call, not a cluster
+    # call — mocked here (the delivery logic itself: test_k8s_image_delivery.py)
+    monkeypatch.setattr(k8s, "_image_ref",
+                        lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")  # base64 str
     monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
     _no_real_cluster_calls(monkeypatch)
@@ -235,6 +242,8 @@ def test_cleanup_deletes_only_created_resources(tmp_path, monkeypatch):
     args = _k8s_args(tmp_path)
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
     monkeypatch.setattr(k8s, "_preflight_cluster", lambda cfg: None)
+    monkeypatch.setattr(k8s, "_image_ref",
+                        lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
     monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
     _no_real_cluster_calls(monkeypatch)
