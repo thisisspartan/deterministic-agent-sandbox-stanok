@@ -21,6 +21,9 @@ is testable without a cluster. Tests:
      is mocked, the direct subprocess.run points are a tripwire; the finally
      deletes ONLY resources whose creation by this run is proven (create,
      not apply) — a foreign object with a colliding name is never deleted
+ Image provenance (operator plan 2026-10-12):
+  10 _pod_image_id: reads the Pod's own containerStatuses.imageID (the
+     runtime's record of the image the Job ran); fail-soft -> None
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_wiring.py -q
 """
@@ -253,3 +256,33 @@ def test_cleanup_deletes_only_created_resources(tmp_path, monkeypatch):
     assert {(a[1], a[2]) for a in deletes} == {
         ("configmap", "stanok-ticket-lbl"), ("configmap", "stanok-tree-lbl"),
         ("configmap", "stanok-runner-lbl"), ("job", "stanok-job-lbl")}
+
+
+# --- 10: image provenance (operator plan 2026-10-12) ----------------------------
+
+def test_pod_image_id_reads_the_pod_record(monkeypatch):
+    # the runtime's own record (containerStatuses.imageID), not the host store
+    seen = []
+
+    def fake(*a, **k):
+        seen.append(a)
+        return _FakeCompleted(0, "sha256:913ad405b489\n")
+    monkeypatch.setattr(k8s, "_kubectl", fake)
+    assert k8s._pod_image_id("pod-x", "default") == "sha256:913ad405b489"
+    assert seen == [("get", "pod", "pod-x", "-n", "default",
+                     "-o", "jsonpath={.status.containerStatuses[0].imageID}")]
+
+
+def test_pod_image_id_fail_soft_is_none(monkeypatch):
+    # no pod / kubectl error / non-digest value -> None (explicit, never a guess)
+    monkeypatch.setattr(k8s, "_kubectl",
+                        lambda *a, **k: _FakeCompleted(0, "sha256:abc"))
+    assert k8s._pod_image_id(None, "default") is None
+    monkeypatch.setattr(k8s, "_kubectl",
+                        lambda *a, **k: _FakeCompleted(1, "", "not found"))
+    assert k8s._pod_image_id("pod-x", "default") is None
+    monkeypatch.setattr(k8s, "_kubectl",
+                        lambda *a, **k: _FakeCompleted(0, "stanok-machine:latest"))
+    assert k8s._pod_image_id("pod-x", "default") is None
+    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0, ""))
+    assert k8s._pod_image_id("pod-x", "default") is None

@@ -292,7 +292,7 @@ promise code correctness.
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
 | `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight, network preflight (S4: probe classification, host-only) |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
-| `launcher/k8s.py` | the default runtime: kubectl Jobs (worker + fresh), ConfigMap transport (`pack_tree`/payload nonce rules), patch gate + `patch_sha256`, scratch recompute, cluster preflight, tracked-resource cleanup (`create`-not-`apply` ownership proof) |
+| `launcher/k8s.py` | the default runtime: kubectl Jobs (worker + fresh), ConfigMap transport (`pack_tree`/payload nonce rules), patch gate + `patch_sha256`, image provenance stamp (`image_digest` — the Pod's containerStatuses imageID, host-stamped, None when unavailable), scratch recompute, cluster preflight, tracked-resource cleanup (`create`-not-`apply` ownership proof) |
 | `launcher/netpol.py` | NetworkPolicy template rendering (addresses from config/env, never hardcoded) |
 | `launcher/sandbox.py` | the Docker-fallback boundary (deprecated): mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker network (`--network=stanok-net`, S4) + `probe_argv` (the policy probe container); worker lifecycle (`--rm`, the stop trap, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
 | `launcher/session.py` | the one Claude session: turns, TDD hook, retry prompt, loop-guard |

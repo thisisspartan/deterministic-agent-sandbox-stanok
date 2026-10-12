@@ -24,6 +24,14 @@ invariants on the transport layer; a violation is a host-issued
 CONTRACT-FAIL, never a silent apply. The patch lands on the live tree ONLY
 on a final PASS (§6 ordering).
 
+Image provenance (operator plan 2026-10-12): the host stamps `image_digest`
+into the published summary.json — the image ID recorded in the worker Pod's
+own containerStatuses (the runtime's record of the image the Job ACTUALLY
+ran; a content-addressed image ID is identical across runtimes, so this is
+the digest of the image the run used, not the host store's idea of it).
+Fail-soft: no Pod / no record -> None (explicit, like commit_sha), never a
+guess.
+
 kubectl is the only cluster interface; missing kubectl = rc=16 ENV-FAIL
 (infrastructure, call the human). Namespace/kubectl binary are runtime
 knobs (STANOK_K8S_NAMESPACE / STANOK_KUBECTL), not Config fields.
@@ -381,6 +389,24 @@ def _pod_of_job(job_name: str, ns: str, timeout_s: int = 120):
     return None
 
 
+def _pod_image_id(pod, ns: str):
+    """Image provenance (operator plan 2026-10-12): the image ID the runtime
+    recorded for THIS run's Pod — `status.containerStatuses[0].imageID`, the
+    kubelet/CRI's own record, not the host docker store's idea of the image.
+    A content-addressed image ID is identical across runtimes, so this is the
+    digest of the image the Job actually ran. Fail-soft: no pod, kubectl
+    error, or a value that is not a sha256 digest -> None (explicit, like
+    commit_sha — never a guess)."""
+    if not pod:
+        return None
+    r = _kubectl("get", "pod", pod, "-n", ns, "-o",
+                 "jsonpath={.status.containerStatuses[0].imageID}")
+    out = (r.stdout or "").strip()
+    if r.returncode != 0 or not out.startswith("sha256:"):
+        return None
+    return out
+
+
 def _stream_pod_logs(pod: str, ns: str, path: str, timeout_s: int) -> None:
     """kubectl logs -f blocks until the Pod's containers exit — the payload
     lands in the host-side log file, never in the supervisor's context."""
@@ -692,6 +718,14 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             with open(sum_path, encoding="utf-8") as f:
                 summary = json.load(f)
             summary["patch_sha256"] = patch_sha
+            # Image provenance (operator plan 2026-10-12): host-stamped like
+            # patch_sha256 — the Pod's own containerStatuses record. None is
+            # explicit (never a guess), with a WARN, same as commit_sha.
+            image_digest = _pod_image_id(pod, ns)
+            summary["image_digest"] = image_digest
+            if image_digest is None:
+                log("WARN: image provenance: Pod imageID unavailable — "
+                    "publishing image_digest=None")
             sid = summary.get("session_id")
             if sid:
                 stamp_opik_traces(

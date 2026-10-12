@@ -5,7 +5,9 @@ CC-237 (schema v2, operator decision 2026-10-11): summary.json is TYPED —
 scalars and structured fields only, no free text. The allowlist:
   label, ticket, rc, verifier, probe_result, turns, elapsed_s, session_id,
   commit_sha, tokens, cache_hit_rate, inference_telemetry, tool_activity,
-  loop_trap, opik_traces  (+ patch_sha256, host-stamped in k8s mode).
+  loop_trap, opik_traces  (+ patch_sha256, image_digest, host-stamped in
+  k8s mode — k8s.py: the Pod's containerStatuses imageID, None when
+  unavailable).
   loop_trap = {"tool": str, "hash": str, "n": int} | None — the typed
   circuit-breaker record (the protocol reads it as LOOP-TRAP).
 All free text of a run (the error string, verify_gate failures, contract-lock

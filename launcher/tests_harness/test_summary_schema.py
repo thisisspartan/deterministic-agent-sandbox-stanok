@@ -29,7 +29,8 @@ from launcher import summary
 from launcher.config import Config
 
 # The exact output keys of build_summary (docstring of summary.py).
-# patch_sha256 is host-stamped in k8s mode only (k8s.py), not by build_summary.
+# patch_sha256 and image_digest are host-stamped in k8s mode only (k8s.py),
+# not by build_summary.
 ALLOWLIST = {
     "label", "ticket", "rc", "verifier", "probe_result", "turns", "elapsed_s",
     "session_id", "commit_sha", "tokens", "cache_hit_rate",
