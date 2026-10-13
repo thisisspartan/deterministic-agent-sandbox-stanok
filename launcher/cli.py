@@ -83,8 +83,8 @@ def _open_run_state(cfg, label: str) -> tuple:
     R2: the marker is written by the host-side supervisor
     (k8s.host_launch_k8s / launch_background) with ITS pid — inside the Pod
     os.getpid() is not visible from the host. If the marker already exists,
-    preserve its start_ts/pid; only a fresh in-process run (no-sandbox)
-    writes its own.
+    preserve its start_ts/pid; only a fresh in-process run
+    (STANOK_NO_SANDBOX) writes its own.
     """
     evidence_dir, live_dir = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
@@ -342,7 +342,7 @@ def cmd_stop(cfg, label: str) -> int:
 
 
 # ==================================================================================
-# Launch orchestration (R2: the former launch.sh + sandbox-run.sh, in Python)
+# Launch orchestration (R2: the former launch.sh, in Python)
 # ==================================================================================
 def _inner_run_argv(cfg, args) -> list:
     """The container-side / child-side `run` argv (single source)."""

@@ -1,7 +1,7 @@
 """gates — the launch gates (PLAN-HYGIENE 2026-10-08 split, step 5).
 
 Label guard, role-leak refusal, dirty-tree, hidden-files, test-config (CC-151),
-sandbox-config, the server/image preflights and the context-window derivation.
+the server/image preflights and the context-window derivation.
 The repo root and server URL come from the passed-in Config (C).
 _DERIVED_REQUIRED_WINDOW is a module global (written by preflight_server, read
 by context_rot_threshold); tests_harness monkeypatches this module's functions

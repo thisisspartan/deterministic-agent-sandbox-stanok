@@ -14,7 +14,7 @@ ONE base64 gzip-tar block between nonce markers on stdout; the host accepts
 EXACTLY ONE nonce-matching block (zero/two/unclosed = aborted, status
 `missing`, never a verdict).
 
-The verdict stays host-issued with the same priority as the Docker path
+The verdict stays host-issued with fixed priority
 (CONTRACT-FAIL > FRESH-FAIL > the worker's claims, summary.
 _publish_evidence reused unchanged). Because the live tree is untouched, the
 host recomputes the protected-files manifest against a SCRATCH tree
@@ -258,9 +258,10 @@ def apply_patch_scratch(tree_blob: str, patch_text: str) -> str:
 def scratch_contract_violations(cfg, before: dict, scratch_dir: str,
                                declared) -> list:
     """The host contract recompute over the scratch tree — the SAME
-    verify._tests_manifest + _compare_manifests as the Docker path (the two
-    cannot drift): the live tree is untouched in k8s mode, so the tree the
-    verdict was computed against is `transported tree + patch`."""
+    verify._tests_manifest + _compare_manifests as the pre-run snapshot
+    (one implementation — no drift): the live tree is untouched in k8s
+    mode, so the tree the verdict was computed against is
+    `transported tree + patch`."""
     scratch_cfg = dataclasses.replace(cfg, repo_root=scratch_dir)
     return verify._compare_manifests(before, verify._tests_manifest(scratch_cfg),
                                      declared)
@@ -588,8 +589,9 @@ def _preflight_image_label(cfg):
     equal to sha256 over gates.DIGEST_INPUTS re-computed from the CURRENT
     tree — an image older than the Dockerfile/run.sh/stacks/lock must not
     reach the cluster (the pull would run an old entrypoint). CC-106 moved
-    this to doctor for the Docker path; the operator preflight spec (2026-10-12)
-    puts it back on the k8s launch path, where a stale digest pull is silent."""
+    the docker-build half to doctor (gates.preflight_image, doctor-only);
+    the operator preflight spec (2026-10-12) put the k8s-launch check here,
+    where a stale digest pull is silent."""
     try:
         want = gates._image_digest(cfg)
     except OSError as e:
@@ -879,8 +881,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             return rc
 
         # The payload: exactly one nonce-matching block, else aborted —
-        # nothing is published, `status` reports `missing` (the same
-        # semantics as the Docker path's no-summary case).
+        # nothing is published, `status` reports `missing`.
         payload = None
         pod_log = os.path.join(live_dir, "pod-stdout.log")
         if os.path.isfile(pod_log):
