@@ -95,48 +95,6 @@ def _validate_declared_path(cfg, rel: str) -> bool:
     return declared_carveout(cfg, rel) is not None
 
 
-def host_ro_paths(cfg, rw_paths: tuple) -> tuple[str, ...]:
-    """The pre-existing contract files to re-bind `:ro` ON TOP of a rw carve-out
-    (T4b, CC-136).
-
-    A carve-out that is a DIRECTORY hands back write access to every
-    pre-existing file in it — and since an absent declared path can only be
-    carved out through its parent dir, declaring a NEW test would otherwise make
-    every reference test in tests/ writable at the filesystem layer. Docker
-    layers a file bind over a dir bind by specificity (verified 2026-09-24), so
-    binding the protected files :ro restores immutability natively — this is the
-    FIRST echelon; the post-turn manifest diff (T5/CC-137) is the second.
-
-    One exclusion: a file outside every carve-out needs no bind (the repo
-    `:ro` mount already covers it).
-
-    CC-206: every protected file under a carve-out is ALWAYS bound :ro — the
-    former declared-path exemption is gone. A declared
-    path is never protected because the gate
-    (`assert_edit_paths_are_not_protected`, rc=13) refuses `edit:` on a
-    protected path before the container starts; the mount layer does not trust
-    the declaration either way."""
-    ro: list[str] = []
-    for rel in _protected_files(cfg):
-        if not any(rel == carve or rel.startswith(carve + "/")
-                   for carve in rw_paths):
-            continue
-        ro.append(rel)
-    return tuple(ro)
-
-
-def host_rw_paths(cfg, declared: list[str]) -> tuple[str, ...]:
-    """The deduped rw carve-outs for a declared-path list — what the HOST
-    passes to sandbox_argv before `docker run` (T4). The declared paths were
-    validated by parse_ticket_header, so every carve-out is non-None here."""
-    carveouts: list[str] = []
-    for rel in declared:
-        carve = declared_carveout(cfg, rel)
-        if carve is not None and carve not in carveouts:
-            carveouts.append(carve)
-    return tuple(carveouts)
-
-
 def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bool]:
     """Ticket-scoped invariant (W2.1): the header is the leading block of
     literal `impl: <path>` / `test: <path>` / `docs: <path>` / `edit: <path>`

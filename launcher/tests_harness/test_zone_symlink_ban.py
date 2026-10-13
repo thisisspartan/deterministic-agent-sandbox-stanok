@@ -26,20 +26,18 @@ Tests:
   5  the zone directory itself is a symlink -> gate names it
   6  clean zones (regular files/dirs) -> gate returns []
   7  full path: committed symlink in src/ -> launch rc=13, EARLY-ABORT summary
-  8  hard links: ln() from a zone to a repo file fails in Docker (EXDEV) —
-     the scanner does not look for hard links because they cannot escape a
-     zone: base repo :ro + per-zone rw binds are separate mounts
+
+(CC-258 step B removed the old test 8 — the live-Docker EXDEV proof of the
+Docker mount topology; the k8s topology is pinned by test_k8s_manifests.py,
+the hard-link residual closure by the contract-recompute tests.)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_zone_symlink_ban.py -q
 """
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 from launcher import gates
 from launcher.config import Config
@@ -149,31 +147,3 @@ def test_full_path_rc13(tmp_path):
     data = json.loads(sum_path.read_text())
     assert data["probe_result"] == "EARLY-ABORT"
     assert data["rc"] == 13
-
-
-# --- 8: hard links cannot escape a zone (the scanner's deliberate gap) ---------
-
-@pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
-def test_docker_hardlink_across_mounts_fails(tmp_path):
-    # The hard-link answer (operator review 2026-10-09): the scanner does NOT
-    # look for hard links, and this test proves why that is safe: the mount
-    # topology (sandbox._mount_specs: base repo :ro, each writable zone a
-    # separate rw bind) makes ln() from a zone to a file outside it cross
-    # mounts -> EXDEV. A hard link inside ONE zone stays inside it. The
-    # conclusion is verified at the Docker layer, not assumed from topology.
-    repo = tmp_path / "repo"
-    (repo / "src").mkdir(parents=True)
-    (repo / "launcher").mkdir()
-    (repo / "launcher" / "target.txt").write_text("regular file\n")
-    image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
-    proc = subprocess.run(
-        ["docker", "run", "--rm",
-         "--user", f"{os.getuid()}:{os.getgid()}",
-         "-v", f"{repo}:{repo}:ro",
-         "-v", f"{repo}/src:{repo}/src:rw",
-         image, "bash", "-c", f"ln {repo}/launcher/target.txt {repo}/src/hard"],
-        capture_output=True, text=True, timeout=180)
-    out = proc.stdout + proc.stderr
-    assert proc.returncode != 0, out
-    assert "cross-device" in out.lower(), out
-    assert not (repo / "src" / "hard").exists()

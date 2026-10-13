@@ -84,32 +84,3 @@ def write(path, body):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     return path
-
-
-# S4 (SPEC-NETWORK): the worker container runs on the stanok-net bridge;
-# sandbox.sandbox_argv carries --network=<that network>. The live-docker
-# suites (mounts/tmpfs) launch real containers through it, so the network
-# must exist. In production it is host infrastructure created by the
-# operator (the infra installer scripts were removed 2026-10-10; the
-# launch-time network refusal was removed with the Docker path by CC-258 —
-# the k8s network policy is pinned by test_k8s_manifests/netpol). The
-# harness self-provisions the bridge here — idempotent, same name/subnet as
-# the infra script — so the live suites run on any docker host. No-Docker
-# variant: docker absent → the fixture is a no-op.
-@pytest.fixture(scope="session", autouse=True)
-def ensure_worker_network():
-    if shutil.which("docker") is None:
-        return
-    from launcher.config import DEFAULT_DOCKER_NETWORK
-    net = os.environ.get("STANOK_DOCKER_NETWORK", DEFAULT_DOCKER_NETWORK)
-    inspect = subprocess.run(["docker", "network", "inspect", net],
-                            capture_output=True, text=True)
-    if inspect.returncode == 0:
-        return
-    created = subprocess.run(
-        ["docker", "network", "create", "--subnet", "172.28.0.0/16", net],
-        capture_output=True, text=True)
-    if created.returncode != 0:
-        raise RuntimeError(
-            f"harness cannot create the worker network {net!r}: "
-            f"{created.stderr.strip()}")
