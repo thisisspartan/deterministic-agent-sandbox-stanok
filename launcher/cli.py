@@ -27,7 +27,7 @@ from launcher.logs import log
 from launcher.plan import SessionPlan
 from launcher.gates import (
     check_test_config, dirty_tree_gate, hidden_files_gate,
-    preflight_server, root_refusal, sandbox_config_gate, validate_label,
+    preflight_server, root_refusal, validate_label,
     zone_symlink_gate,
 )
 from launcher.opik import opik_traces_field
@@ -521,7 +521,7 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
 
     One readable sequence: label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
     ticket resolution (rc=13) -> dirty-tree (rc=22) -> hidden-files (rc=26)
-    -> zone-symlink (rc=13) -> test-config (rc=27) -> sandbox-config (rc=28).
+    -> zone-symlink (rc=13) -> test-config (rc=27).
     Returns None when all gates pass, else (rc, message) for the caller to
     abort with. Sets args.ticket_path on success (the resolved ticket, used
     by the launch branches). Do not reorder: the order is the rc contract.
@@ -574,15 +574,6 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
     # can force a failing test to rc=0 (conftest.py pytest_sessionfinish).
     if check_test_config(cfg):
         return (ExitCode.TEST_CONFIG, "ERROR: pytest config files in tests/ (rc=27)")
-
-    # W7 sandbox-config gate (rc=28): a sandbox.filesystem deny entry that
-    # resolves (against the settings dir, per cli.js) to a non-existent
-    # path makes bwrap EROFS-kill every Bash call in the session (CC-107).
-    # The abort message carries the offending entries + fix (CC-157).
-    sandbox_problems = sandbox_config_gate(cfg)
-    if sandbox_problems:
-        return (ExitCode.SANDBOX_CONFIG, "ERROR: sandbox.filesystem deny entry invalid (rc=28): "
-                + "; ".join(sandbox_problems))
 
     return None
 

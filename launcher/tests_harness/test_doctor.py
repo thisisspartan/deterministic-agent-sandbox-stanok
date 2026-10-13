@@ -16,7 +16,7 @@ the RUNNER, not the sandbox; the Docker container does not mount the host
 Gate order (single source: launcher/cli.py _launch_gates):
   label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->
   dirty-tree (rc=22) -> hidden-files (rc=26) -> test-config (rc=27) ->
-  sandbox-config (rc=28) -> lock (rc=21) -> [cmd_run: W2.1 ticket header
+  lock (rc=21) -> [cmd_run: W2.1 ticket header
   (rc=13: no impl:/test:/docs:/reset:none, or a create-declared path that
   already exists) -> pre-flight /props (rc=20)]
 Precedence is pinned by test_runner_gate_precedence_* (two violations at

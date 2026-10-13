@@ -245,52 +245,6 @@ def check_test_config(cfg) -> bool:
     return False
 
 
-def sandbox_config_gate(cfg) -> list[str]:
-    # W7 sandbox-config gate (fail-closed, CC-107): cli.js resolves a relative
-    # sandbox.filesystem deny entry against the --settings file's directory
-    # (REPO_ROOT/.claude), NOT cwd. A deny entry that resolves to a NON-EXISTENT
-    # path makes cli.js emit `--ro-bind /dev/null <path>`; bwrap must create the
-    # mount point, and on the read-only repo mount that is EROFS for EVERY Bash
-    # call in the session (CC-107). A non-existent deny entry is always a mistake
-    # (typo / wrong base), so fail-closed if any denyWrite/denyRead entry does
-    # not exist.
-    #
-    # We do NOT reimplement cli.js's resolver: this config only uses
-    # settings-relative entries (written "../<name>" from .claude) and absolute
-    # paths. Any other form ("~", "//") is rejected rather than guessed at, so
-    # the gate cannot silently diverge from cli.js semantics.
-    #
-    # Returns a list of human-readable problems (empty = OK). Each problem
-    # names the key, the raw entry, the resolved path, and the fix
-    # (CC-157: the rc=28 abort must be actionable, not abstract).
-    problems: list[str] = []
-    settings = os.path.join(cfg.repo_root, ".claude", "settings.stanok.json")
-    if not os.path.isfile(settings):
-        return problems
-    try:
-        with open(settings, encoding="utf-8") as f:
-            cfg = json.load(f)
-    except (OSError, ValueError) as e:
-        problems.append(f"could not parse {settings}: {e}")
-        return problems
-    base = os.path.dirname(settings)  # == REPO_ROOT/.claude (cli.js flagSettings root)
-    fs = cfg.get("sandbox", {}).get("filesystem", {})
-    for key in ("denyWrite", "denyRead"):
-        for entry in fs.get(key, []):
-            if entry.startswith(("~", "//")):
-                problems.append(
-                    f"{key} entry {entry!r} is not settings-relative/absolute (unsupported)")
-                continue
-            resolved = entry if os.path.isabs(entry) else os.path.normpath(os.path.join(base, entry))
-            if not os.path.exists(resolved):
-                problems.append(
-                    f"{key} entry {entry!r} resolves to non-existent {resolved} "
-                    f"(base {base}) — fix: mkdir -p {resolved}")
-    for p in problems:
-        log(f"SANDBOX-CONFIG: {p}")
-    return problems
-
-
 # Safety margin between the server's live n_ctx and the derived required
 # window when STANOK_REQUIRED_WINDOW is not set (preflight_server).
 REQUIRED_WINDOW_MARGIN = 2000

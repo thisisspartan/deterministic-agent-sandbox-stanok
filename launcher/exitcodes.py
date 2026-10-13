@@ -26,8 +26,7 @@ class ExitCode(IntEnum):
     21 lock held by another run; 22 dirty machine tree;
     24 role leak (parent CLAUDE.md above the repo);
     26 hidden/TEMP files in src/tests/docs/scripts;
-    27 test-config files under tests/ (verdict-subversion, CC-151);
-    28 sandbox.filesystem deny entry invalid (CC-107/CC-157).
+    27 test-config files under tests/ (verdict-subversion, CC-151).
     """
     DEFECT = 1
     TICKET = 13
@@ -41,4 +40,3 @@ class ExitCode(IntEnum):
     ROLE_LEAK = 24
     HIDDEN_FILES = 26
     TEST_CONFIG = 27
-    SANDBOX_CONFIG = 28

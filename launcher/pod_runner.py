@@ -2,13 +2,11 @@
 
 Runs inside the worker Pod (the only code that runs there): reconstructs the
 tree from the transport ConfigMap, re-inits its own git (the base commit —
-the patch is `git diff base..HEAD` afterwards), DISABLES the native bwrap
-sandbox in the extracted `.claude/settings.stanok.json` (O3: the K8s
-boundary — NetworkPolicy + securityContext + non-root — replaces it; bwrap
-cannot run under a RuntimeDefault seccomp profile), runs the in-container
-session (the unchanged STANOK_IN_CONTAINER=1 path), then emits the evidence
-payload (summary.json + launcher.stdout.log + changes.patch) as ONE base64
-gzip-tar block between the nonce markers on stdout.
+the patch is `git diff base..HEAD` afterwards), rewrites the Opik tracing
+endpoint in the extracted `.claude/settings.stanok.json` (CC-225), runs the
+in-container session (the unchanged STANOK_IN_CONTAINER=1 path), then emits
+the evidence payload (summary.json + launcher.stdout.log + changes.patch) as
+ONE base64 gzip-tar block between the nonce markers on stdout.
 
 Exit contract: 0 once the payload block is emitted (the verdict is inside
 the payload — a defect verdict is a SUCCESSFUL transport); 1 only if this
@@ -61,22 +59,21 @@ def main() -> int:
     sys.path.insert(0, REPO)
     from launcher import k8s
 
-    # 2. O3: the Pod-side settings rewrite (bwrap off; the filesystem deny
-    # entries and the network block removed — the sandbox_config_gate would
-    # otherwise rc=28 on '../evidence', absent next to the extracted tree).
-    # BEFORE the base commit: the rewrite is part of the Pod's baseline, not
-    # an uncommitted change — the in-Pod dirty_tree_gate (cli.py, rc=22)
-    # would otherwise abort the session (live cc221, 2026-10-10).
+    # 2. CC-225: the Opik tracing endpoint is ENV-only — the host passes the
+    # reachable backend URL via the Job env; the settings value is rewritten
+    # here (claude applies settings.env natively). BEFORE the base commit:
+    # the rewrite is part of the Pod's baseline, not an uncommitted change —
+    # the in-Pod dirty_tree_gate (cli.py, rc=22) would otherwise abort the
+    # session (live cc221, 2026-10-10). Empty env -> settings unchanged.
+    # (CC-258 step D: the O3 bwrap-disable rewrite is gone — the settings
+    # carry no sandbox block; cli.js defaults sandbox.enabled to false, so
+    # the Pod runs unsandboxed natively: the K8s boundary — NetworkPolicy +
+    # securityContext + non-root — is the boundary.)
     settings = os.path.join(REPO, ".claude", "settings.stanok.json")
     if os.path.isfile(settings):
         with open(settings, encoding="utf-8") as f:
-            rewritten = k8s.disable_sandbox_settings(f.read())
-        # CC-225: the Opik tracing endpoint is ENV-only — the host passes
-        # the reachable backend URL via the Job env; the settings value is
-        # rewritten here (claude applies settings.env natively), still
-        # BEFORE the base commit. Empty env -> settings unchanged.
-        rewritten = k8s.rewrite_tracing_endpoint(
-            rewritten, os.environ.get("STANOK_OPIK_TRACE_URL", ""))
+            rewritten = k8s.rewrite_tracing_endpoint(
+                f.read(), os.environ.get("STANOK_OPIK_TRACE_URL", ""))
         with open(settings, "w", encoding="utf-8") as f:
             f.write(rewritten)
 

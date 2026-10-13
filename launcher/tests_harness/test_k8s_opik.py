@@ -32,7 +32,6 @@ SETTINGS = json.dumps({
     "env": {"BETA_TRACING_ENDPOINT": "http://localhost:8080/v1/private/otel",
             "OTEL_SERVICE_NAME": "stanok-machine"},
     "permissions": {"allow": ["Read"]},
-    "sandbox": {"enabled": True},
 })
 OPIK_URL = "http://192.168.122.156:8080/v1/private/otel"
 
@@ -43,7 +42,6 @@ def test_rewrite_tracing_endpoint_sets_env_only():
     # everything else in env and the rest of the settings survive
     assert out["env"]["OTEL_SERVICE_NAME"] == "stanok-machine"
     assert out["permissions"] == {"allow": ["Read"]}
-    assert out["sandbox"] == {"enabled": True}
 
 
 def test_rewrite_tracing_endpoint_empty_is_noop():

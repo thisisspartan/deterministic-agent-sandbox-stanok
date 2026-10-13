@@ -265,23 +265,6 @@ def scratch_contract_violations(cfg, before: dict, scratch_dir: str,
                                      declared)
 
 
-def disable_sandbox_settings(settings_text: str) -> str:
-    """O3 (operator 2026-10-10): the machine's native bwrap sandbox is
-    DISABLED in the Pod — the K8s boundary (NetworkPolicy + securityContext
-    + non-root) replaces it, and bwrap cannot run under a RuntimeDefault
-    seccomp profile. The filesystem deny entries and the network block are
-    REMOVED (the sandbox_config_gate would otherwise rc=28 on '../evidence'
-    — a path that does not exist next to the extracted tree). env and
-    permissions are preserved byte-for-byte."""
-    data = json.loads(settings_text)
-    sandbox = data.setdefault("sandbox", {})
-    sandbox["enabled"] = False
-    sandbox["failIfUnavailable"] = False
-    sandbox.pop("filesystem", None)
-    sandbox.pop("network", None)
-    return json.dumps(data, ensure_ascii=False, indent=2)
-
-
 def rewrite_tracing_endpoint(settings_text: str, endpoint: str) -> str:
     """CC-225 (operator 2026-10-10): the in-Pod Opik config is ENV-only.
     The extracted settings carry BETA_TRACING_ENDPOINT=http://localhost:8080/
