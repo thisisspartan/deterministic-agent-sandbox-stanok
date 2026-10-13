@@ -7,8 +7,10 @@ cmd_run does, and pin the T1 invariants:
   - the contract_lock exemption is generalized to declared_paths:
     a declared protected path is not flagged; a non-declared one is.
 
-CC-132 adds the single-source zone/kind pins:
-  - sandbox.WRITABLE_ZONES is the only literal zone list; its consumers
+CC-132 adds the single-source zone/kind pins (CC-258: the list moved from
+sandbox.py to launcher/zones.py — the zone policy survives the Docker-path
+removal):
+  - zones.WRITABLE_ZONES is the only literal zone list; its consumers
     (hidden_files_gate, declared_carveout — CC-135 dropped prepare_workspace
     and _validate_declared_path from that list) read the constant
   - the ticket header kinds are exactly impl|test|docs|edit (`scripts` is
@@ -37,7 +39,7 @@ import dataclasses
 
 import pytest
 
-from launcher import gates, plan as plan_mod, sandbox, ticket, verify
+from launcher import gates, plan as plan_mod, ticket, verify, zones
 from launcher.config import Config, RunState
 
 from conftest import repo, write
@@ -166,12 +168,13 @@ def test_prepare_workspace_quarantines_create_not_edit(repo, tmp_path):
 # --- CC-132: one source for zones/kinds ----------------------------------------
 
 def test_zones_have_one_source():
-    # The zone list is one literal in sandbox.py and one NAME (CC-132's
-    # DEFAULT_RW_ZONES alias is gone — CC-134). It is the *declaration*
-    # allow-list, not the mount set: T4/CC-135 derives the mounts per ticket
-    # (declared_carveout), so the plan carries no zone field at all.
-    assert not hasattr(sandbox, "DEFAULT_RW_ZONES")
-    assert sandbox.WRITABLE_ZONES == ("src", "tests", "docs", "scripts")
+    # The zone list is one literal in launcher/zones.py and one NAME
+    # (CC-132's DEFAULT_RW_ZONES alias is gone — CC-134). It is the
+    # *declaration* allow-list, not the mount set: T4/CC-135 derives the
+    # mounts per ticket (declared_carveout), so the plan carries no zone
+    # field at all.
+    assert not hasattr(zones, "DEFAULT_RW_ZONES")
+    assert zones.WRITABLE_ZONES == ("src", "tests", "docs", "scripts")
     fields = {f.name for f in dataclasses.fields(plan_mod.SessionPlan)}
     assert "rw_zones" not in fields
 
@@ -185,7 +188,7 @@ def test_zone_consumers_read_the_constant(tmp_path, monkeypatch):
     repo_dir = tmp_path / "repo"
     (repo_dir / "src").mkdir(parents=True)
     cfg = Config(repo_root=str(repo_dir))
-    monkeypatch.setattr(sandbox, "WRITABLE_ZONES", ("src", "zoneA"))
+    monkeypatch.setattr(zones, "WRITABLE_ZONES", ("src", "zoneA"))
 
     assert ticket.prepare_workspace(cfg, _run_state(tmp_path), _build_plan(cfg, "")) == 0
     assert not (repo_dir / "zoneA").exists()      # no manufactured zone dir

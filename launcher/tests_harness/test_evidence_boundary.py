@@ -3,7 +3,9 @@
 Before CC-134 the container mounted `evidence/` rw, so the agent and the
 in-container Runner shared a writable verdict dir with the host. Now:
 
-  - `sandbox.WRITABLE_ZONES` = the 4 project zones (no "evidence");
+  - `zones.WRITABLE_ZONES` = the 4 project zones (no "evidence"); CC-258 moved
+    the list to launcher/zones.py (the zone policy survives the Docker-path
+    removal);
     evidence/ is visible read-only through the repo :ro mount, so a write
     from inside the container is an EROFS denial, not a missing path.
   - `Config.label_paths()` resolves BOTH dirs into the rw log_dir/<label> when
@@ -25,7 +27,7 @@ import subprocess
 
 import pytest
 
-from launcher import sandbox, summary
+from launcher import sandbox, summary, zones
 from launcher.config import Config
 
 
@@ -39,8 +41,8 @@ def _host_paths(tmp_path):
 
 def test_evidence_is_not_a_writable_zone():
     # The former carve-out is gone (single zone list, CC-132/CC-134).
-    assert "evidence" not in sandbox.WRITABLE_ZONES
-    assert sandbox.WRITABLE_ZONES == ("src", "tests", "docs", "scripts")
+    assert "evidence" not in zones.WRITABLE_ZONES
+    assert zones.WRITABLE_ZONES == ("src", "tests", "docs", "scripts")
 
 
 def test_sandbox_argv_mounts_evidence_read_only(tmp_path):
@@ -122,7 +124,7 @@ def test_publish_evidence_absent_is_a_noop(tmp_path):
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker not available")
 def test_container_cannot_write_evidence(tmp_path):
     repo = tmp_path / "repo"
-    for zone in (*sandbox.WRITABLE_ZONES, "evidence"):
+    for zone in (*zones.WRITABLE_ZONES, "evidence"):
         (repo / zone).mkdir(parents=True)
     log = tmp_path / "logs"
     log.mkdir()

@@ -9,7 +9,8 @@ physically unwritable: the repo is mounted :ro, write zones are
 src/tests/docs/scripts only, settings.stanok.json denies Edit(launcher/**).
 
 The rule: a path is declarable only when its FIRST component is one of
-sandbox.WRITABLE_ZONES — for every kind (impl/test/docs/edit). Refusal is at
+zones.WRITABLE_ZONES (CC-258: the list lives in launcher/zones.py) — for every
+kind (impl/test/docs/edit). Refusal is at
 header parse (rc=13, before any docker run / workspace mutation). The zone
 rule does NOT weaken CC-206: `edit:` on a pre-existing protected file stays
 refused even though its zone is writable — the two checks are complementary.
@@ -29,7 +30,7 @@ import subprocess
 
 import pytest
 
-from launcher import gates, sandbox, ticket
+from launcher import gates, ticket, zones
 from launcher.config import Config
 
 from conftest import repo, write
@@ -91,7 +92,7 @@ def test_impl_new_subdir_in_zone_accepted(repo):
 
 
 def test_all_four_zones_declarable(repo):
-    for zone in sandbox.WRITABLE_ZONES:
+    for zone in zones.WRITABLE_ZONES:
         (repo / zone).mkdir(exist_ok=True)
         ticket.parse_ticket_header(_cfg(repo), f"impl: {zone}/new/mod.py\n")
 
@@ -99,7 +100,7 @@ def test_all_four_zones_declarable(repo):
 # --- unchanged refusals ----------------------------------------------------------
 
 def test_bare_zone_name_still_refused(repo):
-    for zone in sandbox.WRITABLE_ZONES:
+    for zone in zones.WRITABLE_ZONES:
         with pytest.raises(ValueError):
             ticket.parse_ticket_header(_cfg(repo), f"edit: {zone}\n")
 

@@ -8,7 +8,7 @@ from the passed-in Config; the quarantine dir from the passed-in RunState (C).
 import os
 import re
 import shutil
-from launcher import sandbox
+from launcher import zones
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.verify import _protected_files
@@ -39,7 +39,7 @@ def declared_carveout(cfg, rel: str) -> str | None:
         out-of-zone launcher/ a rw mount even though the string starts with
         a zone (proven by test_docker_bind_resolves_symlink_source);
       - the FIRST component of the RESOLVED repo-relative path (realpath,
-        not the string) must be one of sandbox.WRITABLE_ZONES — exact
+        not the string) must be one of zones.WRITABLE_ZONES — exact
         membership, not a prefix match (`srcfoo` is not a zone). The zone
         rule (cc217-impl incident): the container can only write under the
         zones — the repo is `:ro`, the rw carve-outs exist only inside them,
@@ -60,7 +60,7 @@ def declared_carveout(cfg, rel: str) -> str | None:
         return None
     if ".." in rel.split("/"):
         return None
-    if rel.rstrip("/") in sandbox.WRITABLE_ZONES:
+    if rel.rstrip("/") in zones.WRITABLE_ZONES:
         return None
     root = os.path.realpath(cfg.repo_root)
     # No component of the declared path may be a symlink (cc217 review,
@@ -77,7 +77,7 @@ def declared_carveout(cfg, rel: str) -> str | None:
         return None
     # The zone rule reads the RESOLVED location, not the path string
     # (exact membership: `srcfoo` is not a zone).
-    if os.path.relpath(resolved, root).split("/")[0] not in sandbox.WRITABLE_ZONES:
+    if os.path.relpath(resolved, root).split("/")[0] not in zones.WRITABLE_ZONES:
         return None
     if os.path.exists(os.path.join(root, rel)):
         return rel
@@ -181,7 +181,7 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
                 f"invalid declared path {rel!r}: no path component may be a "
                 f"symlink, and the first component of the RESOLVED path "
                 f"(realpath relative to the repo root) must be a writable "
-                f"zone ({', '.join(sandbox.WRITABLE_ZONES)}) — outside a "
+                f"zone ({', '.join(zones.WRITABLE_ZONES)}) — outside a "
                 f"writable zone the container cannot write there; inside a "
                 f"zone the path must be relative, contain no '..', resolve "
                 f"inside the repo, and either exist or lie under an existing "

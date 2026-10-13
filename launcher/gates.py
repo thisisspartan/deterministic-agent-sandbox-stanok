@@ -17,7 +17,7 @@ import subprocess
 import sys
 import urllib.request
 import tomllib
-from launcher import sandbox
+from launcher import sandbox, zones
 from launcher.config import DEFAULT_DOCKER_NETWORK
 from launcher.logs import log
 
@@ -68,7 +68,7 @@ def hidden_files_gate(cfg) -> bool:
     # Appendix A #3). The walk is recursive; a hidden DIRECTORY is flagged too,
     # since it is the same class of leftover and a dot-dir holding only
     # non-hidden files (src/.cache/notes.md) would otherwise still leak.
-    for d in sandbox.WRITABLE_ZONES:
+    for d in zones.WRITABLE_ZONES:
         dirpath = os.path.join(cfg.repo_root, d)
         if not os.path.isdir(dirpath):
             continue
@@ -113,7 +113,7 @@ def zone_symlinks(cfg) -> list[str]:
     its contents as zone content). Raises OSError on a walk error (callers
     fail closed)."""
     found: list[str] = []
-    for d in sandbox.WRITABLE_ZONES:
+    for d in zones.WRITABLE_ZONES:
         dirpath = os.path.join(cfg.repo_root, d)
         if os.path.islink(dirpath):
             found.append(d)
