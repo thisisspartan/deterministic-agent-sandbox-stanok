@@ -248,7 +248,8 @@ def test_registry_shape():
 def test_context_md_budget():
     # CC-146: the live CONTEXT.md (parent repo, read at every supervisor
     # session start) must stay under the ~15 KB budget; closed waves go to
-    # specs/ARCHIVE/CONTEXT-<wave>.md.
+    # specs/ARCHIVE/CONTEXT-<wave>.md. Whether the supervisor-zone files are
+    # PUBLISHED at all is pinned by test_supervisor_zone_not_published.
     ctx = REPO_ROOT.parent / "CONTEXT.md"
     if not ctx.is_file():
         # The public clone has no supervisor zone: CONTEXT.md is a session log
@@ -258,6 +259,25 @@ def test_context_md_budget():
     assert size <= 15360, \
         f"CONTEXT.md is {size} bytes (> 15360 budget) — archive closed waves " \
         f"to specs/ARCHIVE/CONTEXT-<wave>.md"
+
+
+def test_supervisor_zone_not_published():
+    # The parent repo is published (main -> github). Supervisor-zone state
+    # files (CONTEXT.md, specs/STATUS.md, specs/RISK-ACCEPTANCES.md) carry
+    # internal addresses/hosts and incident history — they must NEVER be
+    # tracked there (rule: .claude/sync-skeleton.sh; enforced here). A tracked
+    # path is a published path; present-but-UNTRACKED (the supervisor's local
+    # zone, gitignored) is the valid state.
+    out = subprocess.run(
+        ["git", "-C", str(REPO_ROOT.parent), "ls-files",
+         "CONTEXT.md", "specs/STATUS.md", "specs/RISK-ACCEPTANCES.md"],
+        capture_output=True, text=True,
+    )
+    tracked = [ln for ln in out.stdout.splitlines() if ln.strip()]
+    assert not tracked, (
+        f"supervisor-zone files tracked in the parent repo (would be "
+        f"published): {tracked} — they must stay gitignored (local-only zone)"
+    )
 
 
 def test_claude_md_matches_registry():
