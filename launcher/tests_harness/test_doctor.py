@@ -49,6 +49,18 @@ LOG_DIR = Path("/tmp/stanok-logs")
 DEAD_SERVER = "http://127.0.0.1:59999"
 MOCK_PORT = 59998
 
+# CI bare-environment skip guards (SPEC-CI-MINIMAL, 2026-10-13): the harness
+# must run green in a bare checkout (CI: no docker daemon/image, no jq, no
+# k8s cluster). Environment-dependent probes SKIP with an explicit reason —
+# they are valid refusals, not regressions (same semantics as the rc=21/22
+# skips above). The CI workflow asserts the exact skip count; if a tool
+# appears on PATH its skip turns back into a real test and the count check
+# fails — the guards cannot rot silently.
+_NO_DOCKER = pytest.mark.skipif(
+    shutil.which("docker") is None,
+    reason="docker CLI not on PATH (bare environment) — image probes not applicable",
+)
+
 
 def _launch(args, env_extra):
     """Run launch.sh with the doctor env; return the exit code."""
@@ -103,10 +115,12 @@ def test_git_repo_initialized():
     assert (REPO_ROOT / ".git").exists()
 
 
+@_NO_DOCKER
 def test_docker_available():
     assert shutil.which("docker") is not None
 
 
+@_NO_DOCKER
 def test_machine_image_built():
     image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
     assert subprocess.run(
@@ -114,6 +128,7 @@ def test_machine_image_built():
     ).returncode == 0
 
 
+@_NO_DOCKER
 def test_docker_image_digest_matches():
     # CC-106: the image digest/runner preflight moved from the launch path
     # (former blocking rc=25) to doctor. Import and call the SAME
@@ -140,8 +155,12 @@ def test_kubectl_available():
     if not _supervisor_zone_present():
         pytest.skip("supervisor zone not present (public clone) — "
                     "k8s runtime not expected")
-    assert shutil.which("kubectl") is not None, \
-        "kubectl not found on PATH — the default (k8s) runtime cannot run"
+    if shutil.which("kubectl") is None:
+        # CI bare-environment skip guard (SPEC-CI-MINIMAL): no kubectl on
+        # PATH -> the k8s runtime is not expected here; the absence is
+        # flagged by the skip reason, not by a failure.
+        pytest.skip("kubectl not on PATH (bare environment) — "
+                    "k8s runtime not expected")
 
 
 def test_k8s_cluster_nodes_ready():
@@ -261,6 +280,27 @@ def test_context_md_budget():
         f"to specs/ARCHIVE/CONTEXT-<wave>.md"
 
 
+def _parent_repo_state():
+    """State of the supervisor-zone parent (REPO_ROOT.parent):
+    "present" | "absent" | "not-parent".
+
+    Authenticity: the parent must be a git repo whose .gitmodules names the
+    `stanok` submodule — the published-parent layout. Without this check the
+    guard passes VACUOUSLY outside that layout: `git ls-files` in a non-repo
+    returns rc=128 with EMPTY stdout, so `assert not tracked` is green while
+    having checked nothing (operator-found defect, 2026-10-13).
+    """
+    parent = REPO_ROOT.parent
+    rc = subprocess.run(["git", "-C", str(parent), "rev-parse", "--git-dir"],
+                        capture_output=True, text=True).returncode
+    if rc != 0:
+        return "absent"
+    gm = parent / ".gitmodules"
+    if not gm.is_file() or "stanok" not in gm.read_text(encoding="utf-8"):
+        return "not-parent"
+    return "present"
+
+
 def test_supervisor_zone_not_published():
     # The parent repo is published (main -> github). Supervisor-zone state
     # files (CONTEXT.md, specs/STATUS.md, specs/RISK-ACCEPTANCES.md), their
@@ -271,12 +311,29 @@ def test_supervisor_zone_not_published():
     # (rule: .claude/sync-skeleton.sh + the parent .gitignore; enforced here).
     # A tracked path is a published path; present-but-UNTRACKED (the
     # supervisor's local zone, gitignored) is the valid state.
+    # Layout rules (SPEC-CI-MINIMAL, 2026-10-13): the guard is meaningful
+    # ONLY in the published-parent layout (CI checks out the parent with the
+    # stanok submodule -> state "present" -> the guard RUNS). Outside it:
+    # skip with an explicit reason (standalone stanok checkout), never a
+    # vacuous pass. Inside the layout a failing `git ls-files` is a FAIL,
+    # not an empty list.
+    state = _parent_repo_state()
+    if state == "absent":
+        pytest.skip("no parent repo at REPO_ROOT.parent (standalone stanok "
+                    "checkout) — guard applies to the published parent only")
+    if state == "not-parent":
+        pytest.skip(f"REPO_ROOT.parent ({REPO_ROOT.parent}) is a git repo "
+                    "without a `stanok` submodule in .gitmodules — not this "
+                    "project's parent; guard applies to the published parent only")
     out = subprocess.run(
         ["git", "-C", str(REPO_ROOT.parent), "ls-files",
          "CONTEXT.md", "specs/STATUS.md", "specs/RISK-ACCEPTANCES.md",
          "specs/ARCHIVE", "specs/ANALYSIS-*.md", "tickets"],
         capture_output=True, text=True,
     )
+    if out.returncode != 0:
+        pytest.fail(f"git ls-files in the parent failed (rc={out.returncode}): "
+                    f"{out.stderr.strip()} — the guard must not pass vacuously")
     tracked = [ln for ln in out.stdout.splitlines() if ln.strip()]
     assert not tracked, (
         f"supervisor-zone files tracked in the parent repo (would be "
@@ -312,15 +369,22 @@ def test_stacks_md_matches_registry():
     # since CC-148: the generator emits manifest sort order), and its format
     # line must list all 6 field names.
     import re
-    stacks_md = (REPO_ROOT.parent / "specs" / "STACKS.md").read_text(encoding="utf-8")
-    blocks = re.findall(r"```\n(.*?)\n```", stacks_md, re.S)
+    stacks_md = REPO_ROOT.parent / "specs" / "STACKS.md"
+    if not stacks_md.is_file():
+        # specs/STACKS.md lives in the published parent (tracked there).
+        # Outside the parent layout (standalone stanok checkout) the doc is
+        # absent — skip with a reason, not a FileNotFoundError crash.
+        pytest.skip("specs/STACKS.md absent (no parent layout) — registry doc "
+                    "check applies to the published parent only")
+    text = stacks_md.read_text(encoding="utf-8")
+    blocks = re.findall(r"```\n(.*?)\n```", text, re.S)
     assert blocks, "specs/STACKS.md missing code blocks"
     doc_lines = [ln for ln in blocks[-1].splitlines() if ln.strip()]
     reg_lines = ["|".join(f) for f in _registry_lines()]
     assert sorted(doc_lines) == sorted(reg_lines), \
         f"specs/STACKS.md registry block drifted from the live registry:\n" \
         f"  doc: {sorted(doc_lines)}\n  registry: {sorted(reg_lines)}"
-    fmt = re.search(r"<ext>\|<test-glob>\|<name-regex>\|<test-runner>\|<smoke-runner>(\|<preflight>)?", stacks_md)
+    fmt = re.search(r"<ext>\|<test-glob>\|<name-regex>\|<test-runner>\|<smoke-runner>(\|<preflight>)?", text)
     assert fmt and fmt.group(1), \
         "specs/STACKS.md format line must document all 6 fields incl. <preflight>"
 

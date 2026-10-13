@@ -13,10 +13,22 @@ Run: .venv/bin/python -m pytest launcher/tests_harness/test_runsh_contract.py -q
 """
 
 import os
+import shutil
 import subprocess
 import time
 
+import pytest
+
 from conftest import JS_FAIL, JS_PASS, PY_FAIL, PY_PASS, repo, run, write
+
+# CI bare-environment skip guard (SPEC-CI-MINIMAL, 2026-10-13): the jq stack
+# needs the jq binary; without it on PATH the two jq contract probes are a
+# valid refusal (skip with reason), not a failure. The CI workflow asserts
+# the exact skip count — the guard cannot rot silently.
+_NO_JQ = pytest.mark.skipif(
+    shutil.which("jq") is None,
+    reason="jq not on PATH (bare environment) — JSON validation stack not applicable",
+)
 
 
 # --- list (5) ---------------------------------------------------------------
@@ -180,6 +192,7 @@ def test_smoke_multiple_args(repo):
 
 # --- jq stack (JSON validation) ---------------------------------------------
 
+@_NO_JQ
 def test_test_json_valid_passes(repo):
     # The jq registry line is a real validation stack: `jq empty` exits 0
     # on well-formed JSON (the preflight `command -v jq` runs via sh -c).
@@ -189,6 +202,7 @@ def test_test_json_valid_passes(repo):
     assert "=== tests/data_test.json ===" in p.stdout
 
 
+@_NO_JQ
 def test_test_json_invalid_fails(repo):
     # Malformed JSON: jq exits 5 (parse error). 5 is not in run.sh's own
     # namespace (0/1/2/6/7/124), so it passes through unremapped — the same
