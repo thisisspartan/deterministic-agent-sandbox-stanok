@@ -2,11 +2,13 @@
 #
 # stanok machine image — stack-agnostic worker container.
 #
-# Design decision (replaces bwrap + bash-gate + read-guard + custom `run` MCP
-# tool from waves 1-3): the model gets native Bash back. The security boundary
+# Design decision (replaces the bash-gate + read-guard + custom `run` MCP tool
+# from waves 1-3): the model gets native Bash back. The security boundary
 # moves from "approve every command in advance" to "one strong container +
-# resource limits + external, unwritable verification" — see launcher/sandbox.py
-# for the runtime side of that boundary.
+# resource limits + external, unwritable verification". The runtime side of
+# that boundary is the k8s worker Job (k8s/worker-job.yaml.tmpl: non-root,
+# dropped capabilities, RuntimeDefault seccomp, read-only root, NetworkPolicy)
+# rendered and applied by launcher/k8s.py.
 #
 # R4 (hermetic image, supersedes the old bind-mount decision): the image
 # NOW bakes in Node.js and the Claude Code CLI 2.1.88. The old rule was
@@ -45,7 +47,7 @@ ARG STANOK_GID=10001
 # (Dockerfile + scripts/run.sh + scripts/stacks/*.toml sorted + image-requirements.lock —
 # the same list gates.DIGEST_INPUTS declares) and passes it as
 # --build-arg STANOK_DIGEST.
-# Doctor re-computes the same digest via the SAME function (stanok.py
+# Doctor re-computes the same digest via the SAME function (gates.py
 # preflight_image; CC-106: moved off the launch path — the former blocking
 # rc=25 is freed) and fails closed on a mismatch — an image older than the
 # Dockerfile/STACKS registry becomes a 1-second doctor failure instead of
@@ -54,18 +56,20 @@ ARG STANOK_DIGEST=
 LABEL stanok.digest="${STANOK_DIGEST}"
 
 # --- OS packages -------------------------------------------------------------
-# git                     — model needs read access to history/blame; real
-#                           work often needs `git log`/`git blame`, and write
-#                           access is blocked at the mount layer (launcher/sandbox.py),
-#                           not by withholding the binary — see SEC-01 note there.
+# git                     — the Pod's patch mechanism: k8s.pack_tree transports
+#                           the tree as `git archive HEAD`, pod_runner.py
+#                           re-inits git on the unpacked copy (single "base"
+#                           commit) and after the run produces the change
+#                           patch with `git diff base..HEAD`. The model also
+#                           gets `git log`/`git blame`/`git diff` for context.
 # ca-certificates, curl   — HTTPS to the model server (https deployments)
-#                           and in-container debugging. Since S4
-#                           (SPEC-NETWORK-2026-10-09) the worker runs on the
-#                           dedicated bridge `stanok-net` and the STANOK-NET
-#                           iptables chain (infra/stanok-net.sh) allows ONLY
-#                           the model server: no internet, no host services.
-#                           The host verifies this before every launch
-#                           (gates.network_preflight, rc=16). Packages from
+#                           and in-container debugging. Since P1
+#                           (SPEC-STANOK-K8S-RUNTIME-2026-10-10) the network
+#                           boundary is the rendered NetworkPolicy
+#                           (launcher/netpol.py + k8s/networkpolicy.yaml.tmpl):
+#                           the worker Pod egress allows ONLY the model server
+#                           plus the Opik tracing backend (CC-225); the
+#                           fresh-check Pod is deny-all. Packages from
 #                           the internet are therefore NOT installable at run
 #                           time — the stack lives in the image.
 # build-essential         — most "curl | sh" language installers and native
@@ -74,14 +78,6 @@ LABEL stanok.digest="${STANOK_DIGEST}"
 #                           Python-stack tickets a working interpreter with
 #                           zero extra setup. Package management is uv
 #                           (baked in below), not pip.
-# bubblewrap              — the claude-code NATIVE sandbox (settings.stanok.json
-#                           sandbox.enabled=true) shells out to `bwrap` per Bash
-#                           command. Without it failIfUnavailable=true hard-fails
-#                           the CLI at startup. Runs INSIDE the container (B1
-#                           hybrid): needs --security-opt seccomp=unconfined +
-#                           apparmor=unconfined at docker run (see
-#                           launcher/sandbox.py) and enableWeakerNestedSandbox=true
-#                           (skips --proc /proc, which EPERMs in a container).
 # socat                   — the CLI's network bridge (allowedDomains) forwards
 #                           the sandbox's HTTP/SOCKS bridge sockets via socat;
 #                           the CLI hard-fails at startup without it (verified:
@@ -101,7 +97,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
       build-essential \
-      bubblewrap \
       socat \
       jq \
       python3 \
@@ -139,8 +134,9 @@ ENV UV_SYSTEM_PYTHON=1 \
 # of silently shipping a different package set.
 # --no-binary claude-agent-sdk: install from sdist, NOT the wheel — the
 # wheel ships _bundled/claude (a second CLI, ~300 MB). The sdist build has
-# no _bundled dir; cli_path (stanok.py) resolves `claude` on PATH — inside
-# the container that is the baked-in /usr/local/bin/claude.
+# no _bundled dir; the SDK's cli_path (launcher/session.py passes
+# cfg.claude_bin; config.py resolves it from STANOK_CLAUDE_BIN / PATH) names
+# `claude` — inside the container that is the baked-in /usr/local/bin/claude.
 # pytest — the py stack's test-runner in scripts/run.sh is
 # `env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider -o pythonpath=src`;
 # Python-stack tickets run their suites with it. An unpinned install drifts
@@ -175,22 +171,22 @@ RUN chmod +x /opt/claude-code-2.1.88/cli.js \
     && ln -s /opt/claude-code-2.1.88/cli.js /usr/local/bin/claude
 
 # --- Non-root user -------------------------------------------------------
-# Mirrors stanok.py's own root_refusal() host-side check: the container must
+# Mirrors gates.py's own root_refusal() host-side check: the container must
 # not run the model as root either, or a container escape and a host-level
 # root compromise become the same bug instead of two separate ones.
-# launcher/sandbox.py additionally passes --user "$(id -u):$(id -g)" at runtime so
-# files written into the bind-mounted src/tests/docs/scripts/evidence land
-# owned by the invoking host user, not this baked-in UID; this UID is only
-# the sane default for anyone who runs the image directly/interactively
-# without that override.
+# The worker Job pins this exact UID (k8s/worker-job.yaml.tmpl
+# securityContext: runAsNonRoot, runAsUser/runAsGroup 10001); the Pod writes
+# only to emptyDir volumes and its changes reach the host as a text patch —
+# no host file ever carries a Pod-side owner.
 RUN groupadd -g "$STANOK_GID" stanok \
     && useradd -m -u "$STANOK_UID" -g "$STANOK_GID" -s /bin/bash stanok
 
 WORKDIR /work
 USER stanok
 
-# No ENTRYPOINT/CMD on purpose. launcher/sandbox.py always passes the full command
-# explicitly (python3 launcher/stanok.py run ...). An implicit default here
+# No ENTRYPOINT/CMD on purpose. The worker Job always passes the full command
+# explicitly (/usr/bin/python3 /stanok/runner/pod_runner.py —
+# k8s/worker-job.yaml.tmpl). An implicit default here
 # would be a second, easy-to-forget place the launch command could drift
 # from what launch.sh actually invokes — the same class of bug as the
 # README/CLAUDE.md drift found earlier in this project.
