@@ -1,7 +1,7 @@
 """cli — the CLI entry point and launch orchestration (R2).
 
-argparse, the gate sequence in main(), cmd_run/cmd_status/cmd_wait/cmd_stop,
-the sandbox supervision and the background self-spawn (--follow, CC-140).
+argparse, the gate sequence in main(), cmd_run/cmd_status/cmd_wait/cmd_stop
+and the background self-spawn (--follow, CC-140).
 main() builds the Config ONCE (Config.from_env) and threads it explicitly;
 per-run mutable state is a RunState built from cfg.label_paths (C). `import
 stanok` stays only for the child self-spawn path (stanok.__file__) — the
@@ -16,30 +16,29 @@ import fcntl
 import hashlib
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
 import time
-from launcher import k8s, logs, sandbox, stanok, verify
+from launcher import k8s, logs, stanok
 from launcher.config import Config, RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.plan import SessionPlan
 from launcher.gates import (
-    check_test_config, dirty_tree_gate, hidden_files_gate, network_preflight,
+    check_test_config, dirty_tree_gate, hidden_files_gate,
     preflight_server, root_refusal, sandbox_config_gate, validate_label,
     zone_symlink_gate,
 )
 from launcher.opik import opik_traces_field
 from launcher.session import _install_signal_handlers, run_continuous_session
 from launcher.summary import (
-    _failure_lines, _publish_evidence, _rotate_stale_summary, _write_failures,
-    build_summary, write_env_fail_summary, write_summary,
+    _failure_lines, _rotate_stale_summary, _write_failures,
+    build_summary, write_summary,
 )
 from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
-    host_ro_paths, host_rw_paths, parse_ticket_header, prepare_workspace,
+    parse_ticket_header, prepare_workspace,
 )
 
 
@@ -81,10 +80,11 @@ def _open_run_state(cfg, label: str) -> tuple:
     the logs module docstring): opened here, assigned to the module global,
     released at process exit.
 
-    R2: the marker is written by the host-side supervisor (run_sandboxed /
-    launch_background) with ITS pid — inside the container os.getpid() is
-    not visible from the host. If the marker already exists, preserve its
-    start_ts/pid; only a fresh in-process run (no-sandbox) writes its own.
+    R2: the marker is written by the host-side supervisor
+    (k8s.host_launch_k8s / launch_background) with ITS pid — inside the Pod
+    os.getpid() is not visible from the host. If the marker already exists,
+    preserve its start_ts/pid; only a fresh in-process run (no-sandbox)
+    writes its own.
     """
     evidence_dir, live_dir = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
@@ -240,8 +240,9 @@ def _status_dict(cfg, label: str) -> dict:
     """The status JSON `status` prints — single source, also used by `wait`.
 
     Precedence: a live `.running` marker (running/dead) over a summary.json
-    (done) over missing. `run_sandboxed` publishes the verdict BEFORE removing
-    the marker, so the marker's disappearance implies a readable summary.
+    (done) over missing. The host launcher publishes the verdict BEFORE
+    removing the marker, so the marker's disappearance implies a readable
+    summary.
     """
     evidence_dir, _ = cfg.label_paths(label)
     marker = os.path.join(evidence_dir, ".running")
@@ -352,154 +353,10 @@ def _inner_run_argv(cfg, args) -> list:
     return inner
 
 
-def run_sandboxed(cfg, args, rw_paths: tuple, ro_paths: tuple,
-                  declared: tuple) -> int:
-    """Host-side sync run: supervise the Docker container (replaces
-    sandbox-run.sh). The marker carries THIS process's pid — cmd_stop's
-    killpg lands here, and the try/finally stops the container and removes
-    the marker on every exit path (normal return, crash, signal).
-
-    rw_paths are the per-ticket rw carve-outs (T4/CC-135, derived in main()
-    from the same ticket text the container will parse); ro_paths are the
-    protected files re-bound :ro over a carve-out dir (T4b/CC-136). The base
-    repo mount is always :ro (CC-154). declared is the ticket's declared-path
-    list (T3-9): the host-side contract recompute allows exactly the snapshot
-    plus these paths under tests/ — an undeclared new file is a
-    CONTRACT-FAIL (structural tests/ rule).
-
-    S1 (2026-10-09, rollback of T3-4): the container runs WITH `--rm`; the
-    worker writes its summary into the rw LOG_DIR/<label> mount, so the host
-    never retrieves anything from the container layer. The finally: stop
-    (abnormal-path trap) -> summary presence check -> contract recompute ->
-    fresh check -> publish. No summary = the worker died before writing:
-    nothing is published, `status` reports `missing` — an aborted run per the
-    supervisor protocol, not a verdict (no ENV-FAIL branch).
-
-    Stage 3 (T3-6): after the contract recompute the host runs the fresh
-    check (verify.fresh_verify, T3-3) when the summary exists and the
-    contract is intact, and passes its result to _publish_evidence — the
-    final verdict is host-issued (spec §1.1, priority §3). The returned rc
-    equals the published verdict's rc."""
-    evidence_dir, live_dir = cfg.label_paths(args.label)
-    os.makedirs(evidence_dir, exist_ok=True)
-
-    # T3-4 reaper: remove stopped leftovers of THIS repo (crash remnants of
-    # earlier runs) before this run starts. Running containers are untouched;
-    # a foreign repo's containers are not this run's leftovers (condition 1).
-    sandbox.reap_stopped(cfg.repo_root)
-
-    # S1: the worker writes its summary into LOG_DIR/<label> (the rw mount).
-    # A stale summary.json / failures.log from an earlier run must not
-    # survive: if this worker crashes before writing, the stale files would
-    # otherwise be re-published as this run's verdict (CC-237).
-    for stale_name in ("summary.json", "failures.log"):
-        stale = os.path.join(live_dir, stale_name)
-        if os.path.isfile(stale):
-            try:
-                os.replace(stale, stale + ".prev")
-            except OSError:
-                pass
-
-    run_state = RunState(evidence_dir=evidence_dir, live_dir=live_dir,
-                         marker_path=os.path.join(evidence_dir, ".running"))
-    marker = run_state.marker_path
-    with open(marker, "w", encoding="utf-8") as f:
-        f.write(f"{int(time.time())} {os.getpid()}\n")
-
-    # Isolate this process into its own group BEFORE installing the
-    # handlers: the handler's killpg(0) must hit this run's group, not
-    # the caller's (same guard as cmd_run).
-    try:
-        if os.getpgid(0) != os.getpid():
-            os.setpgid(0, 0)
-    except OSError:
-        pass
-
-    _install_signal_handlers(run_state)
-    image = cfg.docker_image
-    # The container runs the IMAGE's system python (the SDK is baked in);
-    # the host venv python is only for the host-side gates.
-    # T4 (CC-135): the rw carve-outs come from the ticket's declared paths,
-    # derived by main() with the same rule the container-side validation uses.
-    # Stage 3 (T3-1): host-side contract snapshot BEFORE `docker run`. Kept
-    # in this process's memory only (a LOG_DIR file could be rewritten by the
-    # worker); T3-2 recomputes after the container exits and compares.
-    before_manifest = verify.contract_snapshot(cfg)
-    name, argv = sandbox.sandbox_argv(
-        cfg.repo_root, cfg.log_dir, image,
-        ["/usr/bin/python3", "launcher/stanok.py"] + _inner_run_argv(cfg, args),
-        rw_paths=rw_paths, ro_paths=ro_paths)
-    log(f"SANDBOX: docker container {name}")
-    rc = 1  # bound before the try: a Popen failure must not NameError the finally
-    try:
-        proc = subprocess.Popen(argv, start_new_session=True)
-        rc = proc.wait()
-    except KeyboardInterrupt:
-        rc = run_state.interrupted_rc or 130
-    finally:
-        # S1 (rollback of T3-4): the container ran WITH `--rm` — the daemon
-        # removed it on a normal exit; this stop is the abnormal-path trap
-        # (a real stop after a signal/crash, a no-op after a normal exit).
-        sandbox.docker_stop(name)
-        # The worker wrote its summary into the rw LOG_DIR/<label> mount.
-        # No summary = the worker died before writing (crash/kill): nothing
-        # is published, `status` reports `missing` — an aborted run per the
-        # supervisor protocol, not a verdict.
-        summary_present = os.path.isfile(os.path.join(live_dir, "summary.json"))
-        # Stage 3 (T3-2): recompute the host-side contract AFTER the
-        # container exits — the host's independent check of the tree the
-        # verdict was computed against; violations force CONTRACT-FAIL at
-        # publish, regardless of the worker summary.
-        # Stage 3 (T3-6): the fresh check (T3-3) runs ONLY when the summary
-        # exists AND the contract is intact — a fresh run over a tampered
-        # tree is uninformative (spec §1.6); it is NOT gated on the worker's
-        # claims (§1.1: the host's check is the verdict authority).
-        # A fresh infra failure (EXEC_ERROR tail) is rc=16 ENV-FAIL — not a
-        # verdict (call the human). A fresh suite failure overrides the
-        # worker's claim at publish (FRESH-FAIL, §3); the run's exit rc is
-        # then set to the published verdict's rc — the process exit must not
-        # contradict the summary the supervisor reads.
-        # T3-9: the declared context travels with the run — the host's
-        # recompute distinguishes the ticket's declared new tests from a
-        # substitution (an undeclared file under tests/ -> CONTRACT-FAIL).
-        contract_violations = verify.host_contract_check(
-            cfg, before_manifest, declared)
-        fresh_check = None
-        fresh_infra_error = None
-        if summary_present and not contract_violations:
-            fresh_rc, fresh_tail = verify.fresh_verify(cfg)
-            if fresh_tail.startswith("EXEC_ERROR:"):
-                fresh_infra_error = fresh_tail
-            else:
-                fresh_check = (fresh_rc, fresh_tail)
-        # CC-134: publish to the host-owned evidence/<label> BEFORE removing
-        # the marker, so the supervisor never sees "not running" with the
-        # summary still missing. _publish_evidence publishes nothing when the
-        # files are absent — an aborted run stays aborted.
-        _publish_evidence(cfg, args.label, rc, contract_violations, fresh_check)
-        if fresh_infra_error is not None:
-            rc = int(ExitCode.ENV_FAIL)
-            write_env_fail_summary(
-                cfg, args.label,
-                f"fresh check unavailable — {fresh_infra_error}")
-        elif fresh_check is not None and fresh_check[0] != 0:
-            rc = fresh_check[0]
-        elif contract_violations and rc == 0:
-            # T3-9: the exit equals the published verdict's rc (T3-6
-            # principle) — a host-issued CONTRACT-FAIL never exits 0;
-            # _publish_evidence forces the summary rc to DEFECT too.
-            rc = int(ExitCode.DEFECT)
-        try:
-            os.remove(marker)
-        except OSError:
-            pass
-    return rc
-
-
 def launch_background(cfg, args) -> int:
     """Background run (replaces launch.sh's nohup branch): a detached
     self-spawn executes the sync path — the child writes the marker with its
-    own pid and supervises the container (or runs in-process under
+    own pid and supervises the k8s runtime (or runs in-process under
     STANOK_NO_SANDBOX). The parent WAITS for the child's `.running` marker
     before returning: a return before the marker is written is a start race —
     the first `status` reports a false `missing` and a blocking wait loop
@@ -562,7 +419,7 @@ def _build_parser(cfg) -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "stanok — ticket-driven runner: launches a Claude Code machine in a\n"
-            "Docker sandbox against a ticket file, verifies the result with\n"
+            "hardened k8s Pod against a ticket file, verifies the result with\n"
             "scripts/run.sh test --all after every turn, and writes the verdict\n"
             "to evidence/<label>/summary.json (rc, verifier, probe_result)."
         ),
@@ -773,65 +630,13 @@ def _lock_key(cfg) -> "str | None":
 
 
 def _runtime_mode() -> str:
-    """CC-231 (production cutover, supersedes the P1 default): k8s is the
-    DEFAULT runtime. The Docker path (launcher/sandbox.py, deprecated
-    fallback) runs ONLY on an explicit STANOK_RUNTIME=docker; any other
-    value/absence = k8s (launcher/k8s.py). A pure function: the dispatch is
-    testable without a cluster (test_k8s_wiring.py)."""
-    return "docker" if os.environ.get("STANOK_RUNTIME") == "docker" else "k8s"
-
-
-def _warn_deprecated_docker() -> None:
-    """CC-231: the explicit-Docker opt-in is loud — the operator must see
-    they are on the deprecated insecure path (seccomp/apparmor unconfined)."""
-    print("WARNING: Running deprecated insecure Docker runtime "
-          "(seccomp/apparmor unconfined) — STANOK_RUNTIME=docker is an "
-          "explicit fallback; the default runtime is k8s.", file=sys.stderr)
-
-
-def _host_launch(cfg, args, marker: str) -> int:
-    """Host sync: supervise the Docker container (launcher/sandbox.py).
-
-    The container-side Runner re-runs the gates and takes the lock.
-    CC-106: the image digest/runner preflight no longer blocks the
-    launch path — it lives in doctor
-    (launcher/tests_harness/test_doctor.py::test_docker_image_digest_matches).
-    S4 (SPEC-NETWORK): network_preflight runs here, after the ticket parse
-    and before run_sandboxed — it covers the sync path and the --follow
-    child alike (the child re-enters main → _host_launch).
-    """
-    if shutil.which("docker") is None:
-        return _early_abort(cfg, marker, args.label, args.ticket,
-                            ExitCode.DEFECT, "ERROR: docker not found on PATH")
-    # T4 (CC-135): the container's rw carve-outs must be fixed BEFORE
-    # `docker run`, but the SessionPlan is built later, inside the
-    # container — so the host derives them from the same ticket text with
-    # the same parser and the same rule (declared_carveout). A header the
-    # parser refuses (including a create-declared path that already exists,
-    # CC-133) is rc=13 here, before any container starts.
-    try:
-        with open(args.ticket_path, encoding="utf-8") as f:
-            declared, edit_paths, _ = parse_ticket_header(cfg, f.read())
-        assert_create_paths_are_new(cfg, declared, edit_paths)
-        # CC-206: same gate as cmd_run — the host must not start a
-        # container for a ticket that edits a protected file.
-        assert_edit_paths_are_not_protected(cfg, edit_paths)
-    except (OSError, ValueError) as e:
-        return _early_abort(cfg, marker, args.label, args.ticket,
-                            ExitCode.TICKET, f"ERROR: ticket parse error: {e}")
-    # S4 (SPEC-NETWORK R4): verify the network policy BEFORE the worker
-    # starts — a missing chain would otherwise surface mid-run as an API
-    # stall. Host-only: the container-side gates never see the docker CLI.
-    net_fail = network_preflight(cfg)
-    if net_fail is not None:
-        net_rc, net_msg = net_fail
-        return _early_abort(cfg, marker, args.label, args.ticket,
-                            net_rc, f"ERROR: network preflight: {net_msg}")
-    rw_paths = host_rw_paths(cfg, declared)
-    ro_paths = host_ro_paths(cfg, rw_paths)
-    # T3-9: the declared paths parsed here are the ONLY declared context —
-    # forwarded to the host-side contract recompute (structural tests/ rule).
-    return run_sandboxed(cfg, args, rw_paths, ro_paths, tuple(declared))
+    """CC-258: the Docker runtime is removed — k8s (launcher/k8s.py) is the
+    ONLY runtime; this function always returns "k8s". Kept as a pure
+    function: the dispatch stays testable without a cluster
+    (test_k8s_wiring.py). An explicit STANOK_RUNTIME=docker is NOT silently
+    mapped to k8s: main() refuses it with ENV-FAIL ("docker runtime
+    removed")."""
+    return "k8s"
 
 
 def main() -> int:
@@ -883,13 +688,11 @@ def main() -> int:
             # Bash tool's 10-min cap on a 45-min run).
             return launch_background(cfg, args)
 
-        # CC-231 (production cutover): the runtime switch — k8s is the
-        # default, Docker only on an explicit STANOK_RUNTIME=docker. The
-        # launch contract (run/status/wait/stop, the marker, the
-        # summary.json semantics) is unchanged — only the runtime behind a
-        # host `run` differs. Order: an in-container child or a no-sandbox
-        # test run never dispatches — it IS the runtime / the test mode;
-        # only a host run chooses. With --follow the parent stays in
+        # CC-258: the launch contract (run/status/wait/stop, the marker, the
+        # summary.json semantics) is unchanged; k8s is the ONLY host
+        # runtime. Order: an in-container child or a no-sandbox test run
+        # never dispatches — it IS the runtime / the test mode; only a host
+        # run reaches the k8s launch. With --follow the parent stays in
         # launch_background; the detached child re-enters main() and lands
         # here.
         if in_container or no_sandbox:
@@ -912,12 +715,13 @@ def main() -> int:
                 return abort(ExitCode.LOCK, f"LOCK: the repo is already busy with another run ({lock_path})")
             return cmd_run(cfg, args)
 
-        # CC-231: host run — k8s by default; the deprecated Docker path
-        # only on an explicit STANOK_RUNTIME=docker, with a loud WARNING.
-        if _runtime_mode() == "k8s":
-            return k8s.host_launch_k8s(cfg, args, marker)
-
-        _warn_deprecated_docker()
-        return _host_launch(cfg, args, marker)
+        # CC-258: the only host runtime is k8s. An explicit
+        # STANOK_RUNTIME=docker stops the launch with ENV-FAIL — it is
+        # never silently mapped to k8s.
+        if os.environ.get("STANOK_RUNTIME") == "docker":
+            return abort(ExitCode.ENV_FAIL,
+                         "ERROR: docker runtime removed (CC-258) — the only "
+                         "runtime is k8s; unset STANOK_RUNTIME")
+        return k8s.host_launch_k8s(cfg, args, marker)
 
     return 0

@@ -88,14 +88,14 @@ def write(path, body):
 
 # S4 (SPEC-NETWORK): the worker container runs on the stanok-net bridge;
 # sandbox.sandbox_argv carries --network=<that network>. The live-docker
-# suites (mounts/tmpfs/lifecycle) launch real containers through it, so the
-# network must exist. In production it is host infrastructure created by the
-# operator (the infra installer scripts were removed 2026-10-10); the
-# missing-network refusal is
-# covered by test_network_preflight.py. The harness self-provisions the
-# bridge here — idempotent, same name/subnet as the infra script — so the
-# live suites run on any docker host. No-Docker variant: docker absent →
-# the fixture is a no-op.
+# suites (mounts/tmpfs) launch real containers through it, so the network
+# must exist. In production it is host infrastructure created by the
+# operator (the infra installer scripts were removed 2026-10-10; the
+# launch-time network refusal was removed with the Docker path by CC-258 —
+# the k8s network policy is pinned by test_k8s_manifests/netpol). The
+# harness self-provisions the bridge here — idempotent, same name/subnet as
+# the infra script — so the live suites run on any docker host. No-Docker
+# variant: docker absent → the fixture is a no-op.
 @pytest.fixture(scope="session", autouse=True)
 def ensure_worker_network():
     if shutil.which("docker") is None:

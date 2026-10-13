@@ -17,6 +17,10 @@ is ENV-only (no git-tree file changes):
      the host-measured trace count for THIS session (the Pod is not its own
      judge); opik.session_trace_count paginates + filters thread_id
      client-side (CC-159), newest-first early-stop at the run start
+  5  opik.opik_traces_field (moved here from test_network_preflight.py by
+     CC-258 — the Docker network preflight is removed; the field rule
+     survives: in-container -> "disabled" (field present, not 0/null),
+     outside -> the host _opik_trace_count())
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_opik.py -q
 """
@@ -81,3 +85,20 @@ def test_session_trace_count_exists_and_filters():
     assert opik._trace_matches({"metadata": {"thread_id": "abc"}}, "abc")
     assert not opik._trace_matches({"metadata": {"thread_id": "x"}}, "abc")
     assert not opik._trace_matches({}, "abc")
+
+
+# --- 5: opik_traces_field (moved from test_network_preflight.py, CC-258) --------
+
+def test_opik_field_disabled_in_container(monkeypatch):
+    # the Pod is not its own Opik judge: the field must be present, not 0/null
+    monkeypatch.setenv("STANOK_IN_CONTAINER", "1")
+    monkeypatch.setattr(opik, "_opik_trace_count", lambda: 7)
+    assert opik.opik_traces_field() == "disabled"
+
+
+def test_opik_field_uses_count_outside_container(monkeypatch):
+    monkeypatch.delenv("STANOK_IN_CONTAINER", raising=False)
+    monkeypatch.setattr(opik, "_opik_trace_count", lambda: 7)
+    assert opik.opik_traces_field() == 7
+    monkeypatch.setattr(opik, "_opik_trace_count", lambda: None)
+    assert opik.opik_traces_field() is None

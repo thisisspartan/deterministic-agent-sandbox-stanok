@@ -1,16 +1,15 @@
-"""CC-231 (production cutover, supersedes the P1 §3 default) — the runtime switch.
+"""CC-258 (Docker runtime removed) — the runtime dispatch.
 
 launch.sh keeps its contract (`run <ticket> <label> --follow`, status/wait/
-stop unchanged); k8s is the DEFAULT runtime: absent/any other value = the
-host orchestrator (k8s.host_launch_k8s); the Docker path (deprecated
-fallback, launcher/sandbox.py) runs ONLY on an explicit STANOK_RUNTIME=docker,
-with a loud WARNING on stderr. The switch is a pure function so the dispatch
-is testable without a cluster. Tests:
-  1  default (env unset) -> "k8s"
-  2  STANOK_RUNTIME=docker -> "docker" (the only Docker opt-in)
-  3  STANOK_RUNTIME=k8s -> "k8s" (explicit, same as default)
-  4  the k8s host driver exists with the entry the dispatcher calls
-  5  the explicit-Docker opt-in prints the deprecation WARNING
+stop unchanged); k8s is the ONLY runtime: _runtime_mode() always returns
+"k8s" (kept as a pure function so the dispatch stays testable without a
+cluster), and an explicit STANOK_RUNTIME=docker is NOT silently mapped to
+k8s — main() refuses the launch with ENV-FAIL ("docker runtime removed").
+Tests:
+  1  _runtime_mode() -> "k8s" for every env value (unset/docker/k8s/garbage)
+  2  the k8s host driver exists with the entry the dispatcher calls
+  3  main() with STANOK_RUNTIME=docker -> rc=16 ENV-FAIL with the refusal
+     text published; the k8s driver is never reached
  CC-232 (pre-flight doctor gate):
   6  _cluster_env: KUBECONFIG fallback to ~/.kube/config (operator host)
   7  _preflight_cluster: node-Ready and manifest-test branches
@@ -36,26 +35,20 @@ is testable without a cluster. Tests:
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_wiring.py -q
 """
 import argparse
+import json
 import os
-import sys
 
 from launcher import cli, k8s
 from launcher.config import Config
 
 
-def test_default_runtime_is_k8s(monkeypatch):
+def test_runtime_mode_always_k8s(monkeypatch):
+    # CC-258: _runtime_mode is a constant — no env value selects Docker
+    # (the old opt-in semantics are gone: a typo selects nothing).
+    for value in ("docker", "k8s", "", "garbage"):
+        monkeypatch.setenv("STANOK_RUNTIME", value)
+        assert cli._runtime_mode() == "k8s"
     monkeypatch.delenv("STANOK_RUNTIME", raising=False)
-    assert cli._runtime_mode() == "k8s"
-
-
-def test_docker_only_on_explicit_opt_in(monkeypatch):
-    monkeypatch.setenv("STANOK_RUNTIME", "docker")
-    assert cli._runtime_mode() == "docker"
-    # any other value is NOT a Docker opt-in (the old default semantics are
-    # gone: a typo no longer silently selects the deprecated path)
-    monkeypatch.setenv("STANOK_RUNTIME", "k8s")
-    assert cli._runtime_mode() == "k8s"
-    monkeypatch.setenv("STANOK_RUNTIME", "")
     assert cli._runtime_mode() == "k8s"
 
 
@@ -63,12 +56,46 @@ def test_host_driver_entry_exists():
     assert callable(k8s.host_launch_k8s)
 
 
-def test_deprecated_docker_warning(capsys):
-    cli._warn_deprecated_docker()
-    err = capsys.readouterr().err
-    assert "WARNING" in err
-    assert "deprecated insecure Docker runtime" in err
-    assert "seccomp/apparmor unconfined" in err
+def test_docker_runtime_env_is_refused(tmp_path, monkeypatch):
+    # CC-258: STANOK_RUNTIME=docker is NOT silently mapped to k8s — main()
+    # stops the launch with ENV-FAIL and the text "docker runtime removed".
+    repo, cfg = _k8s_repo(tmp_path)
+    args = _k8s_args(tmp_path)
+    args.cmd = "run"
+    args.follow = False
+    monkeypatch.setenv("STANOK_RUNTIME", "docker")
+    monkeypatch.delenv("STANOK_IN_CONTAINER", raising=False)
+    monkeypatch.delenv("STANOK_NO_SANDBOX", raising=False)
+    monkeypatch.delenv("STANOK_LOCK_KEY", raising=False)
+    monkeypatch.setattr(cli.Config, "from_env", classmethod(lambda cls: cfg))
+
+    class _StubParser:
+        def parse_args(self):
+            return args
+    monkeypatch.setattr(cli, "_build_parser", lambda cfg: _StubParser())
+    monkeypatch.setattr(cli, "_capture_start_commit", lambda cfg: None)
+    # None, not a path: main() (cli.py:670-673) ASSIGNS
+    # os.environ["STANOK_LOCK_KEY"] when _lock_key returns a key, and
+    # monkeypatch cannot undo production-code assignments — a real path here
+    # would leak into the pytest process and poison later _launch subprocesses
+    # (test_worktree: wrong lock file -> rc=20 instead of 21). The lock branch
+    # is not reached in this refusal test (no IN_CONTAINER/NO_SANDBOX).
+    monkeypatch.setattr(cli, "_lock_key", lambda cfg: None)
+    monkeypatch.setattr(cli, "_launch_gates", lambda cfg, args: None)
+
+    def no_dispatch(*a, **k):
+        raise AssertionError("STANOK_RUNTIME=docker must not reach the k8s driver")
+    monkeypatch.setattr(k8s, "host_launch_k8s", no_dispatch)
+
+    rc = cli.main()
+    assert rc == 16  # ENV-FAIL: an infrastructure refusal, not a ticket defect
+    with open(os.path.join(cfg.summary_dir("lbl"), "summary.json"),
+              encoding="utf-8") as f:
+        summary = json.load(f)
+    assert summary["rc"] == 16
+    with open(os.path.join(cfg.summary_dir("lbl"), "failures.log"),
+              encoding="utf-8") as f:
+        assert "docker runtime removed" in f.read()
 
 
 # --- 6: CC-232 _cluster_env (kubectl config fallback, operator host) ---------------

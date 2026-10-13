@@ -18,9 +18,17 @@ CC-135 (T4) landed after this file: `sandbox_argv` no longer mounts the zones
 rw wholesale — the caller passes per-ticket `rw_paths` and the default is
 `()` (nothing writable but log_dir), so the tests below pass them explicitly.
 
+CC-258 (step C): the summary-routing tests moved here from
+test_stage3_worker_lifecycle.py — that file pinned the Docker worker
+lifecycle and is gone; the routing it also pinned is runtime-agnostic
+(Config.summary_dir + summary.write_summary: the in-container writer lands
+in the rw log_dir, never in the host-owned evidence/), so it survives here.
+
 The last test is a real `docker run` (the image is a hard doctor requirement
-already): a zone write succeeds, an evidence/ write is refused.
+already): a zone write succeeds, an evidence/ write is refused. (Removed in
+step B together with the Docker path.)
 """
+import json
 import os
 import shutil
 import subprocess
@@ -82,6 +90,30 @@ def test_label_paths_container_writes_into_log_dir(tmp_path, monkeypatch):
     evidence, live = cfg.label_paths("run1")
     assert evidence == str(log / "run1")
     assert live == str(log / "run1")
+
+
+def test_summary_dir_routing(tmp_path, monkeypatch):
+    # moved from test_stage3_worker_lifecycle.py (CC-258): the worker's
+    # summary target is the rw LOG_DIR mount in the container, the host's
+    # publish target is the evidence dir — the same rule in both runtimes.
+    cfg = Config(repo_root=str(tmp_path / "repo"), log_dir=str(tmp_path / "logs"))
+    monkeypatch.setenv("STANOK_IN_CONTAINER", "1")
+    assert cfg.summary_dir("lbl") == os.path.join(str(tmp_path / "logs"), "lbl")
+    monkeypatch.delenv("STANOK_IN_CONTAINER")
+    assert cfg.summary_dir("lbl") == str(tmp_path / "repo" / "evidence" / "lbl")
+
+
+def test_write_summary_follows_routing(tmp_path, monkeypatch):
+    cfg = Config(repo_root=str(tmp_path / "repo"), log_dir=str(tmp_path / "logs"))
+    monkeypatch.setenv("STANOK_IN_CONTAINER", "1")
+    job = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
+           "turns": 1}
+    summary.write_summary(cfg, job, 1)
+    s = json.loads((tmp_path / "logs" / "lbl" / "summary.json")
+                   .read_text(encoding="utf-8"))
+    assert s["probe_result"] == "CLEAN-FIRST"
+    # the host-owned evidence/ is NOT the container's summary target
+    assert not os.path.exists(str(tmp_path / "repo" / "evidence"))
 
 
 def test_publish_evidence_copies_the_verdict(tmp_path):

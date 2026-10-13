@@ -1,22 +1,22 @@
-"""Stage 3 T3-1 — host-side contract snapshot BEFORE `docker run`.
+"""Stage 3 T3-1 — host-side contract snapshot BEFORE the worker starts
+(rewritten onto the k8s runtime by CC-258 — the Docker path is removed).
 
 Trust boundary (operator review 2026-10-09, SPEC-VERDICT-INTEGRITY §1): the
 verdict must not depend on files the worker can rewrite. The host snapshots
 the protected files (tests/**, scripts/run.sh, scripts/stacks/*.toml —
-verify._protected_files, the one source, CC-136) before the container
-starts and keeps the snapshot in the HOST PROCESS MEMORY only: a file in
-LOG_DIR is inside the container's rw mount and could be forged. T3-2
-recomputes it after the container exits and compares.
-
-This ticket adds: `verify.contract_snapshot` (public host entry point, the
-same manifest as _tests_manifest) + its call in `cli.run_sandboxed` before
-`sandbox.sandbox_argv`/Popen. Nothing consumes the snapshot yet (T3-2).
+verify._protected_files, the one source, CC-136) before the worker Job
+starts and keeps the snapshot in the HOST PROCESS MEMORY only: anything the
+Pod can reach is outside the trust boundary. T3-2 recomputes after the run
+ends and compares (the k8s form: over the patched scratch tree,
+test_k8s_contract_scratch.py).
 
 Tests:
-  1  run_sandboxed computes the snapshot BEFORE sandbox_argv/Popen (call order
-     via mocks) — the boundary is the docker argv construction, not just Popen
-  2  the snapshot covers the protected files with sha256 digests
-  3  the snapshot is NOT written into LOG_DIR (memory only)
+  1  host_launch_k8s computes the snapshot BEFORE the first cluster call
+     that carries the worker's context (ConfigMap/Job create) — call order
+     via mocks; the boundary is the transport of the tree, not the verdict
+     phase (the old boundary was the docker argv construction)
+  2  the snapshot covers the protected files with sha256 digests (unit)
+  3  the snapshot is memory only: contract_snapshot writes nothing to disk
   4  a protected-file change after the snapshot is detectable by recompute
      (the guard T3-2 builds on)
 
@@ -26,7 +26,7 @@ import argparse
 import hashlib
 import os
 
-from launcher import cli, sandbox, verify
+from launcher import k8s, verify
 from launcher.config import Config
 
 
@@ -45,72 +45,52 @@ def _repo(tmp_path):
     return repo, Config(repo_root=str(repo), log_dir=str(logdir))
 
 
-class _FakePopen:
-    def __init__(self, argv, **kwargs):
-        self.argv = argv
-
-    def wait(self):
-        return 0
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
-def _mock_run(tmp_path, monkeypatch):
-    """run_sandboxed with docker/signal/stop mocked. Returns (repo, cfg,
-    calls, snapshots, args). The real snapshot logic runs; only the call
-    sites are observed."""
+# --- 1: the snapshot precedes the cluster calls ----------------------------------
+
+def test_snapshot_computed_before_cluster_calls(tmp_path, monkeypatch):
     repo, cfg = _repo(tmp_path)
-    calls, snapshots = [], []
+    ticket = tmp_path / "ticket.md"
+    ticket.write_text("test: tests/x_test.py\nrun.sh: exists\n", encoding="utf-8")
+    args = argparse.Namespace(label="lbl", ticket="ticket.md",
+                             ticket_path=str(ticket), local_retries=0, extra=[])
+    calls = []
 
     def spy_snapshot(c):
         calls.append("snapshot")
-        snap = verify._tests_manifest(c)
-        snapshots.append(snap)
-        return snap
-
-    def spy_argv(*a, **k):
-        calls.append("sandbox_argv")
-        return ("stanok-test", ["docker", "run", "img"])
-
-    def spy_popen(argv, **kwargs):
-        calls.append("popen")
-        return _FakePopen(argv)
+        return verify._tests_manifest(c)
 
     monkeypatch.setattr(verify, "contract_snapshot", spy_snapshot)
-    monkeypatch.setattr(sandbox, "sandbox_argv", spy_argv)
-    # T3-6: run_sandboxed now runs the fresh check — mocked PASS here; the
-    # observable verdict path is pinned in test_scenarios_verdict.py
-    # (S6 removed the wiring unit test).
-    monkeypatch.setattr(verify, "fresh_verify", lambda cfg: (0, ""))
-    monkeypatch.setattr(cli.subprocess, "Popen", spy_popen)
-    monkeypatch.setattr(sandbox, "docker_stop", lambda name: None)
-    # S1: run_sandboxed also calls the reaper — mocked so this T3-1 test keeps
-    # observing only its own boundary (the snapshot).
-    monkeypatch.setattr(sandbox, "reap_stopped", lambda *a: None)
-    monkeypatch.setattr(cli, "_install_signal_handlers", lambda rs: None)
-    monkeypatch.setattr(cli.os, "setpgid", lambda *a: None)
-    args = argparse.Namespace(label="lbl", ticket="t.md",
-                             local_retries=cfg.default_retries, extra=[])
-    return repo, cfg, calls, snapshots, args
+    monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
+    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
+    monkeypatch.setattr(k8s, "_image_ref", lambda cfg: (
+        "192.168.122.156:5000/stanok-machine@sha256:fake", None))
+    monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
+    monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
+
+    def stop(*a, **k):
+        calls.append(a[0])
+        return _FakeCompleted(1, stderr="stop-here")  # -> _kubectl_checked raises
+    monkeypatch.setattr(k8s, "_kubectl", stop)
+
+    rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
+    assert rc == 16  # the failed cluster call -> infra path
+    assert "snapshot" in calls and "create" in calls
+    # The boundary is the transport of the tree: a snapshot taken after the
+    # first create (the ConfigMap already carries the worker's context) is
+    # NOT "before the worker starts" — the mutant that moves it there dies.
+    assert calls.index("snapshot") < calls.index("create")
 
 
-# --- 1: the snapshot precedes the container ------------------------------------
+# --- 2: the snapshot is the protected-files manifest ------------------------------
 
-def test_snapshot_computed_before_docker_run(tmp_path, monkeypatch):
-    repo, cfg, calls, snapshots, args = _mock_run(tmp_path, monkeypatch)
-    assert cli.run_sandboxed(cfg, args, (), (), ()) == 0
-    assert "snapshot" in calls and "sandbox_argv" in calls and "popen" in calls
-    # The boundary is the docker argv construction: a snapshot taken after
-    # sandbox_argv (but before Popen) is NOT "before docker run" — the mutant
-    # that moves it there must die.
-    assert calls.index("snapshot") < calls.index("sandbox_argv")
-    assert calls.index("sandbox_argv") < calls.index("popen")
-
-
-# --- 2: the snapshot is the protected-files manifest ----------------------------
-
-def test_snapshot_covers_protected_files(tmp_path, monkeypatch):
-    repo, cfg, calls, snapshots, args = _mock_run(tmp_path, monkeypatch)
-    cli.run_sandboxed(cfg, args, (), (), ())
-    snap = snapshots[0]
+def test_snapshot_covers_protected_files(tmp_path):
+    repo, cfg = _repo(tmp_path)
+    snap = verify.contract_snapshot(cfg)
     assert snap["tests/t_test.py"] == hashlib.sha256(
         b"def test_x():\n    pass\n").hexdigest()
     assert snap["scripts/run.sh"] == hashlib.sha256(b"#!/bin/bash\n").hexdigest()
@@ -118,15 +98,18 @@ def test_snapshot_covers_protected_files(tmp_path, monkeypatch):
         b'ext = "py"\n').hexdigest()
 
 
-# --- 3: memory only — nothing lands in LOG_DIR ----------------------------------
+# --- 3: memory only — nothing lands on disk ---------------------------------------
 
-def test_snapshot_not_written_to_log_dir(tmp_path, monkeypatch):
-    repo, cfg, calls, snapshots, args = _mock_run(tmp_path, monkeypatch)
-    cli.run_sandboxed(cfg, args, (), (), ())
+def test_snapshot_writes_nothing_to_disk(tmp_path):
+    repo, cfg = _repo(tmp_path)
+    verify.contract_snapshot(cfg)
+    # A file in LOG_DIR would sit in the host's run zone and could be forged
+    # after the fact — the snapshot exists only in host process memory.
     assert os.listdir(cfg.log_dir) == []
+    assert not (repo / "evidence").exists()
 
 
-# --- 4: a post-snapshot change is detectable (T3-2 guard) ----------------------
+# --- 4: a post-snapshot change is detectable (T3-2 guard) ------------------------
 
 def test_change_after_snapshot_is_detectable(tmp_path):
     repo, cfg = _repo(tmp_path)
