@@ -3,8 +3,9 @@
 The runtime switch (CC-231 production cutover, supersedes the P1 §3
 default): launch.sh keeps its contract (`run <ticket>
 <label> --follow`, status/wait/stop, the marker and summary.json semantics);
-this module is the DEFAULT host branch — the Docker path (_host_launch)
-runs only on an explicit STANOK_RUNTIME=docker. The
+this module is the ONLY host branch (CC-258: the Docker path is removed;
+an explicit STANOK_RUNTIME=docker is refused with ENV-FAIL «docker runtime
+removed»). The
 Pod works on a TRANSPORTED COPY of the tree (git archive HEAD | gzip |
 base64 through a ConfigMap — the measured decision of 2026-10-10: the full
 bundle is 1.3MB > the 800KB ConfigMap threshold, the tarball is ~240KB); the
@@ -477,8 +478,9 @@ def _runtime_class() -> str:
 
 
 # ==================================================================================
-# The fresh check as a deny-all Job (mirror of sandbox.fresh_verify_argv:
-# the same `run.sh list; run.sh test --all` pair, no model endpoint)
+# The fresh check as a deny-all Job (the same `run.sh list; run.sh test
+# --all` pair as the worker, no model endpoint — the Docker-era
+# fresh_verify_argv mirror is gone with the Docker path, CC-258)
 # ==================================================================================
 def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
                patch_file: str, deadline: int, created: list,
@@ -728,15 +730,14 @@ def _image_ref(cfg):
 
 
 # ==================================================================================
-# host_launch_k8s — the DEFAULT host branch (CC-231; Docker only on an
-# explicit STANOK_RUNTIME=docker)
+# host_launch_k8s — the ONLY host branch (CC-231; CC-258 removed the
+# Docker path)
 # ==================================================================================
 def host_launch_k8s(cfg, args, marker: str) -> int:
-    """The K8s-mode host supervision (the counterpart of run_sandboxed):
-    transport -> worker Job -> payload -> patch gate + patch identity
-    (SHA-256, re-verified before every apply) -> scratch contract ->
-    fresh Job -> _publish_evidence -> rc alignment. The marker/summary
-    protocol is identical to the Docker path: the supervisor reads
+    """The host supervision: transport -> worker Job -> payload -> patch gate
+    + patch identity (SHA-256, re-verified before every apply) -> scratch
+    contract -> fresh Job -> _publish_evidence -> rc alignment. The
+    marker/summary protocol is unchanged: the supervisor reads
     evidence/<label>/summary.json exactly as before.
 
     The cluster calls are wrapped: a kubectl failure is an infrastructure
@@ -759,8 +760,8 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                             f"ERROR: kubectl ({_kubectl_bin()}) not found — the "
                             "K8s runtime is unavailable (rc=16, infrastructure)")
 
-    # The same ticket gate as _host_launch (CC-133/CC-206) — before any
-    # cluster call: the machine must not start for an unsatisfiable contract.
+    # The ticket gate (CC-133/CC-206) — before any cluster call: the machine
+    # must not start for an unsatisfiable contract.
     try:
         with open(args.ticket_path, encoding="utf-8") as f:
             declared, edit_paths, _ = parse_ticket_header(cfg, f.read())
@@ -799,8 +800,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     _install_signal_handlers(run_state)
 
     # A stale summary.json / failures.log from an earlier run of this label
-    # must not be re-published as this run's verdict (same as run_sandboxed,
-    # CC-237).
+    # must not be re-published as this run's verdict (CC-237).
     for stale_name in ("summary.json", "failures.log"):
         stale = os.path.join(live_dir, stale_name)
         if os.path.isfile(stale):
@@ -1000,8 +1000,8 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         _publish_evidence(cfg, label, worker_rc, contract_violations,
                           fresh_check)
 
-        # The rc alignment of run_sandboxed, verbatim: the process exit must
-        # not contradict the summary the supervisor reads.
+        # The rc alignment, verbatim: the process exit must not contradict
+        # the summary the supervisor reads.
         rc = worker_rc
         if fresh_infra_error is not None:
             rc = int(ExitCode.ENV_FAIL)

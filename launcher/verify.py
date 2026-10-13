@@ -181,9 +181,10 @@ def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
 
 def _protected_files(cfg) -> list[str]:
     """The pre-existing contract files — the ONE source for "protected"
-    (CC-136): tests/**, scripts/run.sh and scripts/stacks/*.toml. Both the
-    contract_lock manifest and the host's :ro bind list (host_ro_paths) read
-    this list, so the two cannot drift.
+    (CC-136): tests/**, scripts/run.sh and scripts/stacks/*.toml. The
+    contract_lock manifest and the host-side protected-file checks
+    (ticket.assert_edit_paths_are_not_protected, the k8s host recompute)
+    read this list, so they cannot drift.
 
     Only PRE-EXISTING files: a missing scripts/run.sh (a new project's first
     ticket) is free to create. __pycache__/ is skipped: .pyc files are
@@ -217,9 +218,9 @@ def _src_files(cfg) -> list[str]:
     """T3-10 (operator 2026-10-09): the src/ file listing for the after-only
     half of the structural rule. NOT protected files: existing src/ files are
     the machine's normal implementation surface (MODIFIED/DELETED stays scoped
-    to _protected_files), and src/ must NOT enter _protected_files — that list
-    is also the host's :ro bind list (host_ro_paths), and binding src/ :ro
-    would make the machine unable to implement anything. The hole this closes
+    to _protected_files), and src/ must NOT enter _protected_files — that
+    list is the immutable contract, and protecting src/ would make the
+    machine unable to implement anything. The hole this closes
     (proven live on the public code): a new src/colorsys.py shadows the stdlib
     `colorsys` a reference test imports (src is on sys.path via
     pythonpath=src); the test passes against the fake, W12 only sees test-like

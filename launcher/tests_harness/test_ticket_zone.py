@@ -211,9 +211,9 @@ def test_existing_undeclared_symlink_refused_at_launch_GAP(repo):
 def test_protected_symlink_under_tests_refused_at_launch_GAP(repo):
     # Without the ban: a symlink under tests/ is listed by _protected_files
     # (os.walk sees it as a file; the manifest hash is the TARGET's content)
-    # and handed to host_ro_paths verbatim — Docker resolves a bind source's
-    # realpath, so the :ro bind lands on the target. The ban makes this state
-    # unreachable: the launch is refused before any bind is computed.
+    # and the machine can write THROUGH the link to its out-of-zone target.
+    # The ban makes this state unreachable: the launch is refused before any
+    # contract is computed.
     (repo / "launcher").mkdir()
     write(repo / "launcher" / "target.py", "x = 1\n")
     (repo / "tests" / "link_test.py").symlink_to("../launcher/target.py")

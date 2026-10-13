@@ -73,8 +73,8 @@ cp -f "$CLI_SRC/vendor/ripgrep/x64-linux/rg" "$DIR/.build-context/claude-code-2.
 
 echo "--- building the machine image (Docker boundary) ---"
 # The .venv above is only the HOST-side python for the Runner's host-side
-# gates; the run itself executes in the image (launcher/sandbox.py runs the
-# image system python, which carries the SDK).
+# gates; the run itself executes in the Pod (launcher/pod_runner.py drives
+# the image system python, which carries the SDK).
 # Image provenance: bake sha256 over the digest inputs (Dockerfile +
 # scripts/run.sh + scripts/stacks/*.toml — the STACKS registry +
 # image-requirements.lock — the image dependency lock) into the image LABEL

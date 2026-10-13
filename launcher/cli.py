@@ -150,13 +150,13 @@ def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: i
         # ONE fast best-effort sample of the project trace count. No baseline
         # poll before the session, no sleep/resample loop — Opik latency must
         # never delay the run. rc and verifier are never touched here.
-        # S4 (SPEC-NETWORK R5): inside the container the field is the literal
-        # "disabled" — the stanok-net bridge makes the host Opik unreachable
-        # BY DESIGN, and the field must be present, not 0/null.
+        # S4 (SPEC-NETWORK R5): inside the Pod the field is the literal
+        # "disabled" — the NetworkPolicy makes the host Opik unreachable BY
+        # DESIGN, and the field must be present, not 0/null.
         opik_after = opik_traces_field()
         if opik_after == "disabled":
             job["opik_traces"] = "disabled"
-            log("OPIK: tracing disabled in-container (bridge network)")
+            log("OPIK: tracing disabled in-container (NetworkPolicy)")
         elif opik_after is None:
             job["opik_traces"] = None
             log("OPIK: post-run trace count unavailable (backend unreachable)")
@@ -554,9 +554,11 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
         return (ExitCode.HIDDEN_FILES, "ERROR: hidden/TEMP files in src/tests/docs/scripts (rc=26)")
 
     # Zone-symlink ban (rc=13, cc217 review follow-up, operator 2026-10-09):
-    # no symlink in src/tests/docs/scripts — the zones are the only rw mounts
-    # and Docker resolves a bind source's realpath, so a link hands rw access
-    # to its target. Undeclared links and links under tests/ are in scope
+    # no symlink in src/tests/docs/scripts — a link hands its TARGET the
+    # zone's access (the src/link -> launcher/ incident; under the Docker
+    # path this was proven by bind realpath resolution — the ban survives
+    # the Docker-path removal as the unified rule). Undeclared links and
+    # links under tests/ are in scope
     # (the declared-path rule inspects only declared paths). S3
     # (PLAN-SIMPLIFY-2026-10-09): this is the ONLY enforcement point — the
     # post-turn scan was removed. The abort message names each path, its

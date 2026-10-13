@@ -1,6 +1,6 @@
 # P1 (SPEC-STANOK-K8S-RUNTIME-2026-10-10 §7/§9) — the fresh-check Job:
-# the host's independent verifier, the mirror of sandbox.fresh_verify_argv
-# (the same `run.sh list; run.sh test --all` pair, the same rc precedence).
+# the host's independent verifier (the same `run.sh list; run.sh test --all`
+# pair, the same rc precedence).
 # It runs on the transported tree + changes.patch in a Pod the worker never
 # touched, with NO model endpoint and NO network (the stanok: fresh deny-all
 # NetworkPolicy) — the verifier only.

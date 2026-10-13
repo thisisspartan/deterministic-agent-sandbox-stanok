@@ -1,10 +1,10 @@
 # stanok — a Claude Code machine on a local model
 
 An autonomous "machine": takes a text ticket, solves it in a single TDD session
-(monolithic — no subagents) under deterministic hooks and a sandboxed container
-boundary — by default a Kubernetes Job on the local k3s cluster (CC-231
-cutover; the deprecated Docker path remains on an explicit
-`STANOK_RUNTIME=docker`, see `specs/RISK-ACCEPTANCES.md` RA-3),
+(monolithic — no subagents) under deterministic hooks and a container boundary —
+a Kubernetes Job on the local k3s cluster is the ONLY runtime (CC-231 cutover;
+the Docker path was removed by CC-258, closing `specs/RISK-ACCEPTANCES.md` RA-3
+ahead of schedule),
 runs tests through the project's own `scripts/run.sh`, and outputs the result
 to `evidence/<label>/summary.json`.
 
@@ -17,7 +17,8 @@ pluggable git submodule for any project.
 - k3s + `kubectl` (the default machine boundary: worker/fresh Jobs run the
   machine image, which bakes in Node.js + Claude Code CLI 2.1.88 — hermetic;
   the tree reaches the Pod as a transport copy, no host bind-mounts).
-  Docker is the deprecated fallback only (`STANOK_RUNTIME=docker`, RA-3).
+  k8s is the only runtime (CC-258); an explicit `STANOK_RUNTIME=docker` is
+  refused with ENV-FAIL (rc=16).
   Whatever runtime the project's `scripts/run.sh` uses
 - A local llama-server, Anthropic-compatible (`STANOK_SERVER_URL`)
 - The parent repo must NOT contain a `CLAUDE.md` above this repo
@@ -46,9 +47,10 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 ./launch.sh stop <label>        # interrupt the run (TERM by pid from .running)
 ```
 
-- Runtime: the default is **k8s** (`launcher/k8s.py`: kubectl Jobs — worker Job +
-  fresh-check Job, NetworkPolicy-bounded). `STANOK_RUNTIME=docker` selects the
-  deprecated Docker fallback and prints a loud WARNING (RA-3, removal 2026-12-01).
+- Runtime: **k8s is the only runtime** (`launcher/k8s.py`: kubectl Jobs — worker
+  Job + fresh-check Job, NetworkPolicy-bounded). An explicit
+  `STANOK_RUNTIME=docker` is refused with ENV-FAIL (rc=16, «docker runtime
+  removed», CC-258).
 - `--follow` — the SOLE background flag: detach to the background, then block
   until the run is terminal and print its status. One `run --follow` call is
   both the launch and the verdict notification the supervisor waits on
@@ -80,13 +82,14 @@ uv run --directory . pytest launcher/tests_harness --collect-only -q | tail -1  
 ```
 launch.sh                     — thin shim: exec venv-python launcher/stanok.py
 launcher/                     — the Runner: stanok.py (entry shell) +
-                                functional modules cli/gates/ticket/sandbox/
-                                session/verify/summary/opik/exitcodes/plan/
-                                logs + tests_harness/ (the doctor checks as
-                                pytest)
+                                functional modules cli/gates/ticket/zones/k8s/
+                                netpol/pod_runner/session/verify/summary/opik/
+                                config/exitcodes/plan/logs + tests_harness/
+                                (the doctor checks as pytest)
 hooks/doctor.sh               — thin pytest wrapper
-.claude/settings.stanok.json  — the machine config (allow/deny, native
-                                sandbox + allowedDomains)
+.claude/settings.stanok.json  — the machine config (allow/deny tool
+                                permissions; the network boundary is the
+                                NetworkPolicy, not settings — CC-258)
 Dockerfile / setup.sh         — the machine image and environment deployment
 CLAUDE.md                     — the machine role (auto-loaded inside the repo)
 src/ tests/ docs/ scripts/    — the machine working directories
@@ -102,20 +105,15 @@ The call chain, the module/ownership map, the coupling design and the
 | `STANOK_SERVER_URL`  | `http://127.0.0.1:8080`   | inference server                 |
 | `STANOK_MODEL`       | `qwen3.8-flash-next-iq3_xxs` | local model                     |
 | `STANOK_CLAUDE_BIN`  | `claude` (from PATH)      | claude-code binary               |
-| `STANOK_PY`          | `<repo>/.venv/bin/python` | python for the Runner (host-side; remapped to the image python inside the container) |
+| `STANOK_PY`          | `<repo>/.venv/bin/python` | python for the Runner (host-side; the Pod session uses the image python) |
 | `STANOK_REPO`        | `<repo>/stanok`           | machine root (override)          |
-| `STANOK_LOG_DIR`     | `/tmp/stanok-logs`        | session logs + container-side verdict staging (published to `evidence/<label>/` by the host) |
+| `STANOK_LOG_DIR`     | `/tmp/stanok-logs`        | session logs + Pod-side verdict staging (published to `evidence/<label>/` by the host) |
 | `STANOK_LOCAL_RETRIES` | `2`                     | in-session retry turns on verifier FAIL |
 | `STANOK_REQUIRED_WINDOW` | env (`P0-launch.sh`, = `$TOK`) | preflight: minimal server `n_ctx` (rc=20 if less) |
 | `STANOK_SKIP_SERVER_CHECK` | unset                   | `1` — skip the preflight `/props` check entirely |
 | `STANOK_OPIK_URL`      | `http://localhost:8080` | Opik backend (trace-count check) |
-| `STANOK_RUNTIME`     | `k8s`                     | runtime switch; `docker` = deprecated fallback (RA-3) |
-| `STANOK_DOCKER_IMAGE`| `stanok-machine:latest`   | the machine image (both runtimes use the same image) |
-| `STANOK_CONTAINER_MEM` | `4g`                    | container memory limit           |
-| `STANOK_CONTAINER_PIDS`| `512`                   | container pids limit             |
-| `STANOK_CONTAINER_CPUS`| `2`                     | container CPU limit              |
-| `STANOK_DOCKER_NETWORK`| `stanok-net`            | worker bridge network (S4; the iptables policy lives on it) |
-| `STANOK_SKIP_NET_PREFLIGHT` | unset              | `1` — skip the network-policy probe (hosts without the bridge policy) |
+| `STANOK_RUNTIME`     | `k8s`                     | runtime switch; `docker` is refused with ENV-FAIL (rc=16) — k8s is the only runtime (CC-258) |
+| `STANOK_DOCKER_IMAGE`| `stanok-machine:latest`   | the machine image (worker/fresh Jobs run it; resolved by digest via the registry) |
 | `STANOK_OPIK_HOST_IP`  | `192.168.122.156`     | Opik backend published host address (netpol template, 2.4) |
 | `STANOK_OPIK_BACKEND_IP` | `172.25.0.250`      | Opik backend container address, post-DNAT (netpol template, 2.4) |
 
@@ -129,9 +127,9 @@ reachable; the fresh-check Job runs with no network at all. Re-verified by
 `infra/netpol-smoke.sh`, which renders, applies and probes exactly the rendered
 manifest; the cluster is preflighted before every run (`_preflight_cluster`,
 rc=16 refusal). The Docker-era bridge `stanok-net` + iptables chain STANOK-NET
-(S4) belongs to the deprecated Docker fallback only; its installer scripts
-(`infra/stanok-net.{sh,service}`) were removed 2026-10-10 — the network and the
-chain are operator-managed host infrastructure.
+(S4) belonged to the Docker path, removed with it (CC-258); its installer
+scripts (`infra/stanok-net.{sh,service}`) were removed 2026-10-10 — the chain
+is operator-managed host infrastructure.
 
 ## How it works
 
@@ -148,15 +146,12 @@ retry turn (`--local-retries`); the Pod returns its evidence and a
 protected-files contract on the scratch tree (transported tree + `git apply`)
 and re-running the suite in a fresh no-network Job — before publishing to
 `evidence/<label>/summary.json`; the patch lands on the live tree only on a
-clean verdict. In Docker fallback mode the same chain runs with bind-mounts
-instead of transport (repo `:ro` + per-ticket `:rw` carve-outs, fresh-check
-container `--network=none`).
+clean verdict.
 
 ## Commits
 
-The agent does NOT commit. In k8s mode the Pod has no `.git` from the host at
-all (the tree is a transported copy; the Pod re-inits its own git only to
-produce `changes.patch`, which the patch gate validates — a `.git` component
-in the patch is refused). In Docker fallback mode `.git` is mounted read-only.
-The operator commits (outside the sandbox) — the dirty-tree gate (rc=22) is the
-checkpoint: a run starts only on a clean tree.
+The agent does NOT commit. The Pod has no `.git` from the host at all (the
+tree is a transported copy; the Pod re-inits its own git only to produce
+`changes.patch`, which the patch gate validates — a `.git` component in the
+patch is refused). The operator commits (outside the machine) — the dirty-tree
+gate (rc=22) is the checkpoint: a run starts only on a clean tree.

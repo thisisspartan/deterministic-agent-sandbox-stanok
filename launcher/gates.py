@@ -133,13 +133,14 @@ def zone_symlinks(cfg) -> list[str]:
 
 def zone_symlink_gate(cfg) -> list[str]:
     """The zone-symlink ban at launch (rc=13, wired in cli._launch_gates):
-    no symlink may exist in src/tests/docs/scripts. The container mounts the
-    repo :ro and derives rw carve-outs only inside the zones; Docker resolves
-    a bind source's realpath, so a link hands rw access to its TARGET
-    (`src/link -> launcher/` — proven by test_docker_bind_resolves_symlink_source).
-    The ban covers UNDECLARED links (the declared-path rule inspects only
-    declared paths) and links under tests/ (host_ro_paths would bind them
-    :ro verbatim and Docker would resolve them to their targets). S3
+    no symlink may exist in src/tests/docs/scripts. A link hands its TARGET
+    the zone's access — the `src/link -> launcher/` incident (under the
+    Docker path proven by bind realpath resolution,
+    test_docker_bind_resolves_symlink_source; the ban survives the
+    Docker-path removal, CC-258, as the unified rule). The ban covers
+    UNDECLARED links (the declared-path rule inspects only declared paths)
+    and links under tests/ (the protected-file location — a link there
+    hides its target from the protected-file rules). S3
     (PLAN-SIMPLIFY-2026-10-09): this launch gate is the ONLY enforcement
     point — the post-turn scan was removed; a mid-run new file under tests/
     or src/ is caught by the structural rules (T3-9/T3-10).

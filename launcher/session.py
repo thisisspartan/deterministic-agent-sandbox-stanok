@@ -59,8 +59,8 @@ def _write_stream_msg(file_obj, turn: int, msg) -> None:
 def _loop_trap_path(run_state) -> str:
     """CC-207: single source of the marker path. The hook writes it (via the
     STANOK_LOOP_TRAP_FILE env handed to the machine process), the launcher
-    reads it. live_dir (LOG_DIR/<label>) is mounted rw in the container
-    (sandbox.py) — the channel needs no new mount."""
+    reads it. live_dir (LOG_DIR/<label>) is the rw log dir in the container
+    (the Pod's LOG_DIR mount) — the channel needs no new mount."""
     return os.path.join(run_state.live_dir, "loop-trap.json")
 
 
@@ -105,9 +105,9 @@ def build_agent_env(cfg, run_state) -> dict[str, str]:
     kill the runtime knob. Hence: only derive-from-runtime keys belong here
     (endpoint, model, timeout); everything static belongs in settings.
 
-    No proxy: the machine has no web tools (cfg.curated_tools) and its only outbound
-    is the local API server, which is directly reachable. Native sandbox injects
-    its own proxy env into Bash commands when network.allowedDomains is set.
+    No proxy: the machine has no web tools (cfg.curated_tools) and its only
+    outbound is the local API server, which is directly reachable (the Pod's
+    egress boundary is the NetworkPolicy, not a proxy).
     """
     agent_env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),

@@ -8,7 +8,7 @@ carries the per-run mutable paths (evidence_dir, live_dir, marker_path,
 interrupted_rc) — created by cli.cmd_run from cfg.label_paths and threaded
 through session/ticket/summary explicitly. Env-at-call-time reads (the
 monkeypatched runtime knobs: STANOK_IN_CONTAINER, STANOK_NO_SANDBOX,
-STANOK_REQUIRED_WINDOW, STANOK_CONTAINER_*, STANOK_OPIK_URL, ...) stay env
+STANOK_REQUIRED_WINDOW, STANOK_OPIK_URL, ...) stay env
 reads in their modules — only static constants live here.
 """
 
@@ -20,13 +20,6 @@ LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 # If STANOK_REPO is not set, we go up one level (stanok/launcher -> stanok)
 DEFAULT_REPO = os.path.abspath(os.path.join(LAUNCHER_DIR, ".."))
 DEFAULT_MODEL = "qwen3.8-flash-next-iq3_xxs"
-# S4 (SPEC-NETWORK-2026-10-09): the worker's dedicated bridge network. The
-# iptables policy (STANOK-NET chain, operator-managed host infrastructure)
-# is installed ON THIS network only —
-# on `bridge`/`host` it would filter the whole docker traffic. Read at call
-# time via STANOK_DOCKER_NETWORK (sandbox.py, gates.py) — a runtime knob,
-# not a Config field (the argv builders do not take cfg).
-DEFAULT_DOCKER_NETWORK = "stanok-net"
 # 2.4 (SPEC-STANOK-K8S-RUNTIME, operator 2026-10-10): the addresses the
 # NetworkPolicy manifest renders — k8s/networkpolicy.yaml.tmpl carries only
 # {{...}} placeholders, the addresses live here. Runtime knobs, not Config
@@ -143,9 +136,9 @@ class Config:
 
 @dataclass
 class RunState:
-    """Per-run mutable state, created by cli.cmd_run/run_sandboxed from
-    cfg.label_paths(label) and threaded explicitly: the marker path, the live
-    (LOG_DIR/<label>) dir, the evidence dir, and the signal-handler rc."""
+    """Per-run mutable state, created by cli.cmd_run / k8s.host_launch_k8s
+    from cfg.label_paths(label) and threaded explicitly: the marker path, the
+    live (LOG_DIR/<label>) dir, the evidence dir, and the signal-handler rc."""
     evidence_dir: str
     live_dir: str
     marker_path: str

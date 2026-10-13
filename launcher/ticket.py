@@ -1,8 +1,10 @@
 """ticket — the ticket header contract and workspace preparation.
 
-parse_ticket_header / create-edit assertions (CC-133, CC-206), the mount
-carve-out derivation (T4/CC-135) and prepare_workspace. The repo root comes
-from the passed-in Config; the quarantine dir from the passed-in RunState (C).
+parse_ticket_header / create-edit assertions (CC-133, CC-206), the
+declared-path rule (declared_carveout, T4/CC-135 — gate-only since CC-258
+removed the Docker mount derivation) and prepare_workspace. The repo root
+comes from the passed-in Config; the quarantine dir from the passed-in
+RunState (C).
 """
 
 import os
@@ -22,39 +24,37 @@ _RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
 
 
 def declared_carveout(cfg, rel: str) -> str | None:
-    """The rw-mount carve-out a declared path implies, or None if the path is
-    undeclarable (T4, CC-135 — one rule for the gate AND the mounts).
+    """The declared-path rule: the carve-out a declared path implies, or None
+    if the path is undeclarable (T4, CC-135; CC-258: the Docker rw-mount
+    derivation is gone — this now serves only the declaration gate).
 
     Literal declared paths are ticket-supplied input: prepare_workspace's
     quarantine shutil.move()s them (so an unvalidated `impl: /etc/passwd` could
-    destroy host files) and the container binds them rw. Fail-closed:
+    destroy host files). Fail-closed:
 
-      - relative, no `..`, no symlink resolving OUTSIDE the repo (Docker
-        resolves a bind source's realpath, so a link inside the repo could
-        smuggle an outside dir in — run.sh already refuses symlinked test
-        paths, SEC-01);
+      - relative, no `..`, no symlink resolving OUTSIDE the repo (a link
+        inside the repo could smuggle an outside dir in — run.sh already
+        refuses symlinked test paths, SEC-01);
       - NO component of the declared path may be a symlink (cc217 review,
-        2026-10-09; SEC-01 alignment with run.sh): Docker resolves a bind
-        source's realpath, so `src/link -> launcher/` would hand the
-        out-of-zone launcher/ a rw mount even though the string starts with
-        a zone (proven by test_docker_bind_resolves_symlink_source);
+        2026-10-09; SEC-01 alignment with run.sh): `src/link -> launcher/`
+        hands the out-of-zone launcher/ the zone's access even though the
+        string starts with a zone (the Docker-path proof:
+        test_docker_bind_resolves_symlink_source);
       - the FIRST component of the RESOLVED repo-relative path (realpath,
         not the string) must be one of zones.WRITABLE_ZONES — exact
         membership, not a prefix match (`srcfoo` is not a zone). The zone
-        rule (cc217-impl incident): the container can only write under the
-        zones — the repo is `:ro`, the rw carve-outs exist only inside them,
-        settings.stanok.json denies Edit outside them. An existing out-of-zone
-        dir (`launcher/`) made an absent path declarable through the ancestor
-        rule and the machine burned ~141 s discovering the write is
-        physically impossible; refusal is at header parse (rc=13) instead;
+        rule (cc217-impl incident): the machine can only write under the
+        zones — settings.stanok.json denies Edit outside them. An existing
+        out-of-zone dir (`launcher/`) made an absent path declarable through
+        the ancestor rule and the machine burned ~141 s discovering the write
+        is physically impossible; refusal is at header parse (rc=13) instead;
       - a bare zone name (`src`, `tests/`) is not a file -> None (quarantine
         would move the whole zone out of the tree);
-      - the path exists (file or dir) -> itself: a per-file/per-dir rw bind;
-      - the path is absent -> its NEAREST EXISTING ANCESTOR dir, which must be
-        BELOW the repo root. Docker creates a missing bind SOURCE as a
-        root-owned DIRECTORY (verified 2026-09-24), so an absent path cannot
-        be file-bound at all; and binding the repo root itself rw would
-        dissolve the whole boundary -> None.
+      - the path exists (file or dir) -> itself;
+      - the path is absent -> its NEAREST EXISTING ANCESTOR dir, which must
+        be BELOW the repo root: an absent path is declarable only through an
+        existing in-zone ancestor, and the repo root itself would dissolve
+        the whole boundary -> None.
     """
     if rel.startswith("/") or rel.startswith("./"):
         return None
@@ -64,9 +64,8 @@ def declared_carveout(cfg, rel: str) -> str | None:
         return None
     root = os.path.realpath(cfg.repo_root)
     # No component of the declared path may be a symlink (cc217 review,
-    # 2026-10-09): Docker resolves a bind source's realpath, so a
-    # zone-internal link (`src/link -> launcher/`) would mount its target
-    # instead (SEC-01 alignment with run.sh).
+    # 2026-10-09): a zone-internal link (`src/link -> launcher/`) hands its
+    # target the zone's access (SEC-01 alignment with run.sh).
     prefix = ""
     for part in rel.split("/"):
         prefix = os.path.join(prefix, part)
@@ -90,8 +89,8 @@ def declared_carveout(cfg, rel: str) -> str | None:
 
 
 def _validate_declared_path(cfg, rel: str) -> bool:
-    """parse_ticket_header's gate: a path is declarable exactly when the
-    filesystem can back its rw carve-out (declared_carveout)."""
+    """parse_ticket_header's gate: a path is declarable exactly when
+    declared_carveout accepts it."""
     return declared_carveout(cfg, rel) is not None
 
 
@@ -196,10 +195,10 @@ def assert_edit_paths_are_not_protected(cfg, edit_paths: list[str]) -> None:
     refused BEFORE any container start.
 
     The CC-204-retry3 incident: the ticket declared `edit: tests/smoke_math_test.py`;
-    `host_ro_paths` voluntarily dropped it from the :ro bind (the former
-    declared-path exemption), the machine edited a reference
-    test, the isolation probe failed, and the run deadlocked in a 31-Read loop
-    (1584 s) — the ticket created an unsatisfiable contract.
+    the :ro bind voluntarily dropped it (the former declared-path exemption),
+    the machine edited a reference test, the isolation probe failed, and the
+    run deadlocked in a 31-Read loop (1584 s) — the ticket created an
+    unsatisfiable contract.
 
     The invariant: a pre-existing `tests/**` file or an existing
     `scripts/run.sh` (exactly `_protected_files()`) is immutable to the
@@ -207,7 +206,7 @@ def assert_edit_paths_are_not_protected(cfg, edit_paths: list[str]) -> None:
     An ABSENT `scripts/run.sh` is not protected (bootstrap stays legal,
     CC-154); `edit:` on a non-protected path (e.g. `src/mod.py`) is the
     normal case and stays legal. Fail-closed: ValueError -> rc=13 upstream,
-    before SessionPlan/preflight_server/sandbox_argv."""
+    before SessionPlan/preflight_server."""
     protected = set(_protected_files(cfg))
     for rel in edit_paths:
         if rel in protected:

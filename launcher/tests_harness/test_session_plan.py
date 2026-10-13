@@ -24,9 +24,10 @@ CC-133 adds the create-vs-edit filesystem check:
   - assert_create_paths_are_new: a create-declared path that exists -> rc=13
     (the CC-119 fire16 retry1 case); `edit:` paths and genuinely new paths pass
 
-CC-135 (T4) removes the `rw_zones` field: the container's rw carve-outs are
-derived from the declared paths (declared_carveout / host_rw_paths) instead of
-being a second policy list in the plan — pinned in test_t4_mounts.py.
+CC-135 (T4) removes the `rw_zones` field: the rw carve-outs are derived from
+the declared paths (declared_carveout) instead of being a second policy list
+in the plan (the Docker mount derivation and its test file test_t4_mounts.py
+were removed by CC-258).
 
 C (PLAN-HYGIENE 2026-10-08): the hub facade is gone — the functions live in
 ticket/verify/gates and take the Config explicitly; the quarantine dir comes
@@ -95,7 +96,7 @@ def test_plan_is_frozen():
 def test_contract_lock_set_is_the_manifest_not_a_plan_field():
     # T5/CC-137: "protected" is the manifest itself (one source, CC-136's
     # _protected_files); it is not copied into the plan. The set the post-turn
-    # diff hashes is exactly the set host_ro_paths may bind :ro.
+    # diff hashes is exactly the _tests_manifest — the same rule.
     plan = _build_plan(Config(), _TICKET)
     assert not hasattr(plan, "protected_paths")
 

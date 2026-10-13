@@ -9,9 +9,10 @@ Run via hooks/doctor.sh (thin wrapper) or directly:
     .venv/bin/python -m pytest launcher/tests_harness/test_doctor.py -q
 
 The mock launches run with STANOK_PY=system python3 (the SDK is imported
-lazily, the gates are pure stdlib) and STANOK_NO_SANDBOX=1 (the tests check
-the RUNNER, not the sandbox; the Docker container does not mount the host
-/tmp, so mktemp /tmp/... tickets are invisible inside — rc=13).
+lazily, the gates are pure stdlib) and STANOK_NO_SANDBOX=1 (the no-sandbox
+test mode: the CLI runs the gates in-process on the host instead of
+dispatching to k8s — the tmp tickets/workspaces the tests build are host
+paths the cluster never sees).
 
 Gate order (single source: launcher/cli.py _launch_gates):
   label-guard (rc=15) -> ROLE-LEAK (rc=24) -> ticket (rc=13) ->

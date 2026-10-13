@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# R2: thin shim — all logic (gates, background, Docker supervision) lives in
+# R2: thin shim — all logic (gates, background, k8s supervision) lives in
 # launcher/stanok.py. The CLI surface:
 #   ./launch.sh [run] <ticket> <label> [--follow] [--local-retries N] [-- extra...]
 #   ./launch.sh status <label>
@@ -18,12 +18,12 @@ if [ ! -x "$PY" ]; then
     exit 99
 fi
 
-# Per-uid Claude tmp dir. In the CONTAINER this path is a tmpfs created by
-# launcher/sandbox.py (CC-141) — a host pre-create is not visible there, and
-# bwrap silently skips non-existent write paths (the old "Слой 2" EROFS on the
-# FIRST Bash call). Kept host-side for the host/no-sandbox path, where the CLI
-# resolves the same path itself: CLAUDE_TMPDIR is the TMPDIR the nested
-# sandbox runtime exports (cli.js aG8), default /tmp/claude.
+# Per-uid Claude tmp dir (host-side). The Pod session gets its tmp root from
+# pod_runner (CLAUDE_CODE_TMPDIR -> the WORK/tmp emptyDir; incidents
+# cc231/cc233: cli.js builds the Bash tmp root as CLAUDE_CODE_TMPDIR ||
+# "/tmp/claude-<uid>"). Host-side this is the path cli.js would resolve by
+# default: CLAUDE_TMPDIR is the TMPDIR the nested sandbox runtime exports
+# (cli.js aG8), default /tmp/claude.
 mkdir -p "/tmp/claude-$(id -u)" && chmod 700 "/tmp/claude-$(id -u)"
 export CLAUDE_TMPDIR="/tmp/claude-$(id -u)"
 

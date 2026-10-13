@@ -6,13 +6,13 @@ not exist. ONE enforcement point, ONE scanner (gates.zone_symlinks):
   LAUNCH (gates.zone_symlink_gate, wired into cli._launch_gates after the
   hidden-files gate, rc=13): any symlink — file, directory, dangling, or
   the zone directory itself — refuses the launch, with the path list and
-  the fix. The container mounts the repo :ro and derives rw carve-outs
-  only inside the zones; Docker resolves a bind source's realpath, so a
-  link hands its TARGET rw access (the `src/link -> launcher/` incident,
-  proven by test_docker_bind_resolves_symlink_source). The ban covers
+  the fix. A link hands its TARGET the zone's access (the `src/link ->
+  launcher/` incident; under the Docker path proven by bind realpath
+  resolution, test_docker_bind_resolves_symlink_source — the ban survives
+  the Docker-path removal, CC-258, as the unified rule). The ban covers
   UNDECLARED links (the declared-path rule inspects only declared paths)
-  and links under tests/ (the protected-file location — host_ro_paths
-  would otherwise bind them :ro verbatim and Docker would resolve them).
+  and links under tests/ (the protected-file location — a link there
+  hides its target from the protected-file rules).
 
 S3 (PLAN-SIMPLIFY-2026-10-09): the post-turn scan (verify._check_zone_symlinks)
 was REMOVED — the launch ban remains; a mid-run new file under tests/ or src/
@@ -74,9 +74,9 @@ def test_gate_names_symlink_directory_in_zone(tmp_path):
 
 
 def test_gate_names_symlink_under_tests(tmp_path):
-    # The protected-file location: host_ro_paths would bind tests/ symlinks
-    # :ro verbatim and Docker resolves them to their targets (the GAP
-    # documented in test_ticket_zone.py, closed here).
+    # The protected-file location: a link under tests/ hides its target from
+    # the protected-file rules (the GAP documented in test_ticket_zone.py,
+    # closed here).
     repo, cfg = _repo(tmp_path)
     (repo / "tests" / "link_test.py").symlink_to("../launcher/target.txt")
     problems = gates.zone_symlink_gate(cfg)

@@ -5,36 +5,31 @@ what". Operational docs (setup, run commands, env table, triage) stay in
 `README.md`; the machine's own rules are in `CLAUDE.md` (auto-loaded into
 the machine session — do not move them here).
 
-## Runtime (CC-231 production cutover, 2026-10-10)
+## Runtime (CC-231 production cutover, 2026-10-10; CC-258 removed the
+Docker fallback, 2026-10-13)
 
-The DEFAULT runtime is **k8s**: the host orchestrator `launcher/k8s.py`
-creates kubectl Jobs in the local k3s cluster (worker Job + fresh-check Job,
-NetworkPolicy-bounded). The switch is `cli._runtime_mode()`: any value or
-absence of `STANOK_RUNTIME` means k8s; only an explicit `STANOK_RUNTIME=docker`
-selects the **deprecated Docker fallback** (loud WARNING; removal scheduled
-2026-12-01, `specs/RISK-ACCEPTANCES.md` RA-3). Both runtimes use the same
-hermetic machine image and the same host-issued verdict pipeline; they differ
-in transport and mounts:
+**k8s is the ONLY runtime** (`specs/RISK-ACCEPTANCES.md` RA-3 executed ahead
+of schedule by CC-258): the host orchestrator `launcher/k8s.py` creates
+kubectl Jobs in the local k3s cluster (worker Job + fresh-check Job,
+NetworkPolicy-bounded). `cli._runtime_mode()` is a constant `"k8s"`; an
+explicit `STANOK_RUNTIME=docker` is refused with ENV-FAIL («docker runtime
+removed», rc=16) — never silently mapped to k8s. The machine image and the
+host-issued verdict pipeline are unchanged.
 
-- **k8s (default):** the tracked tree travels as `git archive HEAD | gzip |
-  base64` (~240KB, under the ConfigMap size guard) plus the ticket, via a
-  ConfigMap; the Pod works on the transported copy (no host `.git` — it
-  re-inits git only to produce `changes.patch`); the Pod returns evidence +
-  patch as a nonce-marked base64 payload; the live tree is never touched
-  during the run. The host applies the patch to a scratch tree for the
-  contract recompute and lands it on the live tree ONLY on a clean verdict.
-  Echelon 1 (`:ro` file binds) is abolished in k8s mode (operator decision
-  2026-10-10): the contract recompute is host-side on the scratch tree, same
-  `_tests_manifest`/`_compare_manifests` code path. Cluster preflight
-  (`_preflight_cluster`, rc=16) runs before any resource is created; cleanup
-  deletes only resources this run provably created (`create`-not-`apply`,
-  P0 2026-10-11).
-- **Docker (deprecated fallback):** bind-mounts instead of transport — repo
-  `:ro` + per-ticket `:rw` carve-outs, `:ro` re-binds of protected files
-  (Echelon 1), worker on the `stanok-net` bridge, fresh-check container
-  `--network=none`.
-
-The chain below describes both; Docker-specific steps are marked.
+Transport: the tracked tree travels as `git archive HEAD | gzip | base64`
+(~240KB, under the ConfigMap size guard) plus the ticket, via a ConfigMap;
+the Pod works on the transported copy (no host `.git` — it re-inits git only
+to produce `changes.patch`); the Pod returns evidence + patch as a
+nonce-marked base64 payload; the live tree is never touched during the run.
+The host applies the patch to a scratch tree for the contract recompute and
+lands it on the live tree ONLY on a clean verdict. Echelon 1 (`:ro` file
+binds) is abolished (operator decision 2026-10-10): the contract recompute is
+host-side on the scratch tree, same `_tests_manifest`/`_compare_manifests`
+code path. The unified launch preflight (`k8s._preflight`, rc=16) runs
+before any resource is created (disk, image staleness, Opik reachability,
+cluster health + manifest contract, RuntimeClass, dangling resources —
+operator spec 2026-10-12); cleanup deletes only resources this run provably
+created (`create`-not-`apply`, P0 2026-10-11).
 
 ## Guarantees (runner-level; moved from the hub docstring — ARCH-REVIEW C, 2026-10-08)
 
@@ -44,7 +39,7 @@ The chain below describes both; Docker-specific steps are marked.
 4. Cumulative Token & Cache Telemetry: exact session_hit_rate calculation — `session.py`.
 5. Shielded Turn Watchdog: the turn timeout (default 1800s) is a terminal DoS circuit breaker — asyncio.shield() keeps the turn task alive past wait_for, so client.interrupt() runs cleanly and summary.json is written with the TURN-TIMEOUT code (rc=1) without the process dying on CancelledError — `session.py`.
 6. Verifier-output compression: last-N raw tail, no pattern heuristics at all (REVIEW-KISS-CLI-FIRST §3.3; the last substring filter — CC-138) — `verify.py`.
-7. Process cleanup: guaranteed at the sandbox boundary — Docker: `docker stop -t 5` (client processes spawned with start_new_session=True are outside the host process group — the Reaper's os.killpg(0) does not reach them); k8s: Job deadline + the tracked-resource cleanup in `host_launch_k8s`'s finally (deletes only resources this run created) — `cli.py`, `k8s.py`.
+7. Process cleanup: guaranteed at the runtime boundary — Job deadline + the tracked-resource cleanup in `host_launch_k8s`'s finally (deletes only resources this run created) — `cli.py`, `k8s.py`.
 
 ## The chain of one run
 
@@ -55,55 +50,48 @@ launch-level rc contract, the namespace is `ExitCode` in
 
 ```
 label guard (rc=15) -> role-leak (rc=24) -> ticket resolution (rc=13)
--> dirty-tree gate (rc=22) -> [--follow: detached self-run | sync]
--> ticket header + declared-path validation (rc=13)
--> server /props preflight (rc=20)
--> network preflight (rc=16; rc=20 only when the server is down for the host too)
--> runtime dispatch (cli._runtime_mode):
-   k8s (default): k8s.host_launch_k8s — cluster preflight -> ConfigMap
-     (tree + ticket) -> worker Job -> payload (evidence + changes.patch) ->
-     patch gate -> scratch recompute -> fresh Job -> publish -> live apply
-   docker (deprecated): run_sandboxed -> sandbox.sandbox_argv -> docker run
+-> dirty-tree gate (rc=22) -> hidden-files (rc=26) -> zone-symlink (rc=13)
+-> test-config (rc=27)
+-> [--follow: detached self-run (the parent confirms the `.running` marker;
+   the child died before it: rc=17) | sync]
+-> dispatch (cli._runtime_mode — always k8s, CC-258):
+   host run: STANOK_RUNTIME=docker -> ENV-FAIL (rc=16, «docker runtime
+     removed»); else k8s.host_launch_k8s: ticket header gate (rc=13) ->
+     unified preflight (rc=16) -> image-ref resolution (not pushed to the
+     registry: rc=16) -> ConfigMap (tree + ticket) -> worker Job -> payload
+     (evidence + changes.patch) -> patch gate -> scratch recompute -> fresh
+     Job -> publish -> live apply
+   in-container child / no-sandbox test mode: lock (rc=21) -> cmd_run:
+     ticket header + declared-path validation (rc=13) -> server /props
+     preflight (rc=20) -> workspace prep (rc=14) -> the session
 ```
 
-The image preflight is NOT on this path (doctor-only, CC-106).
-
-- Network policy. k8s (default): the worker Job is bounded by the
-  NetworkPolicy `k8s/networkpolicy.yaml.tmpl` (rendered by
-  `launcher/netpol.py`; only the model server and the Opik backend are
-  reachable; the fresh Job runs with no network). Docker fallback (S4,
-  SPEC-NETWORK-2026-10-09): the worker runs on the
-  dedicated bridge `stanok-net` (172.28.0.0/16, `config.DEFAULT_DOCKER_NETWORK`,
-  env override `STANOK_DOCKER_NETWORK`), NOT on `host`. The iptables chain
-  STANOK-NET (jumps at DOCKER-USER 1 + INPUT 1; the installer scripts
-  `infra/stanok-net.{sh,service}` were removed 2026-10-10 — the chain is
-  operator-managed) allows ONLY the model server (`STANOK_SERVER_URL`): external
-  internet and host services are closed (E2 policy). Enforcement:
-  `gates.network_preflight` runs HOST-side in `cli._host_launch` before
-  `run_sandboxed` (covers sync and the --follow child; NOT in `_launch_gates`
-  — those re-run inside the container, where the docker CLI is absent): a
-  probe container (`sandbox.probe_argv`, same image, script via stdin) reports
-  `{model, external, host}`; a missing network or a policy leak is rc=16,
-  the model down for the host too is rc=20. The fresh-check container stays
-  `--network=none`. In-container `summary.opik_traces` is the literal
-  "disabled" (`opik.opik_traces_field`) — the bridge closes the host Opik by
-  design. Tests: `launcher/tests_harness/test_network_preflight.py`.
+- Network policy. The worker Job is bounded by the NetworkPolicy
+  `k8s/networkpolicy.yaml.tmpl` (rendered by `launcher/netpol.py`; only the
+  model server and the Opik backend are reachable — the E2 policy: external
+  internet and host services are closed); the fresh Job runs with no network
+  (the `stanok: fresh` deny-all). Enforcement is the cluster itself: the
+  rendered manifest is pinned by `launcher/tests_harness/test_k8s_manifests.py`
+  and probed live by `infra/netpol-smoke.sh`. In-container
+  `summary.opik_traces` is the literal "disabled" (`opik.opik_traces_field`)
+  — the NetworkPolicy closes the host Opik by design. (The Docker-era bridge
+  `stanok-net` + `gates.network_preflight` probe was removed with the Docker
+  path, CC-258.)
 
 - Zone rule (cc217-impl incident + review, 2026-10-09): `ticket.declared_carveout`
   requires (a) NO component of a declared path (impl/test/docs/edit) to be a
-  symlink — Docker resolves a bind source's realpath, so `src/link ->
-  launcher/` would mount launcher/ rw (proven by
-  `test_docker_bind_resolves_symlink_source`; SEC-01 alignment with run.sh) —
-  and (b) the FIRST component of the RESOLVED repo-relative path (realpath,
-  exact membership, not a prefix match) to be one of `sandbox.WRITABLE_ZONES`
-  — the container mounts the repo `:ro` and derives rw carve-outs only inside
-  the zones. An existing out-of-zone dir (`launcher/`) made an absent path
-  declarable through the ancestor rule and the machine discovered mid-run that
-  the write is physically impossible (`Edit(launcher/**)` denied in
-  settings.stanok.json; Bash writes to launcher/ from the sandbox do not
-  persist — per-call tmpfs makes them look successful). Refusal is at header
-  parse (rc=13), before any container starts. The zone rule does not weaken
-  CC-206 (`edit:` on a pre-existing protected file stays refused). Tests:
+  symlink — a link hands its TARGET the zone's access (`src/link ->
+  launcher/`; the Docker-era bind-realpath proof
+  `test_docker_bind_resolves_symlink_source` stays as the threat proof;
+  SEC-01 alignment with run.sh) — and (b) the FIRST component of the RESOLVED
+  repo-relative path (realpath, exact membership, not a prefix match) to be
+  one of `zones.WRITABLE_ZONES` (src/tests/docs/scripts) — the only
+  directories the machine may write (`Edit(launcher/**)` denied in
+  settings.stanok.json). An existing out-of-zone dir (`launcher/`) made an
+  absent path declarable through the ancestor rule and the machine discovered
+  mid-run that the write is physically impossible. Refusal is at header parse
+  (rc=13), before any cluster call. The zone rule does not weaken CC-206
+  (`edit:` on a pre-existing protected file stays refused). Tests:
   `launcher/tests_harness/test_ticket_zone.py`.
 
 - Zone-symlink ban (cc217 review follow-up, operator decision 2026-10-09):
@@ -116,15 +104,15 @@ The image preflight is NOT on this path (doctor-only, CC-106).
      the zone directory itself — refuses the launch (rc=13) with the path list
      and the fix (replace the symlink with a regular file/directory). It
      covers UNDECLARED links (the header rule inspects only declared paths)
-     and links under tests/ (host_ro_paths would bind them :ro verbatim and
-     Docker resolves them to their targets). An accidental operator-side
+     and links under tests/ (the protected-file location — a link there hides
+     its target from the protected-file rules). An accidental operator-side
      symlink is an operator-side fix, not a ticket defect: the error names the
      path and the action. A SCAN failure raises and maps to rc=16 (ENV-FAIL):
      a broken filesystem is not the ticket's fault. Hard links need no scan:
-     the base repo is :ro and each zone is a separate rw bind, so `ln()`
-     across the zone boundary is EXDEV (proven by
-     `test_docker_hardlink_across_mounts_fails`); a link inside one zone
-     stays inside it.
+     a link inside one zone stays inside it; a new file anywhere else under
+     tests//src/ is caught by the structural rules (T3-9/T3-10) — the former
+     Docker-mount EXDEV proof (`test_docker_hardlink_across_mounts_fails`)
+     was removed with the Docker path, CC-258.
   A mid-run created symlink is no longer scanned post-turn (S3): a new FILE
   under tests/ or src/ (symlinked files included — os.walk lists them) is
   caught by the structural rules (T3-9/T3-10, worker + host echelons);
@@ -133,8 +121,9 @@ The image preflight is NOT on this path (doctor-only, CC-106).
   `launcher/tests_harness/test_zone_symlink_ban.py` (the two former GAP
   tests in test_ticket_zone.py are green with the ban).
 
-SANDBOX (the same `cli.main` re-runs inside the image — the worker Pod in k8s
-mode, the container in Docker mode):
+IN THE POD (`launcher/pod_runner.py` reconstructs the tree from the transport,
+re-inits its own git, rewrites the Opik tracing endpoint in the extracted
+settings, then re-enters the same `cli.main` under STANOK_IN_CONTAINER=1):
 
 ```
 gates re-run + lock (rc=21) -> session.run_continuous_session:
@@ -155,25 +144,26 @@ gates re-run + lock (rc=21) -> session.run_continuous_session:
 VERDICT (Stage 3, SPEC-VERDICT-INTEGRITY-2026-10-08):
 
 ```
-CONTAINER: summary.write_summary -> summary.json into the rw LOG_DIR/<label>
-mount (S1, 2026-10-09: rollback of T3-4 — the worker writes where
+POD: summary.write_summary -> summary.json into the Pod's LOG_DIR/<label>
+(S1, 2026-10-09: rollback of T3-4 — the worker writes where
 cfg.label_paths already routes every other writer; commit_sha is captured on
 the HOST by cli._capture_start_commit before any launch and passed via the
-STANOK_START_COMMIT env — the container never runs git, plan 2026-10-08)
+STANOK_START_COMMIT env — the Pod never reads the host git, plan 2026-10-08)
+-> evidence + changes.patch return as ONE nonce-marked payload block
+(pod_runner; CC-230: the host accepts exactly one nonce-matching block,
+zero/two/unclosed = aborted)
 
-HOST (cli.run_sandboxed / k8s.host_launch_k8s, one finally): reap_stopped ->
-verify.contract_snapshot (pre-run, host process MEMORY only) -> worker start
-(Docker: `docker run --rm`; k8s: worker Job, payload returns evidence +
-changes.patch) -> wait (container_rc = ground truth) -> stop (abnormal-path
-trap) -> summary-presence check (no summary = aborted run: nothing published,
-status `missing`) -> verify.host_contract_check (recompute vs the snapshot; in
-k8s mode against the scratch tree = transported tree + `git apply` of the
-Pod's patch, same `_compare_manifests` code path) -> verify.fresh_verify
-(fresh container / fresh Job, T3-3; runs ONLY when the summary exists AND the
-contract is intact — spec §1.6) -> summary._publish_evidence (the HOST issues
-the final verdict, Authority below; publishes nothing when the files are
-absent) -> (k8s: patch lands on the live tree ONLY on a clean verdict) ->
-marker removal
+HOST (k8s.host_launch_k8s, one finally): verify.contract_snapshot (pre-run,
+host process MEMORY only) -> worker Job -> wait (Job completion = ground
+truth) -> payload parse (no payload block = aborted run: nothing published,
+status `missing`) -> verify.host_contract_check (recompute vs the snapshot
+against the scratch tree = transported tree + `git apply` of the Pod's patch,
+same `_compare_manifests` code path) -> k8s._fresh_job (fresh Job on the
+scratch tree, T3-3; runs ONLY when the payload was retrieved AND the contract
+is intact — spec §1.6) -> summary._publish_evidence (the HOST issues the
+final verdict, Authority below; publishes nothing when the files are absent)
+-> patch lands on the live tree ONLY on a clean verdict -> tracked-resource
+cleanup (`create`-not-`apply`) -> marker removal
 
 -> evidence/<label>/summary.json is read exactly once by the supervisor
 (CLAUDE.supervisor.md §3)
@@ -205,9 +195,9 @@ independent host checks, both against state the worker cannot rewrite:
 1. **Contract recompute (T3-1/T3-2).** `verify.contract_snapshot` snapshots
    the protected files (`_protected_files`, the one source) BEFORE the worker
    starts, kept in host process MEMORY only (a LOG_DIR file could be forged);
-   `verify.host_contract_check` recomputes after the worker exits (k8s mode:
-   against the scratch tree — transported tree + `git apply` of the Pod's
-   patch; the live tree is untouched during the run).
+   `verify.host_contract_check` recomputes after the worker exits (against
+   the scratch tree — transported tree + `git apply` of the Pod's patch; the
+   live tree is untouched during the run).
    Non-empty violations force `verifier=FAIL` + `probe_result=CONTRACT-FAIL`
    regardless of the worker's claims — the judge is not the defendant. The
    fresh check is SKIPPED when the contract is violated (spec §1.6: a fresh
@@ -226,23 +216,20 @@ independent host checks, both against state the worker cannot rewrite:
    MODIFIED/DELETED half stays scoped to the protected files — existing
    `src/` files are the machine's normal implementation surface, and `src/`
    is in the snapshot (`_src_files`) only for the after-only half; it must
-   NOT enter `_protected_files` (that list is also the `:ro` bind list —
-   binding src/ :ro would make the machine unable to implement). New files
+   NOT enter `_protected_files` (that list is the protected-file contract —
+   src/ is the machine's implementation surface and must stay writable). New files
    elsewhere (a bootstrap scripts/run.sh, docs/) are ticket output. Both
    echelons share the one `_compare_manifests` with the declared context:
    worker-side `_check_contract_lock` (plan.declared_paths) and host-side
    `host_contract_check` (the ticket's declared list, threaded through
-   `run_sandboxed`). A host-issued CONTRACT-FAIL never exits rc=0:
+   `host_launch_k8s`). A host-issued CONTRACT-FAIL never exits rc=0:
    `_publish_evidence` writes `rc = container_rc or DEFECT` and
-   `run_sandboxed` aligns the exit rc (the T3-6 exit-equals-verdict
+   `host_launch_k8s` aligns the exit rc (the T3-6 exit-equals-verdict
    principle). Pinned by `test_stage3_tests_tree.py` +
    `test_stage3_src_tree.py`.
-2. **Fresh check (T3-3/T3-6).** `sandbox.fresh_verify_argv` /
-   `k8s._fresh_job` + `verify.fresh_verify`: a NEW container or Job the
-   worker never touched (same image; Docker: `--rm`, `--network=none`, WHOLE
-   repo `:ro` no carve-outs, no LOG_DIR bind, no STANOK_* env, tmpfs
-   home+tmp; k8s: fresh Job on the scratch tree, no model endpoint, deny-all
-   network) re-runs `run.sh list` + `test --all` on the final tree. Runs only when the summary was retrieved
+2. **Fresh check (T3-3/T3-6).** `k8s._fresh_job`: a NEW Job on the scratch
+   tree the worker Pod never touched (no model endpoint, deny-all network)
+   re-runs `run.sh list` + `test --all` on the final tree. Runs only when the payload was retrieved
    AND the contract is intact. A fresh suite failure overrides the worker's
    claim: `probe_result=FRESH-FAIL`, `rc=rc_fresh`; the run's exit rc is set
    to the published verdict's rc (the process exit must not contradict the
@@ -255,24 +242,27 @@ Priority at publish (spec §3, S2-simplified per PLAN-SIMPLIFY-2026-10-09):
 **CONTRACT-FAIL > FRESH-FAIL > the worker's claims**. The host's authority
 is its two independent checks only; the worker's summary passes through
 untouched when neither fires (the clean path stays byte-identical).
-Sanctioned gap: a pure forgery (claims PASS while the container exited
-non-zero) over a clean contract with a green fresh check is no longer
+Sanctioned gap: a pure forgery (claims PASS while the session actually
+failed) over a clean contract with a green fresh check is no longer
 caught — the verdict is a statement about the TREE (suite green + tree =
 declared), not about the worker's self-report. An unavailable fresh check writes an ENV-FAIL summary
 (`write_env_fail_summary`, rc=16) directly into evidence/ — the verdict
-cannot be PASS without the artifacts it is built from. No summary at all
+cannot be PASS without the artifacts it is built from. No payload at all
 (worker died before writing) publishes nothing: `status` reports `missing`
 (S1). Pinned by
-`test_stage3_host_snapshot.py`, `test_stage3_worker_lifecycle.py`,
-`test_stage3_fresh_verify.py` and `test_scenarios_verdict.py` (the forged
-clean summary over a tampered tree -> CONTRACT-FAIL; a green fresh check
-never fabricates a PASS — S6 removed the former unit bearers
-`test_stage3_fresh_wiring.py`, `test_verdict_fresh.py` and
-`test_contract_fail_probe.py`).
+`test_stage3_host_snapshot.py` (T3-1), `test_stage3_host_recompute.py` (T3-2)
+and `test_scenarios_verdict.py` (the forged clean summary over a tampered
+tree -> CONTRACT-FAIL; fresh gating: FRESH-FAIL, fresh skipped on
+CONTRACT-FAIL, a green fresh check never fabricates a PASS — S6 removed the
+former unit bearers `test_stage3_fresh_wiring.py`, `test_verdict_fresh.py`
+and `test_contract_fail_probe.py`; the Docker-era bearers
+`test_stage3_worker_lifecycle.py` and `test_stage3_fresh_verify.py` were
+removed with the Docker dispatcher, CC-258; the fresh Job manifest itself is
+pinned by `test_k8s_manifests.py`).
 
 **What PASS means (the boundary of the verdict, operator 2026-10-09).** The verdict is a
 statement about the TREE, not about the correctness of the code: `verifier=PASS` means the
-reference test suite is green on the final tree (`run.sh test --all` in the fresh container)
+reference test suite is green on the final tree (`run.sh test --all` in the fresh Job)
 and the tree matches the ticket's declared contract. It does NOT mean the implementation is
 correct — the model may hardcode expected values or fit the implementation to the tests.
 Closing that gap is the ticket's acceptance criteria (a human concern), not a mechanism the
@@ -285,20 +275,21 @@ promise code correctness.
 | File | Owns |
 |---|---|
 | `launcher/config.py` | static configuration (`Config`, `from_env`) + per-run mutable state (`RunState`) |
-| `launcher/stanok.py` | the entry shell ONLY (the three script call sites) — owns nothing (ARCH-REVIEW C) |
+| `launcher/stanok.py` | the entry shell ONLY (the script call sites: launch.sh, the Pod runner's session call, the background self-spawn) — owns nothing (ARCH-REVIEW C) |
 | `launcher/exitcodes.py` | the rc namespace (`ExitCode` — the summary.json `rc` contract) |
 | `launcher/plan.py` | `SessionPlan` (the file-policy object, the single source — I1) |
+| `launcher/zones.py` | `WRITABLE_ZONES` — the single zone list (the declaration allow-list; NOT a mount set — CC-258) |
 | `launcher/logs.py` | logging (`log()`; the per-run sink `_stdout_log_f` assigned by `cli.cmd_run`) |
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
-| `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight, network preflight (S4: probe classification, host-only) |
+| `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight |
 | `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
-| `launcher/k8s.py` | the default runtime: kubectl Jobs (worker + fresh), ConfigMap transport (`pack_tree`/payload nonce rules), patch gate + `patch_sha256`, image provenance stamp (`image_digest` — the Pod's containerStatuses imageID, host-stamped, None when unavailable), scratch recompute, cluster preflight, tracked-resource cleanup (`create`-not-`apply` ownership proof) |
+| `launcher/k8s.py` | the ONLY runtime (CC-258): kubectl Jobs (worker + fresh), ConfigMap transport (`pack_tree`/payload nonce rules), patch gate + `patch_sha256`, image provenance stamp (`image_digest` — the Pod's containerStatuses imageID, host-stamped, None when unavailable), scratch recompute, unified launch preflight (`_preflight`: disk/image/Opik/cluster/RuntimeClass/dangling, rc=16), tracked-resource cleanup (`create`-not-`apply` ownership proof) |
 | `launcher/netpol.py` | NetworkPolicy template rendering (addresses from config/env, never hardcoded) |
-| `launcher/sandbox.py` | the Docker-fallback boundary (deprecated): mounts/carve-outs (CC-135/136), `:ro` re-binds, resource limits; worker network (`--network=stanok-net`, S4) + `probe_argv` (the policy probe container); worker lifecycle (`--rm`, the stop trap, `reap_stopped`); `fresh_verify_argv` (the fresh-check container, T3-3) |
+| `launcher/pod_runner.py` | the in-Pod runner: tree reconstruction from the transport, the Pod's git base commit, the settings tracing rewrite (CC-225), the in-container session call, the evidence payload (one nonce-marked block) |
 | `launcher/session.py` | the one Claude session: turns, TDD hook, retry prompt, loop-guard |
-| `launcher/verify.py` | contract lock (protected files, zone symlinks) + test execution via `run.sh` (rc mapping, timeouts); host trust boundary: `contract_snapshot`/`host_contract_check` (T3-1/T3-2) + structural tests/+src/ rule (T3-9/T3-10), `fresh_verify` (T3-3) |
+| `launcher/verify.py` | contract lock (protected files) + test execution via `run.sh` (rc mapping, timeouts); host trust boundary: `contract_snapshot`/`host_contract_check` (T3-1/T3-2) + structural tests/+src/ rule (T3-9/T3-10) |
 | `launcher/summary.py` | the summary.json schema (`decide`/`_status_fields`), host-issued verdict priority + `write_env_fail_summary` (T3-5/T3-6), evidence publishing, rotation |
-| `launcher/opik.py` | trace-count check (telemetry only); `opik_traces_field` — "disabled" in-container (S4, the bridge closes host Opik) |
+| `launcher/opik.py` | trace-count check (telemetry only); `opik_traces_field` — "disabled" in-container (the NetworkPolicy closes host Opik by design) |
 | `scripts/run.sh` + `scripts/stacks/*.toml` | the run.sh contract + the stack registry (single source) |
 | `CLAUDE.md` | the machine role (auto-loaded in the machine session) |
 | `../CLAUDE.supervisor.md` | the supervisor protocol: verdict reading, stop conditions |
@@ -327,8 +318,8 @@ The three remaining hub contents moved to their own modules unchanged:
 `_stdout_log_f` -> `launcher/logs.py` (still a module global by design: a
 per-run handle assigned by `cli.cmd_run`, not configuration).
 `launcher/stanok.py` is now the entry shell only — the one file the three
-script call sites invoke (launch.sh, the container argv, the background
-self-spawn via `stanok.__file__`). The transient double-instance quirk of
+script call sites invoke (launch.sh, the Pod runner's session call, the
+background self-spawn via `stanok.__file__`). The transient double-instance quirk of
 running the hub as a script (body executed in `__main__` AND imported as
 `launcher.stanok`) is closed: the shell has no import-time side effects.
 Harness green (243 passed / 2 skipped).
@@ -364,5 +355,7 @@ COPY).
 - A new summary.json outcome -> `summary.py decide`/`_status_fields`;
   `test_scenarios_verdict.py` must pass unchanged.
 - Agent behavior / retry semantics -> `session.py`.
-- Mount or boundary rule -> `sandbox.py` + `ticket.py` path validation
-  (the same rule derives both — CC-135).
+- Zone or boundary rule -> `zones.py` (`WRITABLE_ZONES`, the declaration
+  allow-list) + `ticket.py` path validation + the `k8s/` manifests +
+  `netpol.py` (CC-258: the Docker mount layer is gone; the same rule
+  derives the declaration and the Pod mounts).

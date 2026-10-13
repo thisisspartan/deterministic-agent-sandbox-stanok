@@ -14,7 +14,8 @@ from launcher import config
 def _opik_trace_count() -> int | None:
     """Total trace count in the 'stanok' Opik project, or None if Opik is
     unreachable. The machine exports OTLP spans to the host Opik backend
-    (reachable only outside the stanok-net bridge — see opik_traces_field).
+    (reachable only from the host — the Pod's NetworkPolicy closes the Pod's
+    path; see opik_traces_field).
     CC-106: sampled ONCE, fast, strictly
     after the verdict is formed (no pre-run baseline, no settle loop) — an
     unreachable backend (None) never delays or alters the run.
@@ -88,12 +89,13 @@ def session_trace_count(session_id: str, since_iso: str) -> int | None:
 def opik_traces_field():
     """The value of summary.json's `opik_traces` field (S4, SPEC-NETWORK R5).
 
-    In the worker container the field is the literal "disabled": the
-    stanok-net bridge closes the path to the host Opik backend BY DESIGN
-    (the machine's OTLP export target is the host's :8080), and the field
-    must be present and explicit — not 0/null masquerading as "zero traces".
-    Outside the container (host no-sandbox runs) the existing best-effort
-    count applies unchanged."""
+    In the worker Pod the field is the literal "disabled": the Pod's
+    NetworkPolicy closes the path to the host Opik backend BY DESIGN (the
+    machine's OTLP export target is the host's :8080; the host stamps the
+    real count — k8s.stamp_opik_traces, CC-225), and the field must be
+    present and explicit — not 0/null masquerading as "zero traces".
+    Outside the Pod (host-side tooling) the existing best-effort count
+    applies unchanged."""
     if os.environ.get("STANOK_IN_CONTAINER") == "1":
         return "disabled"
     return _opik_trace_count()

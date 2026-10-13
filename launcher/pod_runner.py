@@ -106,10 +106,10 @@ def main() -> int:
         "TMPDIR": tmp,
         # incident cc231/cc233 (trace audit 2026-10-11): the CLI's Bash tool
         # builds its tmp root as CLAUDE_CODE_TMPDIR || "/tmp" + "claude-<uid>"
-        # (cli.js 2.1.88, same path as sandbox.py's CC-141 tmpfs). The old
-        # name CLAUDE_TMPDIR is only the nested-sandbox TMPDIR (cli.js aG8)
-        # and never reached that mkdir -> every Bash call died on the
-        # read-only root. The dir itself is created above (line: makedirs).
+        # (cli.js 2.1.88). The old name CLAUDE_TMPDIR is only the
+        # nested-sandbox TMPDIR (cli.js aG8) and never reached that mkdir ->
+        # every Bash call died on the read-only root. The dir itself is
+        # created above (line: makedirs).
         "CLAUDE_CODE_TMPDIR": tmp,
         "HOME": home,
         # CC-236 (incident cc235): the CLI does not export CLAUDE_PROJECT_DIR

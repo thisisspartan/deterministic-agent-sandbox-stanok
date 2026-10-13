@@ -42,9 +42,10 @@ def _publish_evidence(cfg, label: str, container_rc: int,
     """Copy the container-written verdict from the rw LOG_DIR/<label> into the
     host-owned evidence/<label> (CC-134).
 
-    Called in run_sandboxed's finally AFTER docker stop — the container has no
-    rw view of evidence/, so the host is the only publisher. Missing files are
-    skipped: an aborted launch publishes nothing rather than a fake verdict.
+    Called by the host supervision (k8s.host_launch_k8s) after the container
+    has exited — the container has no rw view of evidence/, so the host is
+    the only publisher. Missing files are skipped: an aborted launch
+    publishes nothing rather than a fake verdict.
 
     S2 (PLAN-SIMPLIFY-2026-10-09): the I5 rc cross-check, the worker_*
     fields and the INTEGRITY-FAIL value are REMOVED. The host's authority is
@@ -64,8 +65,9 @@ def _publish_evidence(cfg, label: str, container_rc: int,
 
     Stage 3 (T3-5): the final verifier/rc/probe_result are issued by the HOST
     with the priority CONTRACT-FAIL > FRESH-FAIL > the worker's claims.
-    `fresh_check=(rc, tail)` is verify.fresh_verify's result (the host's
-    independent re-run in a fresh container, T3-3); a non-zero fresh rc forces
+    `fresh_check=(rc, tail)` is the host's independent fresh check result
+    (the k8s deny-all Job, T3-3; the Docker-era verify.fresh_verify is gone
+    with the Docker path, CC-258); a non-zero fresh rc forces
     verifier=FAIL + probe_result=FRESH-FAIL + rc=fresh rc, the tail appended
     to errors. fresh_check=None = not run."""
     src = os.path.join(cfg.log_dir, label)

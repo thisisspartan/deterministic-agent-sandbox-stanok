@@ -13,14 +13,14 @@ from enum import IntEnum
 class ExitCode(IntEnum):
     """Launch-level exit codes — the `rc` field of summary.json (strict contract).
 
-    1  defect (exhausted retries / contract violation) / docker missing;
+    1  defect (exhausted retries / contract violation);
     13 ticket: not found, header parse error, create-edit conflict, protected edit,
        zone-symlink ban (symlink in a writable zone);
     14 workspace prep error; 15 invalid label;
-    16 ENV-FAIL: test runner unavailable in the image (image defect, not a red test),
-       zone-symlink scan failure (broken filesystem is not a ticket defect),
-       network preflight failure (stanok-net missing / policy not installed /
-       model blocked by the policy — the host reaches it; SPEC-NETWORK R4);
+    16 ENV-FAIL: infrastructure unavailable — test runner missing in the image
+       (image defect, not a red test), kubectl/K8s runtime unavailable, launch
+       preflight failure, fresh check unavailable, zone-symlink scan failure
+       (a broken filesystem is not a ticket defect);
     17 background child died before writing the .running marker;
     20 server unavailable / context window fail-closed;
     21 lock held by another run; 22 dirty machine tree;
