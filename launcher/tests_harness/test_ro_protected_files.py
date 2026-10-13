@@ -4,15 +4,13 @@
 present), scripts/stacks/*.toml — and `_tests_manifest` (the contract_lock
 manifest) is the SAME rule, not a second policy list.
 
-CC-258 (step B): the Docker half of this file is gone with the Docker path —
-ticket.host_ro_paths/host_rw_paths (the :ro re-bind over rw carve-outs), the
-sandbox_argv bind-order test and the four live-`docker run` e2e tests. The
-invariants they pinned survive on the k8s path: read-only roots and tmp/home
-alignment are pinned by test_k8s_manifests.py; protected-file detection and
-the hard-link residual closure (CC-206: detection, not prevention) by the
+The mount mechanics were removed with the Docker path (CC-258); their
+invariants are pinned on the k8s path: read-only roots and tmp/home
+alignment by test_k8s_manifests.py; protected-file detection and the
+hard-link residual closure (CC-206: detection, not prevention) by the
 contract-recompute tests (test_stage3_host_snapshot / test_stage3_tests_tree /
 test_stage3_src_tree / test_stage3_host_recompute / test_scenarios_verdict).
-What remains here is the runtime-agnostic core: the protected list itself.
+What is tested here is the runtime-agnostic core: the protected list itself.
 
 Tests:
   1  the protected list == tests/** + scripts/run.sh + scripts/stacks/*.toml,

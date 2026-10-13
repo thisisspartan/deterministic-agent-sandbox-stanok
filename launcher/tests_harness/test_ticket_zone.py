@@ -11,7 +11,7 @@ src/tests/docs/scripts only, settings.stanok.json denies Edit(launcher/**).
 The rule: a path is declarable only when its FIRST component is one of
 zones.WRITABLE_ZONES (CC-258: the list lives in launcher/zones.py) — for every
 kind (impl/test/docs/edit). Refusal is at
-header parse (rc=13, before any docker run / workspace mutation). The zone
+header parse (rc=13, before any cluster call or workspace mutation). The zone
 rule does NOT weaken CC-206: `edit:` on a pre-existing protected file stays
 refused even though its zone is writable — the two checks are complementary.
 

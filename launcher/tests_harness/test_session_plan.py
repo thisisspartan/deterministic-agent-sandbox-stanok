@@ -7,9 +7,8 @@ cmd_run does, and pin the T1 invariants:
   - the contract_lock exemption is generalized to declared_paths:
     a declared protected path is not flagged; a non-declared one is.
 
-CC-132 adds the single-source zone/kind pins (CC-258: the list moved from
-sandbox.py to launcher/zones.py — the zone policy survives the Docker-path
-removal):
+CC-132 adds the single-source zone/kind pins (CC-258: the list lives in
+launcher/zones.py):
   - zones.WRITABLE_ZONES is the only literal zone list; its consumers
     (hidden_files_gate, declared_carveout — CC-135 dropped prepare_workspace
     and _validate_declared_path from that list) read the constant
@@ -26,8 +25,7 @@ CC-133 adds the create-vs-edit filesystem check:
 
 CC-135 (T4) removes the `rw_zones` field: the rw carve-outs are derived from
 the declared paths (declared_carveout) instead of being a second policy list
-in the plan (the Docker mount derivation and its test file test_t4_mounts.py
-were removed by CC-258).
+in the plan.
 
 C (PLAN-HYGIENE 2026-10-08): the hub facade is gone — the functions live in
 ticket/verify/gates and take the Config explicitly; the quarantine dir comes

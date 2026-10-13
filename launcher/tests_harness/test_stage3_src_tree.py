@@ -15,11 +15,10 @@ snapshot ONLY for the after-only UNDECLARED half. _protected_files does NOT
 gain src/ — making src/ read-only would make the machine unable to implement
 anything.
 
-CC-258 (step C): the end-to-end half of test 1 (the worker creates the file
-mid-run and claims PASS -> published CONTRACT-FAIL, fresh skipped) moved to
-test_scenarios_verdict.py scenario 3 — parametrized over BOTH zones; the
-run_sandboxed mock harness is gone with the Docker path. The unit rules below
-are runtime-agnostic and stay.
+The end-to-end half of test 1 (the worker creates the file mid-run and
+claims PASS -> published CONTRACT-FAIL, fresh skipped) is pinned in
+test_scenarios_verdict.py scenario 3 — parametrized over BOTH zones. The
+unit rules below are runtime-agnostic.
 
 Tests:
   1  colorsys scenario (src/ half): an undeclared new src/colorsys.py after

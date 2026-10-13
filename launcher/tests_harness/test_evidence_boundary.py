@@ -3,9 +3,8 @@
 Before CC-134 the container mounted `evidence/` rw, so the agent and the
 in-container Runner shared a writable verdict dir with the host. Now:
 
-  - `zones.WRITABLE_ZONES` = the 4 project zones (no "evidence"); CC-258 moved
-    the list to launcher/zones.py (the zone policy survives the Docker-path
-    removal);
+  - `zones.WRITABLE_ZONES` = the 4 project zones (no "evidence"), the single
+    list lives in launcher/zones.py;
     evidence/ is visible read-only through the repo :ro mount, so a write
     from inside the container is an EROFS denial, not a missing path.
   - `Config.label_paths()` resolves BOTH dirs into the rw log_dir/<label> when
@@ -14,17 +13,11 @@ in-container Runner shared a writable verdict dir with the host. Now:
   - `summary._publish_evidence()` copies the verdict into evidence/<label> on
     the HOST, after the container exits.
 
-CC-258 (step C): the summary-routing tests moved here from
-test_stage3_worker_lifecycle.py — that file pinned the Docker worker
-lifecycle and is gone; the routing it also pinned is runtime-agnostic
-(Config.summary_dir + summary.write_summary: the in-container writer lands
-in the rw log_dir, never in the host-owned evidence/), so it survives here.
-
-CC-258 (step B): the two Docker tests (the sandbox_argv mount table and the
-live-`docker run` evidence denial) are gone with the Docker path; the
-evidence-boundary invariant on the k8s path is pinned by
-test_k8s_manifests.py (read-only roots) and the tests below (the host-owned
-evidence/ is never a container summary target).
+The summary-routing tests here are runtime-agnostic (Config.summary_dir +
+summary.write_summary: the in-container writer lands in the rw log_dir,
+never in the host-owned evidence/). The evidence-boundary invariant on the
+k8s path is pinned by test_k8s_manifests.py (read-only roots) and the tests
+below (the host-owned evidence/ is never a container summary target).
 """
 import json
 import os
@@ -61,9 +54,9 @@ def test_label_paths_container_writes_into_log_dir(tmp_path, monkeypatch):
 
 
 def test_summary_dir_routing(tmp_path, monkeypatch):
-    # moved from test_stage3_worker_lifecycle.py (CC-258): the worker's
-    # summary target is the rw LOG_DIR mount in the container, the host's
-    # publish target is the evidence dir — the same rule in both runtimes.
+    # the worker's summary target is the rw LOG_DIR mount in the container,
+    # the host's publish target is the evidence dir — the same rule in both
+    # runtimes.
     cfg = Config(repo_root=str(tmp_path / "repo"), log_dir=str(tmp_path / "logs"))
     monkeypatch.setenv("STANOK_IN_CONTAINER", "1")
     assert cfg.summary_dir("lbl") == os.path.join(str(tmp_path / "logs"), "lbl")

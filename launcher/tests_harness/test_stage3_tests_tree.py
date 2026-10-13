@@ -13,13 +13,12 @@ Both echelons share the ONE comparison (_compare_manifests): the worker-side
 _check_contract_lock (already passes plan.declared_paths) and the host-side
 host_contract_check. The two cannot drift.
 
-CC-258 (step C): the end-to-end halves (worker creates the file mid-run ->
-published CONTRACT-FAIL / declared PASS stands) and the _host_launch declared
-wiring moved to test_scenarios_verdict.py — scenario 3 (undeclared, both
-zones parametrized) and scenario 9 (declared new test keeps PASS; the
-exemption only applies because host_launch_k8s parsed the ticket's declared
-paths — the wiring is proven there). The run_sandboxed mock harness is gone
-with the Docker path. The unit rules below are runtime-agnostic and stay.
+The end-to-end halves (worker creates the file mid-run -> published
+CONTRACT-FAIL / declared PASS stands) are pinned in test_scenarios_verdict.py
+— scenario 3 (undeclared, both zones parametrized) and scenario 9 (declared
+new test keeps PASS; the exemption only applies because host_launch_k8s
+parsed the ticket's declared paths — the wiring is proven there). The unit
+rules below are runtime-agnostic.
 
 Tests:
   1  colorsys scenario: an undeclared new tests/colorsys.py after the

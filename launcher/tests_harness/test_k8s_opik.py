@@ -17,10 +17,8 @@ is ENV-only (no git-tree file changes):
      the host-measured trace count for THIS session (the Pod is not its own
      judge); opik.session_trace_count paginates + filters thread_id
      client-side (CC-159), newest-first early-stop at the run start
-  5  opik.opik_traces_field (moved here from test_network_preflight.py by
-     CC-258 — the Docker network preflight is removed; the field rule
-     survives: in-container -> "disabled" (field present, not 0/null),
-     outside -> the host _opik_trace_count())
+  5  opik.opik_traces_field: in-container -> "disabled" (field present,
+     not 0/null), outside -> the host _opik_trace_count()
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_opik.py -q
 """
@@ -85,7 +83,7 @@ def test_session_trace_count_exists_and_filters():
     assert not opik._trace_matches({}, "abc")
 
 
-# --- 5: opik_traces_field (moved from test_network_preflight.py, CC-258) --------
+# --- 5: opik_traces_field ------------------------------------------------------
 
 def test_opik_field_disabled_in_container(monkeypatch):
     # the Pod is not its own Opik judge: the field must be present, not 0/null
