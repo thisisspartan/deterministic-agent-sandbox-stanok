@@ -622,16 +622,6 @@ def _lock_key(cfg) -> "str | None":
         return None
 
 
-def _runtime_mode() -> str:
-    """CC-258: the Docker runtime is removed — k8s (launcher/k8s.py) is the
-    ONLY runtime; this function always returns "k8s". Kept as a pure
-    function: the dispatch stays testable without a cluster
-    (test_k8s_wiring.py). An explicit STANOK_RUNTIME=docker is NOT silently
-    mapped to k8s: main() refuses it with ENV-FAIL ("docker runtime
-    removed")."""
-    return "k8s"
-
-
 def main() -> int:
     root_refusal()
     cfg = Config.from_env()

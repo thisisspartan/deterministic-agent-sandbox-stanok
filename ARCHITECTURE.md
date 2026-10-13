@@ -11,8 +11,10 @@ Docker fallback, 2026-10-13)
 **k8s is the ONLY runtime** (`specs/RISK-ACCEPTANCES.md` RA-3 executed ahead
 of schedule by CC-258): the host orchestrator `launcher/k8s.py` creates
 kubectl Jobs in the local k3s cluster (worker Job + fresh-check Job,
-NetworkPolicy-bounded). `cli._runtime_mode()` is a constant `"k8s"`; an
-explicit `STANOK_RUNTIME=docker` is refused with ENV-FAIL («docker runtime
+NetworkPolicy-bounded). The dispatch is inline in `cli.main()`: an
+in-container or `STANOK_NO_SANDBOX` run IS the runtime/test mode and never
+dispatches; a host run reaches `k8s.host_launch_k8s`, and an explicit
+`STANOK_RUNTIME=docker` is refused with ENV-FAIL («docker runtime
 removed», rc=16) — never silently mapped to k8s. The machine image and the
 host-issued verdict pipeline are unchanged.
 
@@ -54,7 +56,7 @@ label guard (rc=15) -> role-leak (rc=24) -> ticket resolution (rc=13)
 -> test-config (rc=27)
 -> [--follow: detached self-run (the parent confirms the `.running` marker;
    the child died before it: rc=17) | sync]
--> dispatch (cli._runtime_mode — always k8s, CC-258):
+-> dispatch (inline in main(), CC-258):
    host run: STANOK_RUNTIME=docker -> ENV-FAIL (rc=16, «docker runtime
      removed»); else k8s.host_launch_k8s: ticket header gate (rc=13) ->
      unified preflight (rc=16) -> image-ref resolution (not pushed to the

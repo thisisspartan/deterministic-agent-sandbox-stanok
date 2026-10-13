@@ -1,12 +1,14 @@
 """CC-258 (Docker runtime removed) — the runtime dispatch.
 
 launch.sh keeps its contract (`run <ticket> <label> --follow`, status/wait/
-stop unchanged); k8s is the ONLY runtime: _runtime_mode() always returns
-"k8s" (kept as a pure function so the dispatch stays testable without a
-cluster), and an explicit STANOK_RUNTIME=docker is NOT silently mapped to
-k8s — main() refuses the launch with ENV-FAIL ("docker runtime removed").
+stop unchanged); k8s is the ONLY runtime: main() dispatches inline (an
+in-container / STANOK_NO_SANDBOX run IS the runtime/test mode; a host run
+reaches k8s.host_launch_k8s), and an explicit STANOK_RUNTIME=docker is NOT
+silently mapped to k8s — main() refuses the launch with ENV-FAIL ("docker
+runtime removed"). (P4 2026-10-13: the former cli._runtime_mode constant and
+its self-confirming test were removed — the refusal branch is covered by
+test 3 below, which drives main() itself.)
 Tests:
-  1  _runtime_mode() -> "k8s" for every env value (unset/docker/k8s/garbage)
   2  the k8s host driver exists with the entry the dispatcher calls
   3  main() with STANOK_RUNTIME=docker -> rc=16 ENV-FAIL with the refusal
      text published; the k8s driver is never reached
@@ -42,16 +44,6 @@ from launcher import cli, k8s
 from launcher.config import Config
 
 
-def test_runtime_mode_always_k8s(monkeypatch):
-    # CC-258: _runtime_mode is a constant — no env value selects Docker
-    # (the old opt-in semantics are gone: a typo selects nothing).
-    for value in ("docker", "k8s", "", "garbage"):
-        monkeypatch.setenv("STANOK_RUNTIME", value)
-        assert cli._runtime_mode() == "k8s"
-    monkeypatch.delenv("STANOK_RUNTIME", raising=False)
-    assert cli._runtime_mode() == "k8s"
-
-
 def test_host_driver_entry_exists():
     assert callable(k8s.host_launch_k8s)
 
@@ -74,7 +66,7 @@ def test_docker_runtime_env_is_refused(tmp_path, monkeypatch):
             return args
     monkeypatch.setattr(cli, "_build_parser", lambda cfg: _StubParser())
     monkeypatch.setattr(cli, "_capture_start_commit", lambda cfg: None)
-    # None, not a path: main() (cli.py:670-673) ASSIGNS
+    # None, not a path: main() ASSIGNS
     # os.environ["STANOK_LOCK_KEY"] when _lock_key returns a key, and
     # monkeypatch cannot undo production-code assignments — a real path here
     # would leak into the pytest process and poison later _launch subprocesses
