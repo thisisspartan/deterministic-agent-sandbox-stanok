@@ -264,16 +264,17 @@ def test_context_md_budget():
 def test_supervisor_zone_not_published():
     # The parent repo is published (main -> github). Supervisor-zone state
     # files (CONTEXT.md, specs/STATUS.md, specs/RISK-ACCEPTANCES.md), their
-    # archives (specs/ARCHIVE/*) and analysis records (specs/ANALYSIS-*.md)
-    # carry internal addresses/hosts and incident history — they must NEVER
-    # be tracked there (rule: .claude/sync-skeleton.sh + the parent
-    # .gitignore; enforced here). A tracked path is a published path;
-    # present-but-UNTRACKED (the supervisor's local zone, gitignored) is the
-    # valid state.
+    # archives (specs/ARCHIVE/*), analysis records (specs/ANALYSIS-*.md) and
+    # the tickets (tickets/ — private by operator decision 2026-10-13; the
+    # machine reads them from the supervisor's local directory) carry internal
+    # addresses/hosts and incident history — they must NEVER be tracked there
+    # (rule: .claude/sync-skeleton.sh + the parent .gitignore; enforced here).
+    # A tracked path is a published path; present-but-UNTRACKED (the
+    # supervisor's local zone, gitignored) is the valid state.
     out = subprocess.run(
         ["git", "-C", str(REPO_ROOT.parent), "ls-files",
          "CONTEXT.md", "specs/STATUS.md", "specs/RISK-ACCEPTANCES.md",
-         "specs/ARCHIVE", "specs/ANALYSIS-*.md"],
+         "specs/ARCHIVE", "specs/ANALYSIS-*.md", "tickets"],
         capture_output=True, text=True,
     )
     tracked = [ln for ln in out.stdout.splitlines() if ln.strip()]
