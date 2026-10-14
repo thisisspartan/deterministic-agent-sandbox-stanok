@@ -131,6 +131,16 @@ rc=16 refusal). The Docker-era bridge `stanok-net` + iptables chain STANOK-NET
 scripts (`infra/stanok-net.{sh,service}`) were removed 2026-10-10 — the chain
 is operator-managed host infrastructure.
 
+**Mechanism defaults, not a deployment.** The table above describes how the
+Runner resolves configuration, not any specific deployment: the inference host
+and the Opik IPs come from the operator's environment (`MODEL_IP` is derived
+from `STANOK_SERVER_URL` at render time); no concrete cluster address is
+pinned in this repo. The supervisor layer (ticket-level retries,
+stop-conditions) is described in the parent repo's `CLAUDE.supervisor.md`,
+not here. External audits of this repo must fix a SHA (pin or HEAD) and check
+GitHub API contents + raw files at that SHA — not HTML pages or cached
+snippets of different dates.
+
 ## How it works
 
 The full chain (host gates -> container session -> verdict publishing), the
