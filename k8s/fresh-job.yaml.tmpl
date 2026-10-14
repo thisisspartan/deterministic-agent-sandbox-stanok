@@ -76,10 +76,16 @@ spec:
           # ephemeral-storage limit counts the writable layer AND the
           # emptyDir AND /var/log/pods together, so it must NOT equal the
           # emptyDir sizeLimit (2Gi).
+          # G1 (SPEC-HOSTSIDE-WORKFLOW-2026-10-14): CPU/RAM bounds — lighter
+          # than the worker: no agent CLI, only tar + git apply + run.sh.
           resources:
             requests:
+              cpu: 250m
+              memory: "512Mi"
               ephemeral-storage: "1Gi"
             limits:
+              cpu: 500m
+              memory: "1Gi"
               ephemeral-storage: "4Gi"
           volumeMounts:
             - name: tree

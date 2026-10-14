@@ -91,10 +91,21 @@ spec:
           # the emptyDir sizeLimit (2Gi): a limit equal to the volume size
           # would evict the Pod for using the volume it was given. requests
           # 1Gi / limits 4Gi leave headroom for the volume plus logs.
+          # G1 (SPEC-HOSTSIDE-WORKFLOW-2026-10-14): CPU/RAM bounds. The node is
+          # 2 CPU / 15Gi shared with k3s/supervisor/Opik: the CPU limit (1 core)
+          # prevents node saturation (throttling, not a guarantee); the memory
+          # limit bounds the container (OOM-kill instead of node-pressure
+          # eviction of others). requests = expected typical usage (admission,
+          # fair CPU share, eviction accounting). Values are conservative
+          # estimates pending post-deploy measurement (no peak history exists).
           resources:
             requests:
+              cpu: 250m
+              memory: "1Gi"
               ephemeral-storage: "1Gi"
             limits:
+              cpu: 1000m
+              memory: "2Gi"
               ephemeral-storage: "4Gi"
           volumeMounts:
             - name: ticket

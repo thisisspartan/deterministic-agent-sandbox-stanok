@@ -48,6 +48,10 @@ checks (no YAML parser in the image — the checks are text invariants):
      worker); STANOK_K8S_RUNTIME_CLASS=runc renders the {{RUNTIME_CLASS}} line
      empty (no runtimeClassName field == RuntimeDefault, the pre-gVisor
      behavior); any other value renders `runtimeClassName: <value>`
+  10 G1 (SPEC-HOSTSIDE-WORKFLOW-2026-10-14): explicit CPU/RAM requests+limits
+     in BOTH job templates (worker 250m/1Gi -> 1000m/2Gi; fresh 250m/512Mi ->
+     500m/1Gi — the fresh Pod has no agent CLI); limits >= requests; the
+     existing disk bound, deadline and securityContext are untouched
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -294,6 +298,27 @@ def test_job_disk_bounds():
         assert 'ephemeral-storage: "1Gi"' in y
         assert 'ephemeral-storage: "4Gi"' in y
         assert 'ephemeral-storage: "2Gi"' not in y
+
+
+# --- G1 (SPEC-HOSTSIDE-WORKFLOW-2026-10-14): CPU/RAM bounds -----------------
+
+def test_job_cpu_ram_bounds():
+    # Explicit CPU/RAM requests+limits in BOTH templates; the fresh Pod is
+    # lighter (no agent CLI). The values are the single source (same
+    # convention as test_job_disk_bounds); refinement is a deliberate edit.
+    expected = {
+        "worker-job.yaml.tmpl": ("cpu: 250m", "cpu: 1000m",
+                                 'memory: "1Gi"', 'memory: "2Gi"'),
+        "fresh-job.yaml.tmpl": ("cpu: 250m", "cpu: 500m",
+                                'memory: "512Mi"', 'memory: "1Gi"'),
+    }
+    for name, (cpu_req, cpu_lim, mem_req, mem_lim) in expected.items():
+        y = _read(name)
+        for needle in (cpu_req, cpu_lim, mem_req, mem_lim):
+            assert needle in y, (name, needle)
+        # exactly one resources block per template, keeping the disk bound
+        # (values: test_job_disk_bounds)
+        assert y.count("requests:") == 1 and y.count("limits:") == 1, name
 
 
 # --- CC-234 (operator spec 2026-10-11): writable /tmp + the CLI env name ---
