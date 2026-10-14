@@ -35,7 +35,7 @@ ALLOWLIST = {
     "label", "ticket", "rc", "verifier", "probe_result", "turns", "elapsed_s",
     "session_id", "commit_sha", "tokens", "cache_hit_rate",
     "inference_telemetry", "tool_activity", "loop_trap", "test_fit",
-    "opik_traces",
+    "acceptance", "opik_traces",
 }
 
 FULL_JOB = {
@@ -90,6 +90,9 @@ def test_build_summary_emits_exactly_the_allowlist(monkeypatch):
     assert s["loop_trap"] is None
     # CC-247: a job without test_fit publishes typed zeros ("no signal")
     assert s["test_fit"] == {"edits_after_green": 0, "new_tests_after_green": 0}
+    # G4: a job without acceptance publishes the typed default — the protocol
+    # reads "undeclared" as "no independent evidence declared", never presence.
+    assert s["acceptance"] == {"mode": "undeclared", "paths": []}
     assert s["opik_traces"] == ["trace-1"]
 
 
@@ -121,6 +124,39 @@ def test_loop_trap_field_is_typed(trap, expected, monkeypatch):
     job = dict(FULL_JOB, loop_trap=trap)
     s = summary.build_summary(Config(repo_root="/nonexistent"), job, 0)
     assert s["loop_trap"] == expected
+
+
+# --- 2b: G4 acceptance is the typed record or the default -----------------------
+
+DEFAULT_ACCEPT = {"mode": "undeclared", "paths": []}
+
+ACCEPT_CASES = [
+    # the three legal modes
+    ({"mode": "provided", "paths": ["tests/acc_test.py"]},
+     {"mode": "provided", "paths": ["tests/acc_test.py"]}),
+    ({"mode": "none", "paths": []}, {"mode": "none", "paths": []}),
+    ({"mode": "undeclared", "paths": []}, DEFAULT_ACCEPT),
+    # mode/paths contradiction -> default (never silently reinterpreted)
+    ({"mode": "provided", "paths": []}, DEFAULT_ACCEPT),          # provided needs paths
+    ({"mode": "none", "paths": ["tests/acc_test.py"]}, DEFAULT_ACCEPT),
+    ({"mode": "undeclared", "paths": ["tests/acc_test.py"]}, DEFAULT_ACCEPT),
+    # malformed -> default
+    ({"mode": "trusted", "paths": []}, DEFAULT_ACCEPT),           # unknown mode
+    ({"mode": "provided", "paths": "tests/acc_test.py"}, DEFAULT_ACCEPT),
+    ({"mode": "provided", "paths": [1, 2]}, DEFAULT_ACCEPT),      # paths must be str
+    ({"paths": ["tests/acc_test.py"]}, DEFAULT_ACCEPT),           # missing mode
+    ("not a dict", DEFAULT_ACCEPT),
+    (None, DEFAULT_ACCEPT),
+    ({}, DEFAULT_ACCEPT),
+]
+
+
+@pytest.mark.parametrize("acc,expected", ACCEPT_CASES)
+def test_acceptance_field_is_typed(acc, expected, monkeypatch):
+    monkeypatch.setenv("STANOK_START_COMMIT", "0" * 40)
+    job = dict(FULL_JOB, acceptance=acc)
+    s = summary.build_summary(Config(repo_root="/nonexistent"), job, 0)
+    assert s["acceptance"] == expected
 
 
 # --- 3: free text never enters summary.json --------------------------------------

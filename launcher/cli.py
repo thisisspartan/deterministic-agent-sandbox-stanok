@@ -113,7 +113,9 @@ def _open_run_state(cfg, label: str) -> tuple:
 def _read_ticket_contract(cfg, ticket_path: str) -> tuple:
     """Ticket-scoped invariant (W2.1): read the ticket and parse its header.
 
-    Returns (ticket_prompt, declared_paths, edit_paths, reset_none). Raises
+    Returns (ticket_prompt, declared_paths, edit_paths, reset_none,
+    accept_paths, accept_mode) — G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14):
+    the `accept:` contract is validated at parse (fail-closed rc=13). Raises
     OSError/ValueError for any refusal: no `impl:`/`test:`/`docs:`/`edit:`
     line and no `reset: none` means the invariant cannot be enforced (the old
     false CLEAN-FIRST returns); an invalid literal path — including a
@@ -122,14 +124,15 @@ def _read_ticket_contract(cfg, ticket_path: str) -> tuple:
     """
     with open(ticket_path, encoding="utf-8") as f:
         ticket_prompt = f.read().strip()
-    declared_paths, edit_paths, reset_none = parse_ticket_header(cfg, ticket_prompt)
+    declared_paths, edit_paths, reset_none, accept_paths, accept_mode = \
+        parse_ticket_header(cfg, ticket_prompt)
     # CC-133: the create/edit split is derived from the filesystem, not
     # trusted from the header.
     assert_create_paths_are_new(cfg, declared_paths, edit_paths)
     # CC-206: `edit:` on a protected file is an unsatisfiable contract
     # (CC-204-retry3) — refuse it here, before any workspace mutation.
     assert_edit_paths_are_not_protected(cfg, edit_paths)
-    return ticket_prompt, declared_paths, edit_paths, reset_none
+    return ticket_prompt, declared_paths, edit_paths, reset_none, accept_paths, accept_mode
 
 
 def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: int,
@@ -186,8 +189,8 @@ def cmd_run(cfg, args) -> int:
     log(f"STANOK RUNNER | Repo: {cfg.repo_root} | Label: {args.label}")
 
     try:
-        ticket_prompt, declared_paths, edit_paths, reset_none = _read_ticket_contract(
-            cfg, args.ticket_path)
+        ticket_prompt, declared_paths, edit_paths, reset_none, accept_paths, accept_mode = \
+            _read_ticket_contract(cfg, args.ticket_path)
     except (OSError, ValueError) as e:
         return _fail_early(cfg, run_state, job, start_ts, ExitCode.TICKET,
                            f"ticket parse error: {e}")
@@ -202,11 +205,18 @@ def cmd_run(cfg, args) -> int:
         log(f"DECLARED PATHS: {declared_paths}")
     if edit_paths:
         log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
+    # G4: the acceptance-contract state is recorded for the verdict
+    # (summary.json `acceptance`), never silently absent.
+    job["acceptance"] = {"mode": accept_mode, "paths": list(accept_paths)}
+    log(f"ACCEPTANCE CONTRACT: mode={accept_mode}"
+        + (f" paths={accept_paths}" if accept_paths else ""))
 
     # T1 (CC-120): build the SessionPlan — the single source of file policy (I1).
     plan = SessionPlan(
         declared_paths=tuple(declared_paths),
         edit_paths=tuple(edit_paths),
+        accept_paths=tuple(accept_paths),
+        accept_mode=accept_mode,
     )
 
     if not preflight_server(cfg):

@@ -22,8 +22,9 @@ Pod stream, fresh Job, image provenance); the REAL transport (git fixture +
 pack_tree), patch gate, scratch contract recompute, fresh gating and publish
 run. The worker's mid-run tampering arrives the k8s way: as changes.patch in
 the evidence payload, applied to the scratch tree. The published summary
-carries the host stamps (patch_sha256, image_digest) — scenarios 1/7 assert
-them and that the worker's own fields pass through untouched.
+carries the host stamps (patch_sha256, image_digest, acceptance — G4: the
+host's own ticket parse, the Pod is not its own judge) — scenarios 1/7/10
+assert them and that the worker's own fields pass through untouched.
 
 Scenarios:
   1 honest PASS: clean tree, clean worker payload, fresh green -> published
@@ -48,7 +49,10 @@ Scenarios:
     the ticket declares the new test file, the Pod creates it via
     changes.patch -> the scratch recompute sees the declared path, no
     violation, the fresh check runs, the PASS stands and the declared
-    deliverable lands in the live tree (the clean-path apply).
+    deliverable lands in the live tree (the clean-path apply);
+  10 acceptance contract is host-stamped (G4): the published acceptance
+    record comes from the host's parse of the ticket, not from the worker's
+    payload.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_scenarios_verdict.py -q
 """
@@ -213,6 +217,10 @@ def test_scenario_honest_pass(tmp_path, monkeypatch):
     # of the k8s-mode verdict; the worker's own fields pass through untouched.
     assert dst.pop("patch_sha256") == hashlib.sha256(b"").hexdigest()
     assert dst.pop("image_digest") == FAKE_IMAGE
+    # G4: acceptance is host-stamped too — the host's parse of THIS ticket
+    # (it declares no accept line) -> the typed default, never the worker's
+    # claim.
+    assert dst.pop("acceptance") == {"mode": "undeclared", "paths": []}
     assert dst == CLEAN_WORKER  # clean path: the host does not touch the rest
     assert "fresh" in calls
 
@@ -314,6 +322,7 @@ def test_scenario_honest_fail_not_fabricated(tmp_path, monkeypatch):
     dst = _published(repo)
     dst.pop("patch_sha256")
     dst.pop("image_digest")
+    dst.pop("acceptance")  # host stamp (G4), like the two above
     assert dst == dict(HONEST_FAIL_WORKER, rc=1)  # unchanged: no fabrication
 
 
@@ -343,7 +352,24 @@ def test_scenario_declared_new_test_keeps_pass(tmp_path, monkeypatch):
     dst = _published(repo)
     dst.pop("patch_sha256")
     dst.pop("image_digest")
+    dst.pop("acceptance")  # host stamp (G4), like the two above
     assert dst == CLEAN_WORKER  # no host override: the PASS stands
     assert "fresh" in calls  # the fresh check ran over an intact tree
     # the clean-path apply: the declared deliverable lands in the live tree
     assert (repo / "tests" / "new_test.py").is_file()
+
+
+# --- 10: acceptance contract is host-stamped (G4) ---------------------------------
+
+def test_scenario_acceptance_is_host_stamped(tmp_path, monkeypatch):
+    # The published acceptance record comes from the HOST's parse of the
+    # ticket, not from the worker's payload (the Pod is not its own judge,
+    # same as patch_sha256/image_digest). The worker summary here carries no
+    # acceptance key at all — the host stamps it from its own parse.
+    repo, cfg, calls, rc = _run(
+        tmp_path, monkeypatch,
+        ticket_text="# scenario\n\naccept: tests/t_test.py\n")
+    assert rc == 0
+    dst = _published(repo)
+    assert dst["acceptance"] == {"mode": "provided", "paths": ["tests/t_test.py"]}
+    assert "fresh" in calls

@@ -1,8 +1,9 @@
 """ticket — the ticket header contract and workspace preparation.
 
-parse_ticket_header / create-edit assertions (CC-133, CC-206), the
-declared-path rule (declared_carveout, T4/CC-135 — gate-only since CC-258
-removed the Docker mount derivation) and prepare_workspace. The repo root
+parse_ticket_header (incl. the G4 `accept:` acceptance-contract kind,
+SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14) / create-edit assertions (CC-133,
+CC-206), the declared-path rule (declared_carveout, T4/CC-135 — gate-only
+since CC-258 removed the Docker mount derivation) and prepare_workspace. The repo root
 comes from the passed-in Config; the quarantine dir from the passed-in
 RunState (C).
 """
@@ -19,8 +20,14 @@ from launcher.verify import _protected_files
 # kind: a path under scripts/ is declared with impl:/test:/docs:/edit: like
 # any other path. `scripts: x.sh` is therefore not a declaration — it ends
 # the header (this is the fix for the old docstring that advertised it).
-_FILE_LINE_RE = re.compile(r"^(impl|test|docs|edit):\s*([A-Za-z0-9_./-]+)\s*$")
+# G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): `accept:` is a header kind —
+# a TRUSTED acceptance check, NOT a deliverable: it is not quarantined, not
+# in declared_paths, and must pre-exist under tests/ (see parse_ticket_header).
+_FILE_LINE_RE = re.compile(r"^(impl|test|docs|edit|accept):\s*([A-Za-z0-9_./-]+)\s*$")
 _RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
+# `none` matches the path charset of _FILE_LINE_RE, so `accept: none` must be
+# matched BEFORE the path form — otherwise it parses as a path named "none".
+_ACCEPT_NONE_RE = re.compile(r"^accept:\s*none\s*$", re.IGNORECASE)
 
 
 def declared_carveout(cfg, rel: str) -> str | None:
@@ -94,12 +101,27 @@ def _validate_declared_path(cfg, rel: str) -> bool:
     return declared_carveout(cfg, rel) is not None
 
 
-def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bool]:
+def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bool, list[str], str]:
     """Ticket-scoped invariant (W2.1): the header is the leading block of
     literal `impl: <path>` / `test: <path>` / `docs: <path>` / `edit: <path>`
     lines plus an optional `reset: none` escape hatch for extension tickets.
     `#` title lines and blank lines are skipped inside the header block; the
     first other line ends it (a path mentioned in the body is never matched).
+
+    G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): `accept: <path>` declares a
+    TRUSTED acceptance check — an independent test the agent must not author.
+    It is NOT a deliverable: it never enters declared_paths (no quarantine, no
+    positive-contract existence claim, no contract-lock exemption). Validated
+    fail-closed (ValueError -> rc=13 upstream, before any launch):
+      - the path passes the same declared_carveout rules as any declared path;
+      - its first component is `tests/` (a trusted check is a project test);
+      - the file EXISTS before the launch (trust = pre-existence; the agent
+        cannot create its own oracle);
+      - the same path is not also declared as impl:/test:/docs:/edit:
+        (incompatible claims: a pre-existing tests/** file is protected, so
+        CC-206/CC-133 already refuse editing/recreating it);
+      - `accept: none` together with any `accept: <path>` is a contradiction.
+    `accept: none` explicitly declares "no independent acceptance tests".
 
     `edit:` marks a path that the ticket MODIFIES IN PLACE — it is declared
     like any other path but is NOT quarantined (CC-125). CC-206: `edit:` on a
@@ -114,17 +136,31 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
     CC-206: `edit:` on a pre-existing protected file stays refused even
     though its zone is writable — the two checks are complementary.
 
-    Returns (declared_paths, edit_paths, reset_none); declared_paths is the
-    union (edit paths included), so verify_gate is unchanged."""
+    Returns (declared_paths, edit_paths, reset_none, accept_paths,
+    accept_mode); declared_paths is the union of impl/test/docs/edit (edit
+    paths included), so verify_gate is unchanged; accept_paths is a separate
+    list (NOT part of the union). accept_mode: "provided" when ≥1 accept path
+    is declared, "none" when `accept: none` was declared, "undeclared" when
+    no accept line exists (backward compatibility: legacy tickets keep their
+    exact behavior, the absence is recorded, never treated as presence)."""
     entries: list[tuple[str, str]] = []
+    accept_entries: list[str] = []
+    accept_none = False
     reset_none = False
     for line in ticket_text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+        if _ACCEPT_NONE_RE.match(stripped):
+            accept_none = True
+            continue
         m = _FILE_LINE_RE.match(stripped)
         if m:
-            entries.append((m.group(1), m.group(2)))
+            if m.group(1) == "accept":
+                if m.group(2) not in accept_entries:
+                    accept_entries.append(m.group(2))
+            else:
+                entries.append((m.group(1), m.group(2)))
             continue
         if _RESET_NONE_RE.match(stripped):
             reset_none = True
@@ -148,7 +184,62 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
         if kind == "edit":
             edit_paths.append(rel)
         declared.append(rel)
-    return declared, edit_paths, reset_none
+    accept_paths = _validate_accept_paths(cfg, accept_entries, declared)
+    if accept_none and accept_paths:
+        raise ValueError(
+            "ticket declares both `accept: none` and `accept: <path>` — "
+            "contradiction: either independent acceptance checks exist or "
+            "their absence is declared, not both"
+        )
+    if accept_paths:
+        accept_mode = "provided"
+    elif accept_none:
+        accept_mode = "none"
+    else:
+        accept_mode = "undeclared"
+    return declared, edit_paths, reset_none, accept_paths, accept_mode
+
+
+def _validate_accept_paths(cfg, accept_entries: list[str],
+                          declared: list[str]) -> list[str]:
+    """G4 validation of `accept:` paths (fail-closed, ValueError -> rc=13).
+
+    The path passes the SAME declared_carveout rules (relative, no '..', no
+    symlink component, resolved first component in a writable zone) — then the
+    trust rules on top: under tests/, must exist as a file BEFORE the launch
+    (the agent cannot create its own oracle), and must not be simultaneously
+    declared as a deliverable (impl:/test:/docs:/edit:). The file stays
+    protected: pre-existing tests/** is in _protected_files(), so the contract
+    lock catches MODIFIED/DELETED; being absent from declared_paths it gets no
+    contract-lock exemption and is never quarantined."""
+    for rel in accept_entries:
+        if not _validate_declared_path(cfg, rel):
+            raise ValueError(
+                f"invalid accept path {rel!r}: it must pass the same rules as "
+                f"a declared path (relative, no '..', no symlink component, "
+                f"resolves inside the repo)"
+            )
+        if rel.split("/")[0] != "tests":
+            raise ValueError(
+                f"accept path {rel!r} must live under tests/ — a trusted "
+                f"acceptance check is a project test, not an implementation "
+                f"artifact"
+            )
+        if not os.path.isfile(os.path.join(cfg.repo_root, rel)):
+            raise ValueError(
+                f"accept path {rel!r} does not exist before the launch — a "
+                f"trusted acceptance check must pre-exist (the agent cannot "
+                f"author its own oracle); author it host-side before opening "
+                f"the ticket"
+            )
+        if rel in declared:
+            raise ValueError(
+                f"accept path {rel!r} is also declared as a deliverable "
+                f"(impl:/test:/docs:/edit:) — incompatible claims: a "
+                f"pre-existing tests/** file is protected (CC-206/CC-133 "
+                f"refuse editing or recreating it)"
+            )
+    return list(accept_entries)
 
 
 def assert_create_paths_are_new(cfg, declared: list[str], edit_paths: list[str]) -> None:

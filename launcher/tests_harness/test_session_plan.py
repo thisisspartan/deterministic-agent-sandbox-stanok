@@ -12,8 +12,10 @@ launcher/zones.py):
   - zones.WRITABLE_ZONES is the only literal zone list; its consumers
     (hidden_files_gate, declared_carveout — CC-135 dropped prepare_workspace
     and _validate_declared_path from that list) read the constant
-  - the ticket header kinds are exactly impl|test|docs|edit (`scripts` is
-    a zone, not a kind)
+  - the ticket header kinds are exactly impl|test|docs|edit|accept (`scripts`
+    is a zone, not a kind; G4: `accept:` is a header kind but NOT a
+    deliverable — it never enters declared_paths, see
+    test_acceptance_contract.py)
 
 CC-134 drops the former "evidence" carve-out from that list: evidence/ is no
 longer mounted rw (the host publishes the verdict into it) — the boundary
@@ -48,10 +50,13 @@ def _build_plan(cfg, ticket_text):
     """Mirror cmd_run's T1 construction: parse the header, then build the
     plan (the plan carries no mount/protected lists — T4/CC-135 derives the
     rw mounts, T4b/CC-136 the :ro binds)."""
-    declared, edit_paths, _ = ticket.parse_ticket_header(cfg, ticket_text)
+    declared, edit_paths, _, accept_paths, accept_mode = \
+        ticket.parse_ticket_header(cfg, ticket_text)
     return plan_mod.SessionPlan(
         declared_paths=tuple(declared),
         edit_paths=tuple(edit_paths),
+        accept_paths=tuple(accept_paths),
+        accept_mode=accept_mode,
     )
 
 
@@ -75,14 +80,21 @@ def test_plan_fields_from_ticket_header():
     # so the declared paths validate against the filesystem.
     plan = _build_plan(Config(), _TICKET)
     assert plan.declared_paths == ("src/mod.py", "tests/mod_test.py", "docs/mod.md")
-    # T5/CC-137: exactly two fields — the mount/protected lists are derived
-    # (rw_zones gone with CC-135, protected_paths gone with the hook it fed,
-    # bootstrap_paths gone with the bootstrap kind itself — CC-154,
-    # mutable_paths collapsed into declared_paths — it was always equal).
+    # G4 backward compatibility: a legacy ticket (no accept line) parses to
+    # accept_paths=() / accept_mode="undeclared" — behavior unchanged, the
+    # absence is recorded, never treated as presence.
+    assert plan.accept_paths == () and plan.accept_mode == "undeclared"
+    # T5/CC-137: the mount/protected lists are derived (rw_zones gone with
+    # CC-135, protected_paths gone with the hook it fed, bootstrap_paths gone
+    # with the bootstrap kind itself — CC-154, mutable_paths collapsed into
+    # declared_paths — it was always equal).
     # git_mode dropped as dead (PLAN-HYGIENE 2026-10-08): .git RO is enforced
     # at the mount layer; no consumer ever read the field.
+    # G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): accept_paths/accept_mode
+    # added — the acceptance contract is part of the single policy source
+    # (I1): verify_gate reads accept_paths, summary records accept_mode.
     assert {f.name for f in dataclasses.fields(plan_mod.SessionPlan)} == {
-        "declared_paths", "edit_paths"}
+        "declared_paths", "edit_paths", "accept_paths", "accept_mode"}
 
 
 def test_plan_is_frozen():
@@ -136,10 +148,12 @@ _EDIT_TICKET = (
 def test_edit_path_parsed_and_still_declared():
     # CC-125: `edit:` is declared like any path (union) but also reported
     # separately so prepare_workspace can skip it.
-    declared, edit_paths, reset_none = ticket.parse_ticket_header(Config(), _EDIT_TICKET)
+    declared, edit_paths, reset_none, accept_paths, accept_mode = \
+        ticket.parse_ticket_header(Config(), _EDIT_TICKET)
     assert declared == ["tests/new_test.py", "tests/existing_test.py"]
     assert edit_paths == ["tests/existing_test.py"]
     assert reset_none is False
+    assert accept_paths == [] and accept_mode == "undeclared"
     plan = _build_plan(Config(), _EDIT_TICKET)
     assert plan.edit_paths == ("tests/existing_test.py",)
 
@@ -198,24 +212,31 @@ def test_zone_consumers_read_the_constant(tmp_path, monkeypatch):
     assert gates.hidden_files_gate(cfg) is True     # zoneA is scanned now
 
 
-def test_header_kinds_are_impl_test_docs_edit():
-    declared, edit_paths, reset_none = ticket.parse_ticket_header(
-        Config(),
-        "impl: src/a.py\n"
-        "test: tests/a_test.py\n"
-        "docs: docs/a.md\n"
-        "edit: tests/b_test.py\n"
-    )
+def test_header_kinds_are_impl_test_docs_edit_accept():
+    declared, edit_paths, reset_none, accept_paths, accept_mode = \
+        ticket.parse_ticket_header(
+            Config(),
+            "impl: src/a.py\n"
+            "test: tests/a_test.py\n"
+            "docs: docs/a.md\n"
+            "edit: tests/b_test.py\n"
+            "accept: tests/runtime_contract_test.py\n"
+        )
     assert declared == ["src/a.py", "tests/a_test.py", "docs/a.md",
                         "tests/b_test.py"]
     assert edit_paths == ["tests/b_test.py"]
     assert reset_none is False
+    # G4: `accept:` is a header kind but NOT a deliverable — it never enters
+    # declared_paths (no quarantine, no positive-contract claim, no
+    # contract-lock exemption).
+    assert accept_paths == ["tests/runtime_contract_test.py"]
+    assert accept_mode == "provided"
 
 
 def test_scripts_is_a_zone_not_a_kind():
     # `scripts:` is not a declaration line: it ends the header, so the impl:
     # line after it is never reached. The old docstring advertised it.
-    declared, edit_paths, _ = ticket.parse_ticket_header(
+    declared, edit_paths, _, _, _ = ticket.parse_ticket_header(
         Config(),
         "scripts: x.sh\nimpl: src/a.py\n"
     )
@@ -230,7 +251,7 @@ def test_bootstrap_is_not_a_kind():
     # is now not a declaration (it ends the header), so the ticket is rejected
     # as "no declaration" (rc=13) instead of silently carving out a top-level
     # file.
-    declared, edit_paths, _ = ticket.parse_ticket_header(
+    declared, edit_paths, _, _, _ = ticket.parse_ticket_header(
         Config(),
         "bootstrap: pyproject.toml\n"
     )
@@ -249,7 +270,7 @@ def test_stale_create_path_is_a_defect(repo):
     # hook denied recreating it, the turn stalled. Now it is rc=13 up front.
     write(repo / "tests" / "fire_color16_test.py", "def test_x():\n    assert 1\n")
     cfg = Config(repo_root=str(repo))
-    declared, edit_paths, _ = ticket.parse_ticket_header(
+    declared, edit_paths, _, _, _ = ticket.parse_ticket_header(
         cfg,
         "test: tests/fire_fire16_test.py\n"
         "test: tests/fire_color16_test.py\n"
@@ -267,7 +288,7 @@ def test_create_paths_that_are_new_pass(repo):
     # pinning ONLY the CC-133 create-vs-edit direction.
     write(repo / "src" / "old.py", "x = 1\n")
     cfg = Config(repo_root=str(repo))
-    declared, edit_paths, _ = ticket.parse_ticket_header(
+    declared, edit_paths, _, _, _ = ticket.parse_ticket_header(
         cfg,
         "test: tests/new_test.py\n"
         "edit: src/old.py\n"
@@ -294,7 +315,7 @@ def test_edit_path_that_is_absent_is_not_a_defect(repo):
 def test_edit_on_existing_test_is_a_defect(repo):
     write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
     cfg = Config(repo_root=str(repo))
-    _, edit_paths, _ = ticket.parse_ticket_header(
+    _, edit_paths, _, _, _ = ticket.parse_ticket_header(
         cfg,
         "edit: tests/old_test.py\n"
         "test: tests/new_test.py\n"
@@ -308,7 +329,7 @@ def test_edit_on_existing_runsh_is_a_defect(repo):
     # scripts/run.sh exists (the repo fixture installs the live one) -> it is
     # protected -> the machine may not edit it in place.
     cfg = Config(repo_root=str(repo))
-    _, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
+    _, edit_paths, _, _, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
     with pytest.raises(ValueError) as exc:
         ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)
     assert "scripts/run.sh" in str(exc.value)
@@ -320,7 +341,7 @@ def test_edit_on_absent_runsh_is_legal_bootstrap(repo):
     # machine may create it).
     (repo / "scripts" / "run.sh").unlink()
     cfg = Config(repo_root=str(repo))
-    _, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
+    _, edit_paths, _, _, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
     ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)  # no raise
 
 
@@ -329,7 +350,7 @@ def test_edit_on_existing_src_file_is_legal(repo):
     # normal case and must stay legal.
     write(repo / "src" / "mod.py", "x = 1\n")
     cfg = Config(repo_root=str(repo))
-    _, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: src/mod.py\n")
+    _, edit_paths, _, _, _ = ticket.parse_ticket_header(cfg, "edit: src/mod.py\n")
     ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)  # no raise
 
 
@@ -338,7 +359,7 @@ def test_cmd_run_gate_order_rejects_before_any_workspace_mutation(repo):
     # with `edit: tests/...` returns rc=13 without touching the workspace.
     write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
     cfg = Config(repo_root=str(repo))
-    declared, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: tests/old_test.py\n")
+    declared, edit_paths, _, _, _ = ticket.parse_ticket_header(cfg, "edit: tests/old_test.py\n")
     ticket.assert_create_paths_are_new(cfg, declared, edit_paths)  # CC-133: no raise
     with pytest.raises(ValueError):
         ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)

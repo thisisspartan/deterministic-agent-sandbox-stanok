@@ -766,7 +766,8 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     # must not start for an unsatisfiable contract.
     try:
         with open(args.ticket_path, encoding="utf-8") as f:
-            declared, edit_paths, _ = parse_ticket_header(cfg, f.read())
+            declared, edit_paths, _, accept_paths, accept_mode = \
+                parse_ticket_header(cfg, f.read())
         assert_create_paths_are_new(cfg, declared, edit_paths)
         assert_edit_paths_are_not_protected(cfg, edit_paths)
     except (OSError, ValueError) as e:
@@ -927,6 +928,13 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             with open(sum_path, encoding="utf-8") as f:
                 summary = json.load(f)
             summary["patch_sha256"] = patch_sha
+            # G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): the acceptance
+            # contract is host-stamped from the HOST's own ticket parse —
+            # host-issued like patch_sha256/image_digest (the Pod is not its
+            # own judge). The mode records whether independent acceptance
+            # checks were part of the contract: provided | none | undeclared.
+            summary["acceptance"] = {"mode": accept_mode,
+                                     "paths": list(accept_paths)}
             # Image provenance (operator plan 2026-10-12): host-stamped like
             # patch_sha256 — the Pod's own containerStatuses record. None is
             # explicit (never a guess), with a WARN, same as commit_sha.

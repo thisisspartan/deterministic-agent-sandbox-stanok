@@ -80,13 +80,13 @@ def test_docs_kind_out_of_zone_is_refused(repo):
 
 def test_edit_existing_src_file_accepted(repo):
     write(repo / "src" / "x.py", "x = 1\n")
-    _, edit_paths, _ = ticket.parse_ticket_header(_cfg(repo), "edit: src/x.py\n")
+    _, edit_paths, _, _, _ = ticket.parse_ticket_header(_cfg(repo), "edit: src/x.py\n")
     assert edit_paths == ["src/x.py"]
 
 
 def test_impl_new_subdir_in_zone_accepted(repo):
     # New subdirectory under an existing zone dir: carve-out = src/ (unchanged).
-    declared, _, _ = ticket.parse_ticket_header(_cfg(repo), "impl: src/new/mod.py\n")
+    declared, _, _, _, _ = ticket.parse_ticket_header(_cfg(repo), "impl: src/new/mod.py\n")
     assert declared == ["src/new/mod.py"]
     assert ticket.declared_carveout(_cfg(repo), "src/new/mod.py") == "src"
 
@@ -118,7 +118,7 @@ def test_edit_on_existing_test_still_refused_by_cc206(repo):
     # protected-file gate must still refuse (complementary checks).
     write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")
     cfg = _cfg(repo)
-    _, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: tests/old_test.py\n")
+    _, edit_paths, _, _, _ = ticket.parse_ticket_header(cfg, "edit: tests/old_test.py\n")
     with pytest.raises(ValueError) as exc:
         ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)
     assert "tests/old_test.py" in str(exc.value)
@@ -126,7 +126,7 @@ def test_edit_on_existing_test_still_refused_by_cc206(repo):
 
 def test_edit_on_existing_runsh_still_refused_by_cc206(repo):
     cfg = _cfg(repo)
-    _, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
+    _, edit_paths, _, _, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
     with pytest.raises(ValueError):
         ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)
 
@@ -134,7 +134,7 @@ def test_edit_on_existing_runsh_still_refused_by_cc206(repo):
 def test_absent_runsh_bootstrap_still_legal(repo):
     (repo / "scripts" / "run.sh").unlink()
     cfg = _cfg(repo)
-    _, edit_paths, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
+    _, edit_paths, _, _, _ = ticket.parse_ticket_header(cfg, "edit: scripts/run.sh\n")
     ticket.assert_edit_paths_are_not_protected(cfg, edit_paths)  # no raise
 
 

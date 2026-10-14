@@ -29,3 +29,11 @@ class SessionPlan:
     # scratch — prepare_workspace must not quarantine them. They stay in
     # declared_paths (positive contract + contract_lock exemption).
     edit_paths:      tuple[str, ...] = ()
+    # G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): `accept:` paths — trusted
+    # acceptance checks, NOT deliverables: deliberately NOT in declared_paths
+    # (no quarantine, no contract-lock exemption — they stay protected via
+    # _protected_files/contract lock). Consumed only by verify_gate (the
+    # ACCEPTANCE NOT RUN gate) and recorded in summary.json via the
+    # acceptance mode. accept_mode: provided | none | undeclared.
+    accept_paths:    tuple[str, ...] = ()
+    accept_mode:     str = "undeclared"

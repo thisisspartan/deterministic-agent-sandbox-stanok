@@ -113,6 +113,20 @@ def verify_gate(cfg, plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], 
     except Exception as e:
         return (False, [("(no tests)", f"run.sh list failed: {e}")], False)
     tests = [ln.strip() for ln in (lp.stdout or "").splitlines() if ln.strip()]
+    # G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): every declared acceptance
+    # check must actually be run. `run.sh list` is the authority on what the
+    # suite executes; a trusted tests/ file that no registry line claims is
+    # silently unrun — W12 only flags test-like basenames, so this is the
+    # hole the acceptance gate closes. The file itself is immutable (it is
+    # pre-existing tests/** -> contract lock) and executed by the same
+    # `test --all` call once the registry claims it; the gate only verifies
+    # the fact of execution, never the name.
+    for rel in plan.accept_paths:
+        if rel not in tests:
+            failures.append(("(acceptance)",
+                             f"ACCEPTANCE NOT RUN: {rel} is declared as an "
+                             f"acceptance check but the project runner does "
+                             f"not list it — it would never be executed"))
     if not tests:
         if lp.returncode != 0:
             # `list` failed and printed no tests (no tests/ dir, or only
@@ -139,14 +153,32 @@ def verify_gate(cfg, plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], 
 def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
     """Select the fix-prompt rule block for a verify_gate failure set.
 
-    Priority: list-fail > timeout > no-tests > generic. A hung test
-    (TIMEOUT) must not get the generic "fix src exclusively" rules: that
+    Priority: acceptance > list-fail > timeout > no-tests > generic. A hung
+    test (TIMEOUT) must not get the generic "fix src exclusively" rules: that
     wording is a retry-loop DoS (the model iterates on src/, the test
     hangs again, verify_gate fails again with the same prompt).
     """
+    has_acceptance = any(name == "(acceptance)" for name, _ in failures)
     has_list_fail = any(name == "(list)" for name, _ in failures)
     has_timeout_fail = any(msg.startswith("TIMEOUT:") for _, msg in failures)
     has_no_tests = any(name == "(no tests)" for name, _ in failures)
+    if has_acceptance:
+        # G4: an unrun acceptance check is a TICKET defect, not a code
+        # defect: the trusted file is protected (cannot be renamed/moved/
+        # edited) and the registry is fixed (no run.sh line may be added) —
+        # the machine cannot fix it; the supervisor refines the ticket.
+        return (
+            "1. A file the ticket declares as an acceptance check "
+            "(`accept:`) is not claimed by the project runner's registry — "
+            "it would never be executed. You CANNOT fix this: it is "
+            "CATEGORICALLY FORBIDDEN to rename, move, modify or delete "
+            "anything in tests/, to add a registry line to scripts/run.sh, "
+            "or to create a new file under tests/.\n"
+            "2. Do not attempt a workaround for the acceptance contract. "
+            "Finish the ticket's declared deliverables and keep the rest of "
+            "the suite green; the acceptance-contract defect is resolved "
+            "host-side by refining the ticket."
+        )
     if has_list_fail:
         return (
             "1. The project runner's `list` command failed: tests/ contains a "

@@ -5,11 +5,14 @@ CC-237 (schema v2, operator decision 2026-10-11): summary.json is TYPED —
 scalars and structured fields only, no free text. The allowlist:
   label, ticket, rc, verifier, probe_result, turns, elapsed_s, session_id,
   commit_sha, tokens, cache_hit_rate, inference_telemetry, tool_activity,
-  loop_trap, test_fit, opik_traces  (+ patch_sha256, image_digest,
+  loop_trap, test_fit, acceptance, opik_traces  (+ patch_sha256, image_digest,
   host-stamped in k8s mode — k8s.py: the Pod's containerStatuses imageID,
   None when unavailable).
   test_fit = {"edits_after_green": int>=0, "new_tests_after_green": int>=0}
   — CC-247 proxy counters (no gate); malformed -> zeros.
+  acceptance = {"mode": "provided"|"none"|"undeclared", "paths": [str]}
+  — G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): the ticket's acceptance-
+  contract state (no gate); malformed -> {"mode": "undeclared", "paths": []}.
   loop_trap = {"tool": str, "hash": str, "n": int} | None — the typed
   circuit-breaker record (the protocol reads it as LOOP-TRAP).
 All free text of a run (the error string, verify_gate failures, contract-lock
@@ -149,6 +152,27 @@ def _loop_trap_field(job: dict):
             and isinstance(n, int) and not isinstance(n, bool)):
         return {"tool": tool, "hash": hash_, "n": n}
     return None
+
+
+def _acceptance_field(job: dict) -> dict:
+    """G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): the typed acceptance-
+    contract record — {"mode": "provided"|"none"|"undeclared",
+    "paths": [str]}. mode=provided requires a non-empty paths list; mode=none
+    requires an empty one. Anything malformed publishes the default
+    {"mode": "undeclared", "paths": []} — the protocol reads undeclared as
+    "no independent acceptance evidence was declared", never as presence."""
+    default = {"mode": "undeclared", "paths": []}
+    acc = job.get("acceptance")
+    if not isinstance(acc, dict):
+        return default
+    mode, paths = acc.get("mode"), acc.get("paths")
+    if mode not in ("provided", "none", "undeclared"):
+        return default
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        return default
+    if (mode == "provided") != bool(paths):
+        return default
+    return {"mode": mode, "paths": list(paths)}
 
 
 def _test_fit_field(job: dict) -> dict:
@@ -318,6 +342,9 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
         # CC-247: the test-fit proxy counters (typed, no gate) — test-file
         # edits after the first observed green vs new test files after it.
         "test_fit": _test_fit_field(job),
+        # G4: the acceptance-contract state (typed, no gate) — whether the
+        # final PASS was backed by trusted pre-existing acceptance checks.
+        "acceptance": _acceptance_field(job),
         "opik_traces": job.get("opik_traces"),
     }
 
