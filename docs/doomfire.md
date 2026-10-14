@@ -48,3 +48,44 @@ reproducible for a given `rng`: rows top→bottom, columns left→right,
   only inherit heat from the row below it, minus decay.
 - Purity: the module imports only `random`; no `sys`/`os`/`time`, no
   file/socket/print anywhere.
+
+## doomfire_palette
+
+### src/doomfire_palette.py — palette and frame formatter (pure formatting, no I/O)
+
+Maps a heat field (the `list[list[int]]` shape of the core model) to a
+renderable string. The module imports nothing from the project and no I/O
+stdlib (`sys`/`os`/`time`); it only returns strings.
+
+### API
+
+- `FIRE_PALETTE` — module constant: exactly 21 `(r, g, b)` tuples, the
+  classic DOOM fire colormap, black→red→orange→yellow→white, monotone
+  non-decreasing per channel; first `(0,0,0)`, last `(255,255,255)`.
+- `heat_to_rgb(heat: int) -> tuple[int, int, int]`
+  `heat` clamped to `[0, 255]`, then `FIRE_PALETTE[heat * 20 // 255]`
+  (`0 → palette[0]`, `255 → palette[20]`).
+- `render_frame(field, ascii: bool = False) -> str`
+  The WHOLE frame as one string, no I/O. Every output line ends `"\n"`.
+  - Half-block mode (default): each output line renders a PAIR of field
+    rows `(0,1), (2,3), ...`; an odd last row pairs with cold (heat 0).
+    Output line count = `(height + 1) // 2`. One cell:
+
+    ```
+    "\x1b[38;2;{r1};{g1};{b1}m"  # foreground = TOP row heat color
+    "\x1b[48;2;{r2};{g2};{b2}m"  # background = BOTTOM row heat color
+    "▀"                          # U+2580 upper half block
+    "\x1b[0m"                    # reset
+    ```
+  - `ascii=True`: one char per cell, rows rendered 1:1 (no pairing, no
+    U+2580, no escapes). Charset `" .:-=+*#%@"`, char index
+    `= heat * 9 // 255` (heat clamped). Line count == height.
+
+### Frame format invariants
+
+- `render_frame` never writes to a stream; it returns the complete string.
+- Half-block output: `(height + 1) // 2` lines; ASCII output: `height`
+  lines; both always newline-terminated.
+- Degenerate sizes are valid: a 1×1 field renders one line (its single
+  cell pairs with black in half-block mode).
+- Purity: no project imports, no `sys`/`os`/`time`, no `print`.
