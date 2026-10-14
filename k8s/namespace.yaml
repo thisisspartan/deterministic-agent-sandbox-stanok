@@ -1,0 +1,18 @@
+# PSA (SPEC-PSA-2026-10-14): Pod Security Admission labels for the namespace
+# the stanok Jobs run in (default; STANOK_K8S_NAMESPACE). k3s v1.36.5 -> PSA
+# GA, profile version v1.36 (current). Both stanok Pods already satisfy
+# `restricted` (worker-job.yaml.tmpl / fresh-job.yaml.tmpl; pinned by
+# launcher/tests_harness/test_k8s_manifests.py) — this manifest makes the
+# cluster enforce it at admission instead of relying on template discipline.
+# Stage 1 (host-side): warn/audit only — the API server reports violations,
+# nothing is rejected. Stage 2 (operator action, only after the dry-run
+# verification of BOTH Pods passed): add
+#   pod-security.kubernetes.io/enforce: restricted
+# and re-apply. The test pins the ABSENCE of enforce until that decision.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: default
+  labels:
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

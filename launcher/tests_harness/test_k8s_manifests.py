@@ -52,6 +52,10 @@ checks (no YAML parser in the image — the checks are text invariants):
      in BOTH job templates (worker 250m/1Gi -> 1000m/2Gi; fresh 250m/512Mi ->
      500m/1Gi — the fresh Pod has no agent CLI); limits >= requests; the
      existing disk bound, deadline and securityContext are untouched
+  11 PSA (SPEC-PSA-2026-10-14): namespace.yaml pins the PSA labels on the
+     Job namespace — warn/audit=restricted only; enforce is ABSENT (adding it
+     is a separate operator decision with an explicit test edit — same
+     single-source convention as the G1 values)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -373,3 +377,42 @@ def test_k8s_renders_runtime_class_in_both_jobs():
     src = (Path(__file__).resolve().parents[1] / "k8s.py").read_text(
         encoding="utf-8")
     assert src.count('"RUNTIME_CLASS": _runtime_class(),') == 2
+
+
+# --- PSA (SPEC-PSA-2026-10-14): namespace labels ---------------------------
+
+def test_namespace_yaml_warn_audit_only():
+    # Stage 1 (host-side): warn/audit=restricted. enforce is an operator
+    # action (SPEC-PSA §2.3): its absence is pinned — adding it to the live
+    # namespace is kubectl-side; editing THIS file is a deliberate decision
+    # with an explicit edit of this test (same convention as G1 values).
+    # structural assertions run on the manifest text with comment lines
+    # stripped (the header comment describes the stages and mentions the
+    # enforce label it forbids — same convention as _docs() above)
+    y = "\n".join(line for line in _read("namespace.yaml").splitlines()
+                  if not line.lstrip().startswith("#"))
+    assert "kind: Namespace" in y
+    assert "name: default" in y  # the STANOK_K8S_NAMESPACE default (k8s.py)
+    assert "pod-security.kubernetes.io/warn: restricted" in y
+    assert "pod-security.kubernetes.io/audit: restricted" in y
+    # the enforce LABEL is absent until the operator's decision
+    assert "pod-security.kubernetes.io/enforce" not in y
+
+
+def test_job_templates_are_restricted_clean():
+    # The profile choice (restricted) is only safe because both Pod templates
+    # already satisfy it — pinned here so a future template edit cannot drift
+    # into a profile violation. The fields below are the restricted-profile
+    # requirements the templates must keep (the per-field detail is pinned by
+    # test_worker_job_hardening / test_*_read_only_root above).
+    for name in ("worker-job.yaml.tmpl", "fresh-job.yaml.tmpl"):
+        y = _read(name)
+        assert "runAsNonRoot: true" in y, name
+        assert "allowPrivilegeEscalation: false" in y, name
+        assert "drop:" in y and "- ALL" in y, name
+        assert "type: RuntimeDefault" in y, name
+        # restricted disallows hostPath volumes and hostPorts — neither may
+        # ever appear in a stanok Pod.
+        assert "hostPath" not in y, name
+        assert "hostPort" not in y, name
+        assert "privileged: true" not in y, name
