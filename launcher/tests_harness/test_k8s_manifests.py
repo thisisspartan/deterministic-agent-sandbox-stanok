@@ -53,9 +53,10 @@ checks (no YAML parser in the image — the checks are text invariants):
      500m/1Gi — the fresh Pod has no agent CLI); limits >= requests; the
      existing disk bound, deadline and securityContext are untouched
   11 PSA (SPEC-PSA-2026-10-14): namespace.yaml pins the PSA labels on the
-     Job namespace — warn/audit=restricted only; enforce is ABSENT (adding it
-     is a separate operator decision with an explicit test edit — same
-     single-source convention as the G1 values)
+     Job namespace — warn/audit/enforce=restricted. enforce was added by the
+     operator's decision 2026-10-14 (dry-run of both Pods clean under enforce,
+     negative control Forbidden) with this explicit test edit — same
+     single-source convention as the G1 values
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -381,22 +382,21 @@ def test_k8s_renders_runtime_class_in_both_jobs():
 
 # --- PSA (SPEC-PSA-2026-10-14): namespace labels ---------------------------
 
-def test_namespace_yaml_warn_audit_only():
-    # Stage 1 (host-side): warn/audit=restricted. enforce is an operator
-    # action (SPEC-PSA §2.3): its absence is pinned — adding it to the live
-    # namespace is kubectl-side; editing THIS file is a deliberate decision
-    # with an explicit edit of this test (same convention as G1 values).
+def test_namespace_yaml_psa_labels():
+    # Stage 1 (host-side, 2026-10-14): warn/audit=restricted. Stage 2
+    # (operator decision, 2026-10-14): enforce=restricted applied to the live
+    # namespace AND to this manifest — the manifest now describes the applied
+    # cluster state (the test edit was the explicit decision marker, same
+    # convention as the G1 values).
     # structural assertions run on the manifest text with comment lines
-    # stripped (the header comment describes the stages and mentions the
-    # enforce label it forbids — same convention as _docs() above)
+    # stripped (same convention as _docs() above)
     y = "\n".join(line for line in _read("namespace.yaml").splitlines()
                   if not line.lstrip().startswith("#"))
     assert "kind: Namespace" in y
     assert "name: default" in y  # the STANOK_K8S_NAMESPACE default (k8s.py)
     assert "pod-security.kubernetes.io/warn: restricted" in y
     assert "pod-security.kubernetes.io/audit: restricted" in y
-    # the enforce LABEL is absent until the operator's decision
-    assert "pod-security.kubernetes.io/enforce" not in y
+    assert "pod-security.kubernetes.io/enforce: restricted" in y
 
 
 def test_job_templates_are_restricted_clean():
