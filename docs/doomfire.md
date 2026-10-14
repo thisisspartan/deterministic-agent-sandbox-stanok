@@ -134,3 +134,70 @@ handler context; the main loop (CLI ticket) polls the flags and calls
   (explicit call, `atexit`, or both — the guard makes the second a no-op).
 - The full lifecycle output on a stream is exactly
   `"\x1b[?1049h\x1b[?25l"` + frames + `"\x1b[?25h\x1b[?1049l"`.
+
+## doomfire (CLI)
+
+### src/doomfire.py — runner CLI (wires the model, the palette and the controller)
+
+The only component that touches I/O. It imports `sys`, `argparse`, `random`,
+`shutil`, `time` and the three project modules — nothing else (no
+`curses`/`termios`, no `os`/`signal`/`atexit`: the terminal lifecycle stays
+with `TerminalController`). Importing the module has no side effects: no loop
+starts, nothing is printed.
+
+### Entry point
+
+- `main(argv=None) -> int` — testable entry; `if __name__ == "__main__":
+  sys.exit(main())`. `argv=None` falls back to `sys.argv[1:]`.
+
+### Flags
+
+| Flag | Type | Default | Contract |
+| --- | --- | --- | --- |
+| `--headless N` | int ≥ 0 | absent | run N frames non-interactively and exit 0 |
+| `--seed S` | int | `0` | seed of the private `random.Random` |
+| `--width W` | int ≥ 1 | `80` | field width in cells |
+| `--height H` | int ≥ 1 | `24` | field height in rows |
+| `--fps F` | int 1..60 | `30` | interactive frame cap |
+| `--ascii` | flag | off | ASCII ramp instead of ANSI half-blocks |
+
+Out-of-range or non-integer values are argparse usage errors (`SystemExit`
+code 2), before any frame is produced.
+
+### Headless mode (`--headless N`)
+
+No TTY required, no signals, no sleep, no alternate-screen sequences. The
+field is built with `create_field` + `seed_bottom` and advanced with repeated
+`step`, all randomness flowing through a private `random.Random(seed)`; for
+each of the N frames the CLI renders `render_frame(field, ascii=args.ascii)`
+and writes `frame.encode("utf-8")` to `sys.stdout.buffer` (explicit UTF-8, so
+the bytes are identical under any locale), then flushes once. Exit code 0.
+
+- Deterministic: identical arguments → byte-identical stdout. No global RNG
+  state is used, so two calls in one process give the same bytes.
+- Frame count: exactly N frames; `N == 0` writes nothing and exits 0. Each
+  frame is `(height + 1) // 2` lines in half-block mode, `height` lines in
+  ASCII mode, always newline-terminated.
+
+### Interactive mode (no `--headless`)
+
+Only when `sys.stdout.isatty()`. Without a TTY the CLI prints a one-line hint
+naming `--headless` to stderr, writes nothing to stdout, and returns 2 — no
+alternate screen, no handlers, no frame.
+
+Loop (after `controller.setup()`):
+
+1. `resize_requested` → re-read `shutil.get_terminal_size()`, clamp to
+   ≥ 1×1, rebuild the field keeping the heat of the overlapping region
+   (top-left aligned; a bottom row left without heat is reseeded).
+2. `should_exit` → return the controller's recorded exit code
+   (`130`/`143`).
+3. `clear_flags()` — flags are cleared after both are handled and before the
+   frame is produced, so a signal arriving during `present`/`sleep` is caught
+   at the top of the next iteration instead of being swallowed.
+4. `step` the model, `controller.present(render_frame(...))`.
+5. Pace: `time.sleep(max(0, next_deadline - time.monotonic()))` with
+   `next_deadline += 1/fps` — monotonic, no busy-wait.
+
+Teardown is the controller's (atexit + signal flags); the CLI never writes
+`"\x1b[?1049h"`, `"\x1b[?1049l"`, `"\x1b[?25l"` or `"\x1b[?25h"` itself.
