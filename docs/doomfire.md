@@ -89,3 +89,48 @@ stdlib (`sys`/`os`/`time`); it only returns strings.
 - Degenerate sizes are valid: a 1×1 field renders one line (its single
   cell pairs with black in half-block mode).
 - Purity: no project imports, no `sys`/`os`/`time`, no `print`.
+
+## doomfire_terminal
+
+### src/doomfire_terminal.py — terminal controller (lifecycle only, no main loop)
+
+Owns the terminal lifecycle: alternate screen, cursor visibility, teardown and
+signal flags. It does NOT import the core or the palette, does NOT read the
+real terminal size, and contains no main loop (the CLI comes in a later
+ticket). The module imports only `signal` and `atexit` — no `sys`/`os`/`time`,
+no project modules; it never touches `sys.stdout` itself.
+
+### API
+
+- `TerminalController(stream)`
+  `stream` is any object with `write(str)` and `flush()` (dependency
+  injection — tests pass `io.StringIO`).
+- `setup()` — writes exactly `"\x1b[?1049h\x1b[?25l"` (enter alternate
+  screen + hide cursor), registers `teardown` via `atexit.register` exactly
+  once, and installs handlers for SIGINT, SIGTERM and SIGWINCH via
+  `signal.signal`. Idempotent: a second `setup()` writes and registers
+  nothing.
+- `present(frame: str)` — `stream.write(frame)` then `stream.flush()`:
+  exactly one write and one flush per whole frame, never per-cell writes.
+- `teardown()` — writes exactly `"\x1b[?25h\x1b[?1049l"` (show cursor +
+  leave alternate screen) and flushes. Idempotent: guarded by a flag, the
+  second call is a no-op and must not raise — safe from `atexit` after an
+  explicit call or after an exception.
+- `clear_flags()` — resets `should_exit`/`resize_requested` to `False`
+  (called by the CLI at frame boundaries).
+- Module constants `EXIT_SIGINT = 130`, `EXIT_SIGTERM = 143`.
+
+### Signal-handler contract
+
+Handlers follow the async-signal-safe pattern: they ONLY set flags —
+SIGINT/SIGTERM set `self.should_exit` and record `self.exit_code`
+(`130`/`143`); SIGWINCH sets `self.resize_requested`. No I/O, no logic in
+handler context; the main loop (CLI ticket) polls the flags and calls
+`clear_flags()` at frame boundaries.
+
+### Teardown guarantees
+
+- Exactly one teardown sequence per controller, whichever path reaches it
+  (explicit call, `atexit`, or both — the guard makes the second a no-op).
+- The full lifecycle output on a stream is exactly
+  `"\x1b[?1049h\x1b[?25l"` + frames + `"\x1b[?25h\x1b[?1049l"`.
