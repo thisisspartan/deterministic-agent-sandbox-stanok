@@ -28,6 +28,14 @@ _RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
 # `none` matches the path charset of _FILE_LINE_RE, so `accept: none` must be
 # matched BEFORE the path form — otherwise it parses as a path named "none".
 _ACCEPT_NONE_RE = re.compile(r"^accept:\s*none\s*$", re.IGNORECASE)
+# Fail-closed header (reviewer finding A, 2026-10-14): a line that LOOKS like
+# a header declaration (starts with a keyword + colon) but does not match its
+# strict form (`accept: x  # c`, `Accept: x`, `accept : x`, `reset: maybe`)
+# must NOT silently end the header — the declaration would be dropped and the
+# ticket would launch with a wrong manifest. ValueError -> rc=13 before any
+# launch. A keyword followed by a non-colon word ("test the function:") does
+# not match: only `keyword:` prefixes are caught, body prose is untouched.
+_KEYWORD_PREFIX_RE = re.compile(r"^(impl|test|docs|edit|accept|reset)\s*:", re.IGNORECASE)
 
 
 def declared_carveout(cfg, rel: str) -> str | None:
@@ -107,6 +115,10 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
     lines plus an optional `reset: none` escape hatch for extension tickets.
     `#` title lines and blank lines are skipped inside the header block; the
     first other line ends it (a path mentioned in the body is never matched).
+    Fail-closed exception: a line that starts with a header keyword + colon
+    (`impl:`/`test:`/`docs:`/`edit:`/`accept:`/`reset:`, any case) but does
+    not match the strict form of that kind is a MALFORMED declaration, not a
+    body line — ValueError (rc=13), never a silent header end.
 
     G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): `accept: <path>` declares a
     TRUSTED acceptance check — an independent test the agent must not author.
@@ -165,6 +177,14 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
         if _RESET_NONE_RE.match(stripped):
             reset_none = True
             continue
+        if _KEYWORD_PREFIX_RE.match(stripped):
+            raise ValueError(
+                f"malformed ticket header line {stripped!r}: a line starting "
+                f"with a header keyword (impl:/test:/docs:/edit:/accept:/reset:) "
+                f"must match its strict form exactly — silently ending the "
+                f"header here would drop the declaration and launch the "
+                f"machine with a wrong manifest (rc=13)"
+            )
         break
     declared: list[str] = []
     edit_paths: list[str] = []

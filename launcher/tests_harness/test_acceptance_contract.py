@@ -12,16 +12,22 @@ Pinned here:
   2  invalid contracts are refused at parse (ValueError -> rc=13):
      outside tests/, absent file (the agent cannot author its own oracle),
      the same path also declared as a deliverable, `accept: none` +
-     `accept: <path>` contradiction, bare zone / traversal
+     `accept: <path>` contradiction, bare zone / traversal;
+     malformed header lines (keyword + colon that fails the strict form:
+     trailing comment, wrong case, space before colon, `reset: maybe`) are
+     refused, never silently treated as the body (reviewer finding A)
   3  `accept: none` alone -> mode "none"; no accept line -> "undeclared"
      (backward compatibility, pinned again in test_session_plan.py)
   4  immutability: a MODIFIED/DELETED trusted test is a contract-lock
      violation — accept gets NO exemption (it is not in declared_paths)
   5  prepare_workspace does not quarantine an accept path
   6  verify_gate: an accept path the project runner does not list is an
-     "(acceptance)" failure — the hole W12 leaves open (a tests/ file with
-     a non-registry name is silently unrun); a listed one is not flagged;
-     the gate fires in every branch, including the no-tests branch
+     "(acceptance)" failure (ACCEPTANCE NOT REGISTERED) — the hole W12
+     leaves open (a tests/ file with a non-registry name is silently
+     unrun); a listed one is not flagged; the gate fires in every branch,
+     including the no-tests branch; a REGISTERED accept test that FAILS
+     fails the verdict via the ordinary suite path — "(suite)" failure,
+     no second "(acceptance)" failure (reviewer finding C)
   7  fix-prompt: an acceptance failure gets the "you CANNOT fix this,
      resolved host-side" rules, with priority over the list-fail block
      (whose "delete the unclaimed file" advice is wrong for a protected
@@ -115,6 +121,42 @@ def test_accept_bare_zone_or_traversal_is_refused(repo):
         assert "invalid accept path" in str(exc.value), rel
 
 
+def test_malformed_header_lines_are_refused_not_ignored(repo):
+    # Reviewer finding A (2026-10-14): a line that LOOKS like a declaration
+    # (keyword + colon) but fails the strict form must NOT silently end the
+    # header — the dropped declaration would launch the machine with a wrong
+    # manifest. Fail-closed: ValueError (rc=13 upstream).
+    write(repo / "tests" / "acc_test.py", PY_PASS)
+    bad = [
+        "accept: tests/acc_test.py  # trailing comment",
+        "Accept: tests/acc_test.py",            # wrong case
+        "accept : tests/acc_test.py",           # space before colon
+        "accept: tests/acc_test.py extra",      # trailing junk
+        "impl: src/mod.py  # c",                # any kind, same rule
+        "TEST: tests/new_test.py",
+        "reset: maybe",                         # reset: accepts only `none`
+    ]
+    for text in bad:
+        with pytest.raises(ValueError) as exc:
+            ticket.parse_ticket_header(_cfg(repo), text + "\n")
+        assert "malformed ticket header line" in str(exc.value), text
+
+
+def test_body_prose_nearest_keywords_still_ends_the_header(repo):
+    # control for the fail-closed rule: only `keyword:` prefixes are caught.
+    # Prose that merely contains a keyword word, or a colon after other
+    # words, is body — it ends the header, no error.
+    declared, _, _, accept_paths, mode = ticket.parse_ticket_header(
+        _cfg(repo),
+        "impl: src/mod.py\n"
+        "\n"
+        "test the function carefully: see below\n"
+        "docs about src/mod.py: none\n"
+        "implementation: src/other.py\n")
+    assert declared == ["src/mod.py"]
+    assert accept_paths == [] and mode == "undeclared"
+
+
 # --- 3: explicit absence and backward compatibility ------------------------------
 
 def test_accept_none_declares_absence(repo):
@@ -188,20 +230,26 @@ def test_accept_path_is_not_quarantined(repo, tmp_path):
 
 # --- 6: verify_gate — the single enforcement point -------------------------------
 
-def _stub_repo(base: Path, name: str, list_stdout: str, list_rc: int) -> Path:
+def _stub_repo(base: Path, name: str, list_stdout: str, list_rc: int,
+               test_rc: int = 0, test_stdout: str = "") -> Path:
     """A tmp repo whose stub run.sh `list` cats list.out and exits list_rc;
-    `test --all` always exits 0 (the suite outcome is not what is pinned)."""
+    `test --all` cats test.out and exits test_rc (default 0 — the suite
+    outcome is pinned only by the tests that pass test_rc explicitly)."""
     r = base / name
     (r / "scripts").mkdir(parents=True)
     (r / "tests").mkdir()
     (r / "list.out").write_text(list_stdout, encoding="utf-8")
+    (r / "test.out").write_text(test_stdout, encoding="utf-8")
     (r / "scripts" / "run.sh").write_text(
         "#!/usr/bin/env bash\n"
         'if [[ "$1" == "list" ]]; then\n'
         "  cat list.out\n"
         f"  exit {list_rc}\n"
         'fi\n'
-        'if [[ "$1" == "test" ]]; then exit 0; fi\n'
+        'if [[ "$1" == "test" ]]; then\n'
+        "  cat test.out\n"
+        f"  exit {test_rc}\n"
+        'fi\n'
         "exit 0\n",
         encoding="utf-8")
     return r
@@ -217,7 +265,7 @@ def test_verify_gate_flags_unclaimed_acceptance_check(tmp_path):
     assert ok is False and env_fail is False
     acc = [msg for name, msg in failures if name == "(acceptance)"]
     assert len(acc) == 1
-    assert "ACCEPTANCE NOT RUN" in acc[0] and "tests/accept_check.py" in acc[0]
+    assert "ACCEPTANCE NOT REGISTERED" in acc[0] and "tests/accept_check.py" in acc[0]
 
 
 def test_verify_gate_passes_claimed_acceptance_check(tmp_path):
@@ -248,11 +296,32 @@ def test_verify_gate_without_accept_contract_is_unchanged(tmp_path):
     assert ok is True and failures == []
 
 
+def test_registered_acceptance_check_that_fails_is_a_suite_defect(tmp_path):
+    # Reviewer finding C (2026-10-14): the gate checks REGISTRATION only — a
+    # registered accept test that FAILS must fail the verdict through the
+    # ordinary suite path (rc=1 -> "(suite)" failure). The agent cannot
+    # green the verdict by ignoring the trusted check: a failing acceptance
+    # check is a DEFECT (class B), not a silent pass.
+    r = _stub_repo(tmp_path, "accfail",
+                   "tests/claimed_test.py\ntests/accept_check.py\n", 0,
+                   test_rc=1,
+                   test_stdout="=== tests/accept_check.py ===\n"
+                              "assertion failed in accept_check\n")
+    ok, failures, env_fail = verify.verify_gate(
+        _cfg(r), _plan(("tests/accept_check.py",), "provided"))
+    assert ok is False and env_fail is False
+    suites = [msg for name, msg in failures if name == "(suite)"]
+    assert len(suites) == 1 and "accept_check" in suites[0]
+    # the registration gate stays silent — the failure is the suite's, not
+    # a second (acceptance) failure
+    assert not [n for n, _ in failures if n == "(acceptance)"]
+
+
 # --- 7: fix-prompt — the machine cannot fix an acceptance defect -----------------
 
 def test_fix_prompt_acceptance_rules_host_side():
     rules = verify._fix_prompt_rules(
-        [("(acceptance)", "ACCEPTANCE NOT RUN: tests/accept_check.py ...")])
+        [("(acceptance)", "ACCEPTANCE NOT REGISTERED: tests/accept_check.py ...")])
     assert "acceptance check" in rules and "CANNOT fix this" in rules
     assert "host-side" in rules
 
@@ -261,6 +330,6 @@ def test_fix_prompt_acceptance_outranks_list_fail():
     # the list-fail advice ("delete the unclaimed file") is wrong for a
     # protected trusted file — acceptance wins
     rules = verify._fix_prompt_rules(
-        [("(acceptance)", "ACCEPTANCE NOT RUN: ..."),
+        [("(acceptance)", "ACCEPTANCE NOT REGISTERED: ..."),
          ("(list)", "run.sh: unregistered test-like file(s)")])
     assert "acceptance check" in rules and "Delete the unclaimed file" not in rules

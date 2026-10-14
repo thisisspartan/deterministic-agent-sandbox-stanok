@@ -33,7 +33,7 @@ class SessionPlan:
     # acceptance checks, NOT deliverables: deliberately NOT in declared_paths
     # (no quarantine, no contract-lock exemption — they stay protected via
     # _protected_files/contract lock). Consumed only by verify_gate (the
-    # ACCEPTANCE NOT RUN gate) and recorded in summary.json via the
+    # ACCEPTANCE NOT REGISTERED gate) and recorded in summary.json via the
     # acceptance mode. accept_mode: provided | none | undeclared.
     accept_paths:    tuple[str, ...] = ()
     accept_mode:     str = "undeclared"

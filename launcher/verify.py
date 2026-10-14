@@ -119,14 +119,16 @@ def verify_gate(cfg, plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], 
     # silently unrun — W12 only flags test-like basenames, so this is the
     # hole the acceptance gate closes. The file itself is immutable (it is
     # pre-existing tests/** -> contract lock) and executed by the same
-    # `test --all` call once the registry claims it; the gate only verifies
-    # the fact of execution, never the name.
+    # `test --all` call once the registry claims it; the gate checks the
+    # REGISTRATION (presence in `list`), never the outcome — a registered
+    # acceptance check that FAILS fails the ordinary suite path.
     for rel in plan.accept_paths:
         if rel not in tests:
             failures.append(("(acceptance)",
-                             f"ACCEPTANCE NOT RUN: {rel} is declared as an "
-                             f"acceptance check but the project runner does "
-                             f"not list it — it would never be executed"))
+                             f"ACCEPTANCE NOT REGISTERED: {rel} is declared "
+                             f"as an acceptance check but the project runner's "
+                             f"registry does not claim it (it is absent from "
+                             f"`run.sh list`) — it would never be executed"))
     if not tests:
         if lp.returncode != 0:
             # `list` failed and printed no tests (no tests/ dir, or only
