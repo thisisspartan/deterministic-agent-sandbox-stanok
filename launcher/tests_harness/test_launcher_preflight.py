@@ -21,6 +21,11 @@ launcher/session.py, launcher/summary.py:
      preflight_server derived from live /props -> None (no hardcoded 128000);
      build_agent_env passes CLAUDE_CODE_AUTO_COMPACT_WINDOW through only when
      the operator exported it (settings.env applies otherwise)
+  10 preflight_server: model identity pinning (CC-266, SPEC-MODEL-PIN-PREFLIGHT):
+     cfg.model must case-insensitively equal one of the server identities in
+     /props (model_alias / model_path_aliases elements / model_path basename
+     without extension); no identity in /props -> fail-closed; mismatch ->
+     rc=20 log "server model ... != configured STANOK_MODEL ..."
 
 CC-106: the former test 8 (full path digest mismatch -> process rc=25) is
 gone with the launch-path preflight — the digest check now lives in doctor
@@ -36,7 +41,7 @@ from pathlib import Path
 import pytest
 
 from launcher import gates, session, summary, verify
-from launcher.config import Config, RunState
+from launcher.config import Config, DEFAULT_MODEL, RunState
 from launcher.plan import SessionPlan
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -218,10 +223,15 @@ def test_verifier_hook_call_logged(tmp_path, capsys):
 
 # --- 8: preflight_server — required-window derivation -------------------------
 
-def _props(n_ctx):
+def _props(n_ctx, model_alias=DEFAULT_MODEL, **extra):
     if n_ctx is None:
-        return {"default_generation_settings": {}}
-    return {"default_generation_settings": {"n_ctx": n_ctx}}
+        props = {"default_generation_settings": {}}
+    else:
+        props = {"default_generation_settings": {"n_ctx": n_ctx}}
+    if model_alias is not None:
+        props["model_alias"] = model_alias
+    props.update(extra)
+    return props
 
 
 def _clear_window_env(monkeypatch):
@@ -286,6 +296,58 @@ def test_preflight_server_skip_env(monkeypatch):
         raise AssertionError("must not fetch props when the check is skipped")
 
     monkeypatch.setattr(gates, "_fetch_server_props", _boom)
+    assert gates.preflight_server(Config()) is True
+
+
+# --- 8b: preflight_server — model identity pinning (CC-266) -------------------
+
+def test_preflight_server_model_alias_match(monkeypatch, capsys):
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(gates, "_fetch_server_props",
+                       lambda cfg: _props(125184, model_alias=DEFAULT_MODEL))
+    assert gates.preflight_server(Config()) is True
+
+
+def test_preflight_server_model_alias_case_insensitive(monkeypatch):
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(gates, "_fetch_server_props",
+                       lambda cfg: _props(125184, model_alias=DEFAULT_MODEL.upper()))
+    assert gates.preflight_server(Config()) is True
+
+
+def test_preflight_server_model_mismatch_fails(monkeypatch, capsys):
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(gates, "_fetch_server_props",
+                       lambda cfg: _props(125184, model_alias="some-other-model"))
+    assert gates.preflight_server(Config()) is False
+    out = capsys.readouterr().out
+    assert "server model" in out
+    assert "!= configured STANOK_MODEL" in out
+
+
+def test_preflight_server_no_model_identity_fails(monkeypatch, capsys):
+    # Fail-closed: a server that does not say what it serves is not trusted.
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(gates, "_fetch_server_props",
+                       lambda cfg: _props(125184, model_alias=None))
+    assert gates.preflight_server(Config()) is False
+    assert "no model identity" in capsys.readouterr().out
+
+
+def test_preflight_server_model_path_aliases_match(monkeypatch):
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: _props(
+        125184, model_alias=None,
+        model_path_aliases=["other-alias", DEFAULT_MODEL]))
+    assert gates.preflight_server(Config()) is True
+
+
+def test_preflight_server_model_path_basename_match(monkeypatch):
+    # model_path basename without extension counts as an identity.
+    _clear_window_env(monkeypatch)
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: _props(
+        125184, model_alias=None,
+        model_path=f"/models/dir/{DEFAULT_MODEL}.gguf"))
     assert gates.preflight_server(Config()) is True
 
 

@@ -311,6 +311,25 @@ def _fetch_server_props(cfg) -> dict | None:
         return None
 
 
+def _server_model_identities(props) -> list[str]:
+    """Model identities the server declares in /props (CC-266, SPEC-MODEL-PIN-PREFLIGHT):
+    model_alias, elements of model_path_aliases, basename of model_path without
+    its extension. Non-string/empty entries are ignored."""
+    ids: list[str] = []
+    alias = props.get("model_alias")
+    if isinstance(alias, str) and alias.strip():
+        ids.append(alias.strip())
+    aliases = props.get("model_path_aliases")
+    if isinstance(aliases, list):
+        ids.extend(a.strip() for a in aliases if isinstance(a, str) and a.strip())
+    path = props.get("model_path")
+    if isinstance(path, str) and path.strip():
+        stem, _ext = os.path.splitext(os.path.basename(path.strip()))
+        if stem:
+            ids.append(stem)
+    return ids
+
+
 def preflight_server(cfg) -> bool:
     global _DERIVED_REQUIRED_WINDOW
     if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
@@ -322,6 +341,19 @@ def preflight_server(cfg) -> bool:
     n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
     if not isinstance(n_ctx, int) or n_ctx <= 0:
         log(f"PREFLIGHT: unparseable n_ctx in /props (fail-closed) (rc=20)")
+        return False
+
+    # CC-266: the server must say which model it serves, and it must be the
+    # configured one — a run against a different server/model silently passed
+    # before (only n_ctx was checked). Fail-closed, rc=20 (no new code).
+    identities = _server_model_identities(props)
+    if not identities:
+        log("PREFLIGHT: /props exposes no model identity (fail-closed) (rc=20)")
+        return False
+    configured = (cfg.model or "").strip()
+    if not any(ident.lower() == configured.lower() for ident in identities):
+        log(f"PREFLIGHT: server model {identities[0]!r} != configured STANOK_MODEL "
+            f"{configured!r} (rc=20)")
         return False
 
     required = _required_context_window()
