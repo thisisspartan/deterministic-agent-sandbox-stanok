@@ -19,7 +19,8 @@ pluggable git submodule for any project.
   the tree reaches the Pod as a transport copy, no host bind-mounts).
   The baked CLI is the pinned PATCHED build (`CLI_JS_SHA` in `setup.sh`): it
   reads `STANOK_TEMP` as the request temperature — the patch contract is
-  documented in the parent repo's `patches/PATCHES.md`).
+  documented in the parent repo's `patches/PATCHES.md` (private checkout —
+  the public clone keeps the `patches/` placeholder only)).
   k8s is the only runtime (CC-258); an explicit `STANOK_RUNTIME=docker` is
   refused with ENV-FAIL (rc=16).
   Whatever runtime the project's `scripts/run.sh` uses
