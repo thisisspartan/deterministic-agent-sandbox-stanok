@@ -95,6 +95,21 @@ def test_settings_valid_json():
     json.load(open(REPO_ROOT / ".claude" / "settings.stanok.json"))
 
 
+def test_settings_deny_surface():
+    # Operator decision 2026-10-15 (audit line "subagent ban is only absence
+    # from allow"): the ban is made EXPLICIT — "Agent" is denied; protected
+    # dirs are denied for ALL write tools (the old set had Read/Edit only:
+    # deny Edit(path) does NOT block Write(path)). The tool surface itself is
+    # already restricted by session._agent_options tools=cfg.curated_tools
+    # (R3) — this deny is the explicit defense-in-depth layer.
+    data = json.load(open(REPO_ROOT / ".claude" / "settings.stanok.json"))
+    deny = set(data["permissions"]["deny"])
+    assert "Agent" in deny
+    for d in (".git", "hooks", "launcher", ".claude", "evidence"):
+        for tool in ("Read", "Edit", "Write"):
+            assert f"{tool}({d}/**)" in deny, f"missing deny: {tool}({d}/**)"
+
+
 def test_verifier_hook_in_process():
     # The hook is launcher code (session.py since the PLAN-HYGIENE split), not
     # an external hook script — pinned at its real home.

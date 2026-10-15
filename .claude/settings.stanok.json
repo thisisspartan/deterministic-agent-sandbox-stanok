@@ -37,6 +37,7 @@
       "Bash"
     ],
     "deny": [
+      "Agent",
       "Read(.git/**)",
       "Read(hooks/**)",
       "Read(launcher/**)",
@@ -46,7 +47,12 @@
       "Edit(hooks/**)",
       "Edit(launcher/**)",
       "Edit(.claude/**)",
-      "Edit(evidence/**)"
+      "Edit(evidence/**)",
+      "Write(.git/**)",
+      "Write(hooks/**)",
+      "Write(launcher/**)",
+      "Write(.claude/**)",
+      "Write(evidence/**)"
     ]
   }
 }
