@@ -78,6 +78,16 @@ K8S_DIR = os.path.join(LAUNCHER_DIR, "..", "k8s")
 # Fail-closed BEFORE any kubectl call.
 TRANSPORT_MAX_B64 = 800_000
 
+# C3 (review 2026-10-17): the fresh Pod's own `git apply` failure must exit
+# with a code DISJOINT from every run.sh/runner code (run.sh header:
+# 0,1,2,3,4,5,6,7,124; pytest 0-5, node --test 0/1, jq 0/5) so the host can
+# classify it as an infrastructure defect instead of a test failure. The host
+# already applied the identical verified bytes to the scratch tree — a Pod that
+# cannot apply the same patch to the same tree is a Pod anomaly, not a defect.
+# Rendered into fresh-job.yaml.tmpl via {{APPLY_FAIL_RC}} (single source, same
+# convention as {{DEADLINE}}).
+FRESH_APPLY_FAIL_RC = 20
+
 
 # ==================================================================================
 # Pure helpers (testable without a cluster)
@@ -680,6 +690,7 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
             "IMAGE": image_ref, "NAMESPACE": ns,
             "CM_TREE": cm_tree, "CM_PATCH": cm_patch, "DEADLINE": str(deadline),
             "RUNTIME_CLASS": _runtime_class(),
+            "APPLY_FAIL_RC": str(FRESH_APPLY_FAIL_RC),
         }))
         created.append(("job", fresh_name))
     except RuntimeError as e:
@@ -708,7 +719,22 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
     cause = _pod_infra_cause(fresh_pod, ns)
     if cause:
         return (1, f"EXEC_ERROR: fresh Pod {cause} — infrastructure defect")
+    # A1 (review 2026-10-17): symmetry with the worker path — a fresh Job
+    # killed by its own activeDeadlineSeconds is an infrastructure defect
+    # (the caller maps EXEC_ERROR to rc=16), not a FRESH-FAIL that burns
+    # the ticket's 3 retries. The Pod side shows only a bare SIGKILL; the
+    # Job-level condition is the honest signal.
+    job_cause = _job_infra_cause(fresh_name, ns)
+    if job_cause:
+        return (1, f"EXEC_ERROR: fresh Job {job_cause} — infrastructure defect")
     exit_rc, tail = _job_rc_and_tail(fresh_name, ns)
+    # C3 (review 2026-10-17): the Pod-side apply guard exits with
+    # FRESH_APPLY_FAIL_RC before any test runs. The host already applied the
+    # identical verified bytes to the scratch tree — the same patch failing
+    # on the same tree is a Pod anomaly (infrastructure), not a test failure.
+    if exit_rc == FRESH_APPLY_FAIL_RC:
+        return (1, f"EXEC_ERROR: fresh Job git apply of changes.patch failed "
+                   f"(exit {FRESH_APPLY_FAIL_RC}) — infrastructure defect")
     if not tail.strip():
         tail = f"the fresh Job did not complete (exit {exit_rc})"
     return (exit_rc, verify._tail_output(cfg, tail))
@@ -1004,13 +1030,24 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     # must not start for an unsatisfiable contract.
     try:
         with open(args.ticket_path, encoding="utf-8") as f:
-            declared, edit_paths, _, accept_paths, accept_mode = \
+            declared, edit_paths, reset_none, accept_paths, accept_mode = \
                 parse_ticket_header(cfg, f.read())
         assert_create_paths_are_new(cfg, declared, edit_paths)
         assert_edit_paths_are_not_protected(cfg, edit_paths)
     except (OSError, ValueError) as e:
         return _early_abort(cfg, marker, label, args.ticket, ExitCode.TICKET,
                             f"ERROR: ticket parse error: {e}")
+    # B5 (review 2026-10-17): the k8s path self-validates the ticket
+    # contract — the cli.cmd_run gate is not assumed (host_launch_k8s is a
+    # callable boundary in its own right). Same fail-closed rule as the cli
+    # gate: an empty-declared ticket is only valid with an explicit
+    # `reset: none`.
+    if not declared and not reset_none:
+        return _early_abort(
+            cfg, marker, label, args.ticket, ExitCode.TICKET,
+            "ERROR: ticket declares no `impl:`/`test:`/`docs:`/`edit:` "
+            "line and no `reset: none` — the ticket-scoped invariant "
+            "cannot be enforced (fail-closed)")
 
     # Unified launch preflight (operator spec 2026-10-12; CC-232 subsumed):
     # disk, image staleness, Opik reachability, cluster health + manifest
@@ -1353,16 +1390,35 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             # Identity re-verified a third time, immediately before the live
             # apply (Package 1): the bytes that land on the live tree must be
             # the bytes the verdict was computed against — fail closed.
+            # A5 (review 2026-10-17): both failure branches here were WARN —
+            # the run still published rc=0/PASS with the patch UNAPPLIED. A
+            # claimed PASS whose patch never landed is not a PASS: the verdict
+            # is downgraded to rc=16 ENV-FAIL (the apply/identity machinery
+            # failed, not the ticket — the 3 ticket retries are not burned),
+            # the published summary is overwritten via write_env_fail_summary
+            # (same pattern as the fresh_infra_error branch above), and the
+            # live tree stays exactly as the run started: git apply is
+            # atomic, and the identity branch applied nothing.
             if not patch_identity_ok(patch_file, patch_sha):
-                log(f"WARN: final PASS but patch identity mismatch before "
+                log(f"ERROR: final PASS but patch identity mismatch before "
                     f"live apply (expected {patch_sha}) — apply SKIPPED")
+                rc = int(ExitCode.ENV_FAIL)
+                write_env_fail_summary(
+                    cfg, label,
+                    f"final PASS but patch identity mismatch before live "
+                    f"apply (expected {patch_sha}) — patch not applied")
             else:
                 r = subprocess.run(["git", "apply", patch_file],
                                    cwd=cfg.repo_root,
                                    capture_output=True, text=True)
                 if r.returncode != 0:
-                    log(f"WARN: final PASS but git apply on the live tree "
+                    log(f"ERROR: final PASS but git apply on the live tree "
                         f"failed (rc={r.returncode}): {r.stderr.strip()}")
+                    rc = int(ExitCode.ENV_FAIL)
+                    write_env_fail_summary(
+                        cfg, label,
+                        f"final PASS but git apply on the live tree failed "
+                        f"(rc={r.returncode}): {r.stderr.strip()}")
         return rc
     except KeyboardInterrupt:
         return run_state.interrupted_rc or 130

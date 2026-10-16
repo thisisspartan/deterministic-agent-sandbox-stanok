@@ -23,7 +23,9 @@ checks (no YAML parser in the image — the checks are text invariants):
      ephemeral-storage requests/limits NOT equal to the volume size
      (the limit counts writable layer + emptyDir + logs together)
   3  fresh-job.yaml.tmpl: verifier only (run.sh list + test --all), the
-     patch applied, NO model address (deny-all Pod), the same disk bound
+     patch applied behind an explicit guard — a failed git apply exits with
+     {{APPLY_FAIL_RC}} BEFORE any test runs (C3, review 2026-10-17), NO
+     model address (deny-all Pod), the same disk bound
   4  CC-229 (SPEC-READONLY-ROOT-2026-10-10): readOnlyRootFilesystem: true
      in BOTH job templates (all Pod writes already target the /stanok-work
      emptyDir — HOME/TMPDIR re-redirected by pod_runner.py)
@@ -200,6 +202,30 @@ def test_fresh_job_verifier_only():
     assert "test --all" in y
     assert "changes.patch" in y
     assert "192.168.8.131" not in y  # deny-all Pod: no model endpoint
+
+
+def test_fresh_job_apply_guard_exits_before_tests():
+    # C3 (review 2026-10-17): the Pod's own git apply must not fail silently
+    # into the test run — a result computed on an UNPATCHED tree must never
+    # be reported as a test result. The guard exits with {{APPLY_FAIL_RC}}
+    # (rendered from k8s.py FRESH_APPLY_FAIL_RC) before run.sh is invoked.
+    y = _read("fresh-job.yaml.tmpl")
+    assert "git apply /stanok/patch/changes.patch || {" in y
+    assert "exit {{APPLY_FAIL_RC}}" in y
+    # ordering: the guard precedes the run.sh pair (the command itself, not
+    # the phrase — it also appears in the template's header comment)
+    assert y.index("exit {{APPLY_FAIL_RC}}") < y.index("bash scripts/run.sh list")
+
+
+def test_k8s_renders_apply_fail_rc_in_fresh_job():
+    # Wiring: the fresh render dict passes APPLY_FAIL_RC from the single
+    # source constant; the worker Job applies no patch, so exactly one. The
+    # value 20 is pinned deliberately (disjoint from the run.sh rc table and
+    # every runner code — asserted in test_fresh_apply_guard.py).
+    src = (Path(__file__).resolve().parents[1] / "k8s.py").read_text(
+        encoding="utf-8")
+    assert src.count('"APPLY_FAIL_RC": str(FRESH_APPLY_FAIL_RC),') == 1
+    assert "FRESH_APPLY_FAIL_RC = 20" in src
 
 
 # --- Package 1 (operator spec 2026-10-10): versioned names + disk bound ---

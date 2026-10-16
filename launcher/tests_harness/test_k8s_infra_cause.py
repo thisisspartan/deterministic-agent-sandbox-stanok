@@ -27,6 +27,11 @@ Tests (synthetic Pod JSON fixtures; no test reaches a real cluster):
      a reason keeps the 'missing' path (rc=17, nothing published)
   5  wiring: fresh Pod OOMKilled through the REAL _fresh_job in the mocked
      cluster cycle -> rc=16 ENV-FAIL, not FRESH-FAIL
+  6  A1 (review 2026-10-17): the fresh path reads the Job-level
+     DeadlineExceeded too (symmetry with the worker path) -> EXEC_ERROR ->
+     rc=16, unit and end-to-end
+  7  C3 host side: a fresh Job exiting with FRESH_APPLY_FAIL_RC (the Pod's
+     own git apply failed before any test ran) -> EXEC_ERROR, not a tail
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_infra_cause.py -q
 """
@@ -153,7 +158,7 @@ def test_job_infra_cause_fail_soft_is_none(monkeypatch):
 
 # --- 2: _fresh_job — infra cause -> EXEC_ERROR; normal failure unchanged ---------
 
-def _fresh_env(tmp_path, monkeypatch, pod_json, job_rc_tail=None):
+def _fresh_env(tmp_path, monkeypatch, pod_json, job_rc_tail=None, job_json=None):
     cfg = Config(repo_root=str(tmp_path), log_dir=str(tmp_path / "logs"))
     patch_file = tmp_path / "changes.patch"
     patch_file.write_text("diff --git a/src/x.py b/src/x.py\n", encoding="utf-8")
@@ -164,8 +169,12 @@ def _fresh_env(tmp_path, monkeypatch, pod_json, job_rc_tail=None):
                         lambda text: calls.append(("manifest",)))
     monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "failed")
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(
-        0, json.dumps(pod_json)))
+
+    def fake_kubectl(*a, **k):
+        if a[:2] == ("get", "job") and job_json is not None:
+            return _FakeCompleted(0, json.dumps(job_json))
+        return _FakeCompleted(0, json.dumps(pod_json))
+    monkeypatch.setattr(k8s, "_kubectl", fake_kubectl)
     if job_rc_tail is not None:
         monkeypatch.setattr(k8s, "_job_rc_and_tail", lambda *a, **k: job_rc_tail)
     return cfg, patch_file, calls
@@ -204,6 +213,37 @@ def test_fresh_normal_failure_path_unchanged(tmp_path, monkeypatch):
     assert rc == 1
     assert not tail.startswith("EXEC_ERROR")
     assert "FAILED tests/t_test.py" in tail
+
+
+def test_fresh_job_deadline_returns_exec_error(tmp_path, monkeypatch):
+    # A1 (review 2026-10-17): the fresh Job was killed by its own
+    # activeDeadlineSeconds — the Pod shows a bare 137 (_pod_infra_cause
+    # refuses to guess), the Job condition says DeadlineExceeded. The worker
+    # path already classifies this as infrastructure; the fresh path must
+    # too: EXEC_ERROR (the caller maps to rc=16), not a FRESH-FAIL burning
+    # the ticket's 3 retries on an infrastructure defect.
+    cfg, patch_file, _ = _fresh_env(tmp_path, monkeypatch, DEADLINE_POD,
+                                    job_json=DEADLINE_JOB)
+    rc, tail = _call_fresh(cfg, patch_file)
+    assert rc == 1
+    assert tail.startswith("EXEC_ERROR:")
+    assert "DeadlineExceeded" in tail
+
+
+def test_fresh_apply_failure_maps_to_exec_error(tmp_path, monkeypatch):
+    # C3 host side: the Pod-side apply guard (fresh-job.yaml.tmpl) exits
+    # with FRESH_APPLY_FAIL_RC before any test ran. The host already applied
+    # the identical verified bytes to the scratch tree — the same patch
+    # failing on the same tree is a Pod anomaly (infrastructure, rc=16),
+    # never a test result.
+    cfg, patch_file, _ = _fresh_env(
+        tmp_path, monkeypatch, TESTFAIL_POD,
+        job_rc_tail=(k8s.FRESH_APPLY_FAIL_RC,
+                     "FRESH: git apply of changes.patch failed (rc=1)"))
+    rc, tail = _call_fresh(cfg, patch_file)
+    assert rc == 1
+    assert tail.startswith("EXEC_ERROR:")
+    assert "git apply" in tail
 
 
 # --- 3: the cm_patch transport guard (symmetry with the tree guard) --------------
@@ -260,7 +300,9 @@ def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
     against the mocked cluster (worker Job completes, fresh Job fails)."""
     repo, cfg = _repo(tmp_path)
     ticket = tmp_path / "ticket.md"
-    ticket.write_text("# scenario\n\nno declared deliverables\n", encoding="utf-8")
+    # B5 (review 2026-10-17): host_launch_k8s now self-validates the ticket
+    # contract — an empty-declared ticket is only valid with `reset: none`.
+    ticket.write_text("# scenario\n\nreset: none\n", encoding="utf-8")
     args = argparse.Namespace(label="lbl", ticket="ticket.md",
                              ticket_path=str(ticket), local_retries=0, extra=[])
     calls = []
@@ -375,3 +417,22 @@ def test_fresh_pod_oom_maps_to_env_fail(tmp_path, monkeypatch):
     failures = _published_failures(repo)
     assert any("fresh check unavailable" in x for x in failures)
     assert any("OOMKilled" in x for x in failures)
+
+
+def test_fresh_job_deadline_maps_to_env_fail(tmp_path, monkeypatch):
+    # A1 (review 2026-10-17) end-to-end: the worker payload is clean, the
+    # fresh Job was killed by its own activeDeadlineSeconds (Pod: bare 137,
+    # Job condition: DeadlineExceeded) -> rc=16 ENV-FAIL "fresh check
+    # unavailable" with the cause named — not a FRESH-FAIL burning the
+    # ticket's 3 retries.
+    repo, cfg, args, calls = _scenario(tmp_path, monkeypatch, real_fresh=True,
+                                       pod_json=DEADLINE_POD,
+                                       job_json=DEADLINE_JOB)
+    rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
+    assert rc == 16
+    dst = _published(repo)
+    assert dst["rc"] == 16
+    assert dst["probe_result"] == "ENV-FAIL"
+    failures = _published_failures(repo)
+    assert any("fresh check unavailable" in x for x in failures)
+    assert any("DeadlineExceeded" in x for x in failures)

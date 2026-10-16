@@ -54,8 +54,16 @@ spec:
               mkdir -p /stanok-work/work /stanok-work/home /stanok-work/tmp
               base64 -d /stanok/transport/tree.tar.gz.b64 | tar -xz -C /stanok-work/work
               cd /stanok-work/work
+              # C3 (review 2026-10-17): an apply failure must exit BEFORE any
+              # test runs, with a code disjoint from every run.sh/runner code
+              # ({{APPLY_FAIL_RC}}, rendered from k8s.py FRESH_APPLY_FAIL_RC) —
+              # the host classifies it as an infrastructure defect, never a
+              # test result on an unpatched tree.
               if [ -s /stanok/patch/changes.patch ]; then
-                git apply /stanok/patch/changes.patch
+                git apply /stanok/patch/changes.patch || {
+                  echo "FRESH: git apply of changes.patch failed (rc=$?)" >&2
+                  exit {{APPLY_FAIL_RC}}
+                }
               fi
               bash scripts/run.sh list; list_rc=$?
               bash scripts/run.sh test --all; test_rc=$?

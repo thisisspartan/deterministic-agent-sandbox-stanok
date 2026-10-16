@@ -52,7 +52,15 @@ Scenarios:
     deliverable lands in the live tree (the clean-path apply);
   10 acceptance contract is host-stamped (G4): the published acceptance
     record comes from the host's parse of the ticket, not from the worker's
-    payload.
+    payload;
+  11 B5 (review 2026-10-17): the k8s path self-validates the ticket
+    contract — an empty-declared ticket without `reset: none` is refused
+    before any cluster call (rc=13 EARLY-ABORT, the cli gate's code);
+  12 A5: patch identity mismatch immediately before the live apply ->
+    rc=16 ENV-FAIL, the deliverable does NOT land (the old WARN kept
+    publishing rc=0/PASS with the patch unapplied);
+  13 A5: the live `git apply` fails -> rc=16 ENV-FAIL, the live tree keeps
+    its foreign content (same downgrade, natural failure).
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_scenarios_verdict.py -q
 """
@@ -148,14 +156,16 @@ class _FakeCompleted:
 
 def _k8s_scenario(tmp_path, monkeypatch, *, worker_summary=CLEAN_WORKER,
                   patch_text="", fresh_result=(0, ""), payload=True,
-                  ticket_text="# scenario\n\nno declared deliverables\n"):
+                  ticket_text="# scenario\n\nreset: none\n"):
     """host_launch_k8s with the cluster cycle mocked; the REAL transport,
     patch gate, scratch contract recompute, fresh gating and publish run.
 
     worker_summary / patch_text: the Pod's evidence payload; fresh_result:
     what k8s._fresh_job returns; payload=False: the Pod produced no evidence
-    block; ticket_text: the ticket manifest (default: no declared paths, so
-    every new file the patch creates is undeclared). Returns (repo, cfg,
+    block; ticket_text: the ticket manifest (default: `reset: none` — a
+    valid no-deliverable ticket with NO declared paths, so every new file
+    the patch creates is undeclared; B5 review 2026-10-17: host_launch_k8s
+    now refuses an empty-declared ticket without `reset: none`). Returns (repo, cfg,
     args, calls) — calls records the kubectl verbs and "fresh" (whether the
     fresh Job ran)."""
     repo, cfg = _repo(tmp_path)
@@ -374,8 +384,92 @@ def test_scenario_acceptance_is_host_stamped(tmp_path, monkeypatch):
     # acceptance key at all — the host stamps it from its own parse.
     repo, cfg, calls, rc = _run(
         tmp_path, monkeypatch,
-        ticket_text="# scenario\n\naccept: tests/t_test.py\n")
+        ticket_text="# scenario\n\naccept: tests/t_test.py\nreset: none\n")
     assert rc == 0
     dst = _published(repo)
     assert dst["acceptance"] == {"mode": "provided", "paths": ["tests/t_test.py"]}
     assert "fresh" in calls
+
+
+# --- 11: the k8s path self-validates the ticket contract (B5) -----------------
+
+def test_scenario_empty_declared_ticket_refused_before_cluster(tmp_path, monkeypatch):
+    # B5 (review 2026-10-17): the cli gate was not mirrored here — the k8s
+    # path accepted an empty-declared ticket with no `reset: none`, a ticket
+    # whose invariant cannot be enforced. host_launch_k8s now refuses it
+    # itself: rc=13 (ExitCode.TICKET, the same code the cli gate uses,
+    # cli.py:198-203) EARLY-ABORT published, BEFORE any cluster call (the
+    # machine never starts for an unsatisfiable contract).
+    repo, cfg, calls, rc = _run(
+        tmp_path, monkeypatch,
+        ticket_text="# scenario\n\nno declared deliverables\n")
+    assert rc == 13
+    assert calls == []  # refused before any kubectl call
+    dst = _published(repo)
+    assert dst["probe_result"] == "EARLY-ABORT"
+    assert dst["rc"] == 13
+    assert any("reset: none" in x for x in _published_failures(repo))
+
+
+# --- 12: identity mismatch before the live apply -> no published PASS (A5) ----
+
+def test_scenario_identity_mismatch_before_live_apply_downgrades(tmp_path,
+                                                                 monkeypatch):
+    # A5 (review 2026-10-17): the identity re-check immediately before the
+    # live apply failed — the old code logged a WARN and still published
+    # rc=0/PASS with the patch UNAPPLIED. A claimed PASS whose patch never
+    # landed is not a PASS: rc=16 ENV-FAIL, the published summary is
+    # overwritten, and the declared deliverable does NOT land in the live
+    # tree. patch_identity_ok runs exactly twice on the clean path (scratch
+    # gate, live-apply gate) — the stub passes the first, fails the second.
+    repo, cfg, args, calls = _k8s_scenario(
+        tmp_path, monkeypatch,
+        ticket_text="test: tests/new_test.py\nrun.sh: exists\n",
+        patch_text=_new_file_patch("tests/new_test.py",
+                                   "def test_new():\n    pass"))
+    state = {"n": 0}
+
+    def counting(path, sha):
+        state["n"] += 1
+        return state["n"] == 1
+    monkeypatch.setattr(k8s, "patch_identity_ok", counting)
+    rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
+    assert state["n"] == 2  # both gates ran (the stub targets the second)
+    assert rc == 16
+    dst = _published(repo)
+    assert dst["rc"] == 16
+    assert dst["probe_result"] == "ENV-FAIL"
+    assert any("identity mismatch" in x for x in _published_failures(repo))
+    # the patch did not land: the live tree is exactly as the run started
+    assert not (repo / "tests" / "new_test.py").exists()
+
+
+# --- 13: live git apply fails -> no published PASS (A5, natural failure) -----
+
+def test_scenario_live_apply_failure_downgrades(tmp_path, monkeypatch):
+    # A5 (review 2026-10-17), the other branch: the real `git apply` on the
+    # live tree fails. Made natural: the fresh Job's stub writes the declared
+    # file into the LIVE tree first (a foreign drift — the Pod never touches
+    # the live tree; here it stands for any), so the real apply fails on
+    # "already exists". Same downgrade: rc=16 ENV-FAIL, summary overwritten,
+    # and the live tree keeps the FOREIGN content — the patch did not land.
+    repo, cfg, args, calls = _k8s_scenario(
+        tmp_path, monkeypatch,
+        ticket_text="test: tests/new_test.py\nrun.sh: exists\n",
+        patch_text=_new_file_patch("tests/new_test.py",
+                                   "def test_new():\n    pass"))
+
+    def rogue_fresh(*a, **k):
+        calls.append("fresh")
+        (repo / "tests" / "new_test.py").write_text(
+            "# foreign content, not the patch\n", encoding="utf-8")
+        return (0, "")
+    monkeypatch.setattr(k8s, "_fresh_job", rogue_fresh)
+    rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
+    assert rc == 16
+    dst = _published(repo)
+    assert dst["rc"] == 16
+    assert dst["probe_result"] == "ENV-FAIL"
+    assert any("git apply" in x for x in _published_failures(repo))
+    assert (repo / "tests" / "new_test.py").read_text(
+        encoding="utf-8") == "# foreign content, not the patch\n"
