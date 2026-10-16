@@ -294,6 +294,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.width < 1 or args.height < 1:
         parser.error("--width and --height must be at least 1")
+    if args.frame is not None and args.frame < 0:
+        parser.error("--frame must be at least 0")
+    if args.frames is not None and args.frames < 1:
+        parser.error("--frames must be at least 1")
 
     columns, rows = shutil.get_terminal_size(FALLBACK_SIZE)
     # The flame never exceeds the terminal: a 10x5 terminal renders a 10x10
