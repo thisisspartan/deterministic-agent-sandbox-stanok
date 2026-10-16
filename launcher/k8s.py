@@ -52,6 +52,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import threading
 import tempfile
 import time
 import urllib.error
@@ -512,13 +513,113 @@ def _runtime_class() -> str:
 
 
 # ==================================================================================
+# Resource sampling (operator decision 2026-10-16): the G1 requests/limits
+# (bb5eed6) were committed as "pending measured peaks" — this closes the
+# measurement half. Read-only polling of the kubelet stats API (`kubectl get
+# --raw /api/v1/nodes/<node>/proxy/stats/summary` — the native kubelet
+# primitive, no new mechanism) while a Job runs; observed peaks are
+# host-stamped into summary.json as resource_peaks, like patch_sha256.
+# gVisor caveat (BL-4 finding): under runsc the Pod's host cgroup IS the
+# sandbox process (guest memory = host anonymous memory), so pod-level numbers
+# are host-real; per-container accounting under runsc can drift. Peaks are
+# published as OBSERVED kubelet numbers, never as truth claims; None when no
+# sample succeeded (never a 0 masquerade).
+# ==================================================================================
+SAMPLE_INTERVAL_S = 10.0
+
+
+def _node_of_pod(pod: str, ns: str):
+    r = _kubectl("get", "pod", pod, "-n", ns, "-o", "jsonpath={.spec.nodeName}")
+    node = (r.stdout or "").strip()
+    return node or None
+
+
+def _kubelet_stats(node: str) -> dict:
+    r = _kubectl_checked("get", "--raw",
+                        f"/api/v1/nodes/{node}/proxy/stats/summary")
+    return json.loads(r.stdout)
+
+
+def _peak_from_stats(stats: dict, pod: str, ns: str):
+    """Pure extraction: the Pod's typed peak record from one kubelet summary,
+    or None when the Pod is not in it."""
+    for p in stats.get("pods", []):
+        ref = p.get("podRef") or {}
+        if ref.get("name") != pod or ref.get("namespace") != ns:
+            continue
+        mem = p.get("memory") or {}
+        cpu = p.get("cpu") or {}
+        return {
+            "cpu_peak_nanocores": cpu.get("usageNanoCores"),
+            "mem_peak_usage_bytes": mem.get("usageBytes"),
+            "mem_peak_working_set_bytes": mem.get("workingSetBytes"),
+        }
+    return None
+
+
+class _ResourceSampler(threading.Thread):
+    """Samples kubelet stats for one Pod every interval until stopped, keeping
+    the observed maxima. A fetch error is counted, never fatal — the sampler
+    must never affect the run it observes."""
+
+    def __init__(self, pod: str, ns: str, interval_s: float = SAMPLE_INTERVAL_S,
+                 fetch=None):
+        super().__init__(daemon=True)
+        self.pod, self.ns, self.interval_s = pod, ns, interval_s
+        self._fetch = fetch or self._default_fetch
+        self._stop = threading.Event()
+        self.samples = 0
+        self.errors = 0
+        self._peak = None
+
+    def _default_fetch(self):
+        node = _node_of_pod(self.pod, self.ns)
+        if node is None:
+            raise RuntimeError(f"pod {self.pod}: nodeName unavailable")
+        return _kubelet_stats(node)
+
+    def run(self):
+        while not self._stop.is_set():
+            try:
+                peak = _peak_from_stats(self._fetch(), self.pod, self.ns)
+                if peak is not None:
+                    self.samples += 1
+                    self._merge(peak)
+            except Exception:
+                self.errors += 1
+            self._stop.wait(self.interval_s)
+
+    def _merge(self, peak: dict) -> None:
+        if self._peak is None:
+            self._peak = dict(peak)
+            return
+        for key in ("cpu_peak_nanocores", "mem_peak_usage_bytes",
+                    "mem_peak_working_set_bytes"):
+            cur, new = self._peak.get(key), peak.get(key)
+            if new is not None:
+                self._peak[key] = new if cur is None else max(cur, new)
+
+    def stop_and_peaks(self):
+        """Stop sampling, return the typed record (peaks + samples/errors), or
+        None when nothing was ever observed (never a 0 masquerade)."""
+        self._stop.set()
+        self.join(timeout=2 * self.interval_s + 5)
+        if self.samples == 0:
+            return None
+        out = dict(self._peak)
+        out["samples"] = self.samples
+        out["errors"] = self.errors
+        return out
+
+
+# ==================================================================================
 # The fresh check as a deny-all Job (the same `run.sh list; run.sh test
 # --all` pair as the worker, no model endpoint — the Docker-era
 # fresh_verify_argv mirror is gone with the Docker path, CC-258)
 # ==================================================================================
 def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
                patch_file: str, deadline: int, created: list,
-               image_ref: str) -> tuple:
+               image_ref: str, peaks_out: dict = None) -> tuple:
     try:
         # BL-4 (b): the patch transport guard — symmetry with the tree guard
         # (host_launch_k8s, TRANSPORT_MAX_B64): fail closed BEFORE the
@@ -542,12 +643,28 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
         created.append(("job", fresh_name))
     except RuntimeError as e:
         return (1, f"EXEC_ERROR: {e}")
-    if _wait_job_terminal(fresh_name, ns, deadline + 60) == "complete":
+    # Resource measurement (operator decision 2026-10-16): the same read-only
+    # kubelet sampling as the worker Job; peaks go into the caller's holder
+    # (host-stamped like patch_sha256). Only done when a holder is provided —
+    # without one the flow is byte-for-byte the pre-measurement one.
+    sampler = None
+    fresh_pod = None
+    if peaks_out is not None:
+        fresh_pod = _pod_of_job(fresh_name, ns, timeout_s=30)
+        if fresh_pod is not None:
+            sampler = _ResourceSampler(fresh_pod, ns)
+            sampler.start()
+    completed = _wait_job_terminal(fresh_name, ns, deadline + 60) == "complete"
+    if sampler is not None:
+        peaks_out["peaks"] = sampler.stop_and_peaks()
+    if completed:
         return (0, "")
     # BL-4 (a2): a fresh Pod killed by an infrastructure cause (cgroup OOM /
     # eviction) is EXEC_ERROR — the caller maps it to rc=16 ENV-FAIL, not a
     # FRESH-FAIL that burns the ticket's 3 retries on an infrastructure defect.
-    cause = _pod_infra_cause(_pod_of_job(fresh_name, ns, timeout_s=30), ns)
+    if fresh_pod is None:
+        fresh_pod = _pod_of_job(fresh_name, ns, timeout_s=30)
+    cause = _pod_infra_cause(fresh_pod, ns)
     if cause:
         return (1, f"EXEC_ERROR: fresh Pod {cause} — infrastructure defect")
     exit_rc, tail = _job_rc_and_tail(fresh_name, ns)
@@ -918,10 +1035,20 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 }))
             created.append(("job", job_name))
             pod = _pod_of_job(job_name, ns)
+            worker_peaks = None
+            sampler = None
             if pod is not None:
+                # Resource measurement (operator decision 2026-10-16): read-only
+                # kubelet sampling while the Job runs — it never changes the
+                # Job's behavior; a sampler failure never affects the run it
+                # observes (the sampler counts errors, never raises).
+                sampler = _ResourceSampler(pod, ns)
+                sampler.start()
                 _stream_pod_logs(pod, ns, os.path.join(live_dir, "pod-stdout.log"),
                                  deadline + 180)
             _wait_job_terminal(job_name, ns, deadline + 60)
+            if sampler is not None:
+                worker_peaks = sampler.stop_and_peaks()
         except RuntimeError as e:
             rc = int(ExitCode.ENV_FAIL)
             write_env_fail_summary(cfg, label, f"k8s orchestration error — {e}")
@@ -1056,14 +1183,33 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         # gated on the worker's claims.
         fresh_check = None
         fresh_infra_error = None
+        fresh_peaks = None
         if not contract_violations:
+            peaks_holder = {}
             fresh_rc, fresh_tail = _fresh_job(cfg, ns, fresh_name, cm_tree,
                                               cm_patch, patch_file, deadline,
-                                              created, image_ref)
+                                              created, image_ref, peaks_holder)
+            fresh_peaks = peaks_holder.get("peaks")
             if fresh_tail.startswith("EXEC_ERROR:"):
                 fresh_infra_error = fresh_tail
             else:
                 fresh_check = (fresh_rc, fresh_tail)
+
+        # Resource measurement (operator decision 2026-10-16): host-stamped
+        # like patch_sha256 — the OBSERVED kubelet peaks of this run, closing
+        # the "pending measured peaks" gap of bb5eed6. None = no sample ever
+        # succeeded (never a 0 masquerade). These are kubelet numbers, not
+        # truth claims (gVisor caveat, BL-4).
+        try:
+            with open(summary_path, encoding="utf-8") as f:
+                summary = json.load(f)
+            summary["resource_peaks"] = {"worker": worker_peaks,
+                                         "fresh": fresh_peaks}
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
+        except (OSError, json.JSONDecodeError):
+            log("WARN: resource_peaks: summary.json unreadable — field not "
+                "stamped")
 
         _publish_evidence(cfg, label, worker_rc, contract_violations,
                           fresh_check)

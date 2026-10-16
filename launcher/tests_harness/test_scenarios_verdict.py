@@ -221,6 +221,10 @@ def test_scenario_honest_pass(tmp_path, monkeypatch):
     # (it declares no accept line) -> the typed default, never the worker's
     # claim.
     assert dst.pop("acceptance") == {"mode": "undeclared", "paths": []}
+    # Resource measurement (operator 2026-10-16): host-stamped like the three
+    # above. In this mocked cluster no kubelet sample can succeed (the mocked
+    # kubectl answers nothing parseable) -> explicit None, never a 0.
+    assert dst.pop("resource_peaks") == {"worker": None, "fresh": None}
     assert dst == CLEAN_WORKER  # clean path: the host does not touch the rest
     assert "fresh" in calls
 
@@ -323,6 +327,7 @@ def test_scenario_honest_fail_not_fabricated(tmp_path, monkeypatch):
     dst.pop("patch_sha256")
     dst.pop("image_digest")
     dst.pop("acceptance")  # host stamp (G4), like the two above
+    dst.pop("resource_peaks")  # host stamp (measurement), like the three above
     assert dst == dict(HONEST_FAIL_WORKER, rc=1)  # unchanged: no fabrication
 
 
@@ -353,6 +358,7 @@ def test_scenario_declared_new_test_keeps_pass(tmp_path, monkeypatch):
     dst.pop("patch_sha256")
     dst.pop("image_digest")
     dst.pop("acceptance")  # host stamp (G4), like the two above
+    dst.pop("resource_peaks")  # host stamp (measurement), like the three above
     assert dst == CLEAN_WORKER  # no host override: the PASS stands
     assert "fresh" in calls  # the fresh check ran over an intact tree
     # the clean-path apply: the declared deliverable lands in the live tree
