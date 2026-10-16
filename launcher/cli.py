@@ -143,6 +143,14 @@ def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: i
         rc = asyncio.run(run_continuous_session(cfg, run_state, job, ticket_prompt, local_retries, plan))
     except KeyboardInterrupt:
         rc = run_state.interrupted_rc or 130
+    except (OSError, subprocess.SubprocessError) as e:
+        # B3 (review 2026-10-17): an infrastructure failure (model server
+        # unreachable, filesystem, a child process) is an ENV-FAIL (16) —
+        # _status_fields publishes ENV-FAIL and the ticket retries are not
+        # burned on it. A genuine code/contract bug stays a DEFECT (1).
+        log(f"FATAL INFRASTRUCTURE EXCEPTION: {e}")
+        job["error"] = str(e)
+        rc = int(ExitCode.ENV_FAIL)
     except Exception as e:
         log(f"FATAL EXCEPTION: {e}")
         job["error"] = str(e)
@@ -339,16 +347,40 @@ def cmd_stop(cfg, label: str) -> int:
         log(f"Failed to read the PID from the marker {marker}")
         return 1
 
-    if pid > 0:
+    if pid <= 0:
+        # B4 (review 2026-10-17): a marker without a PID — there is nothing
+        # to signal; stop must not claim a signal was sent.
+        log(f"Stop failed for {label}: the marker carries no PID")
+        return 1
+
+    # B4: classify the outcome honestly — "sent" only when SIGTERM actually
+    # reached the process; an already-gone process is reported as gone (rc 0:
+    # nothing runs); a permission denial is a failure (rc 1). The original
+    # killpg -> kill fallback is preserved.
+    outcome = "denied"
+    try:
+        os.killpg(pid, signal.SIGTERM)
+        outcome = "sent"
+    except ProcessLookupError:
+        outcome = "gone"
+    except PermissionError:
+        outcome = "denied"
+    if outcome != "sent":
         try:
-            os.killpg(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-    log(f"Stop signal sent for {label} (PID {pid})")
-    return 0
+            os.kill(pid, signal.SIGTERM)
+            outcome = "sent"
+        except ProcessLookupError:
+            outcome = "gone"
+        except PermissionError:
+            outcome = "denied"
+    if outcome == "sent":
+        log(f"Stop signal sent for {label} (PID {pid})")
+        return 0
+    if outcome == "gone":
+        log(f"Stop: {label} (PID {pid}) is already gone — no signal delivered")
+        return 0
+    log(f"Stop failed for {label}: no permission to signal PID {pid}")
+    return 1
 
 
 # ==================================================================================
@@ -696,7 +728,10 @@ def main() -> int:
             # answer: abort, no silent path fallback.
             key = os.environ.get("STANOK_LOCK_KEY")
             if not key:
-                return abort(ExitCode.DEFECT,
+                # B2 (review 2026-10-17): git not answering is an
+                # infrastructure failure, not a ticket defect — the same
+                # classification as the docker-runtime refusal below (rc=16).
+                return abort(ExitCode.ENV_FAIL,
                             "ERROR: lock key unavailable (STANOK_LOCK_KEY unset — "
                             "git rev-parse --git-common-dir failed): refusing to run "
                             "without a shared lock (D2, fail closed)")

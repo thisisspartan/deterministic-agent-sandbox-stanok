@@ -335,6 +335,7 @@ def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
                     + k8s.end_marker(FIXED_NONCE) + "\n")
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
+        return True  # A2: the new contract — a successful stream reports True
     monkeypatch.setattr(k8s, "_stream_pod_logs", fake_stream)
 
     if real_fresh:

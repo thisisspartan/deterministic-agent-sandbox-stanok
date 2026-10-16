@@ -199,6 +199,7 @@ def _k8s_scenario(tmp_path, monkeypatch, *, worker_summary=CLEAN_WORKER,
                     + k8s.end_marker(FIXED_NONCE) + "\n")
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
+        return True  # A2: the new contract — a successful stream reports True
     monkeypatch.setattr(k8s, "_stream_pod_logs", fake_stream)
     monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "complete")
     monkeypatch.setattr(k8s, "_pod_image_id", lambda pod, ns: FAKE_IMAGE)

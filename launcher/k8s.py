@@ -409,21 +409,32 @@ def _pod_image_id(pod, ns: str):
     return out
 
 
-def _stream_pod_logs(pod: str, ns: str, path: str, timeout_s: int) -> None:
+def _stream_pod_logs(pod: str, ns: str, path: str, timeout_s: int) -> bool:
     """kubectl logs -f blocks until the Pod's containers exit — the payload
-    lands in the host-side log file, never in the supervisor's context."""
+    lands in the host-side log file, never in the supervisor's context.
+
+    A2 (review 2026-10-17): the kubectl exit code is checked — a failed
+    stream is reported as a stream failure, never conflated with "the Pod
+    produced no logs"; the caller names it in the missing-payload abort."""
     with open(path, "wb") as lf:
         try:
             # CC-232: same config resolution as _kubectl — the log stream is
             # a kubectl call too (incident cc233: without it the stream died
             # on the non-readable /etc/rancher/k3s/k3s.yaml fallback).
-            subprocess.run([_kubectl_bin(), "logs", "-f", pod, "-n", ns],
-                           stdout=lf, stderr=subprocess.STDOUT,
-                           timeout=timeout_s, env=_cluster_env())
+            r = subprocess.run([_kubectl_bin(), "logs", "-f", pod, "-n", ns],
+                               stdout=lf, stderr=subprocess.STDOUT,
+                               timeout=timeout_s, env=_cluster_env())
         except subprocess.TimeoutExpired:
             log("K8S: kubectl logs -f hit the host timeout")
+            return False
         except OSError as e:
             log(f"K8S: kubectl logs failed: {e}")
+            return False
+        if r.returncode != 0:
+            log(f"K8S: kubectl logs -f exited rc={r.returncode} — log stream "
+                f"failed, {path} may be incomplete")
+            return False
+    return True
 
 
 def _job_rc_and_tail(job_name: str, ns: str) -> tuple:
@@ -1146,6 +1157,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             pod = _pod_of_job(job_name, ns)
             worker_peaks = None
             sampler = None
+            stream_failed = False
             if pod is not None:
                 # Resource measurement (operator decision 2026-10-16): read-only
                 # kubelet sampling while the Job runs — it never changes the
@@ -1153,8 +1165,9 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 # observes (the sampler counts errors, never raises).
                 sampler = _ResourceSampler(pod, ns)
                 sampler.start()
-                _stream_pod_logs(pod, ns, os.path.join(live_dir, "pod-stdout.log"),
-                                 deadline + 180)
+                stream_failed = not _stream_pod_logs(
+                    pod, ns, os.path.join(live_dir, "pod-stdout.log"),
+                    deadline + 180)
             _wait_job_terminal(job_name, ns, deadline + 60)
             if sampler is not None:
                 worker_peaks = sampler.stop_and_peaks()
@@ -1207,6 +1220,8 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 return rc
             log("K8S: no evidence payload block — run treated as aborted "
                 "(status 'missing'), no verdict published"
+                + (" (kubectl logs -f failed — pod-stdout.log incomplete)"
+                   if stream_failed else "")
                 + (f" (in-Pod session exit code was {internal})"
                    if internal else ""))
             return rc
