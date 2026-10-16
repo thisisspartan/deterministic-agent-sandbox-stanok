@@ -432,6 +432,39 @@ def _job_rc_and_tail(job_name: str, ns: str) -> tuple:
     return exit_rc, tail
 
 
+def _pod_infra_cause(pod, ns: str):
+    """BL-4 (a1/a2): classify a Pod death as an infrastructure cause.
+    The gap _wait_job_terminal leaves: Job-level conditions say only
+    'Failed', the Pod's own status says WHY. Two causes are infrastructure
+    (rc=16, the 3 ticket retries are not burned on it):
+      - containerStatuses[].state.terminated.reason == "OOMKilled" — the
+        cgroup OOM kill. Measured 2026-10-16 (two gVisor probes at worker
+        limits): kubelet reports it honestly under gVisor too — the Pod-slice
+        limit is enforced, the overshoot is swap-absorbed until the swap is
+        exhausted, then the sandbox is OOM-killed and the reason appears.
+      - status.reason == "Evicted" — kubelet eviction.
+    A bare exit 137 with NO reason is NOT OOM: the Job's
+    activeDeadlineSeconds kill is also a SIGKILL (job_deadline). Anything
+    else (a test failure) stays None — a ticket defect.
+    Fail-soft: no pod / kubectl error / unparseable JSON -> None."""
+    if not pod:
+        return None
+    r = _kubectl("get", "pod", pod, "-n", ns, "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        status = json.loads(r.stdout).get("status", {})
+    except json.JSONDecodeError:
+        return None
+    for cs in status.get("containerStatuses") or []:
+        term = (cs.get("state") or {}).get("terminated") or {}
+        if term.get("reason") == "OOMKilled":
+            return "OOMKilled"
+    if status.get("reason") == "Evicted":
+        return "Evicted"
+    return None
+
+
 def _wait_job_terminal(name: str, ns: str, timeout_s: int) -> str:
     """Poll the Job until a terminal condition: 'complete' | 'failed' | 'timeout'.
     `kubectl wait --for=condition=complete` blocks for the WHOLE timeout when the
@@ -487,6 +520,16 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
                patch_file: str, deadline: int, created: list,
                image_ref: str) -> tuple:
     try:
+        # BL-4 (b): the patch transport guard — symmetry with the tree guard
+        # (host_launch_k8s, TRANSPORT_MAX_B64): fail closed BEFORE the
+        # kubectl call. The classification is unchanged (EXEC_ERROR -> the
+        # caller's rc=16); the guard only moves the failure before any
+        # cluster call.
+        patch_size = os.path.getsize(patch_file)
+        if patch_size > TRANSPORT_MAX_B64:
+            return (1, f"EXEC_ERROR: patch transport {patch_size}B exceeds "
+                       f"the ConfigMap limit {TRANSPORT_MAX_B64}B — "
+                       "fail-closed before any kubectl call")
         _kubectl_checked("create", "configmap", cm_patch, "-n", ns,
                         f"--from-file=changes.patch={patch_file}")
         created.append(("configmap", cm_patch))
@@ -501,6 +544,12 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
         return (1, f"EXEC_ERROR: {e}")
     if _wait_job_terminal(fresh_name, ns, deadline + 60) == "complete":
         return (0, "")
+    # BL-4 (a2): a fresh Pod killed by an infrastructure cause (cgroup OOM /
+    # eviction) is EXEC_ERROR — the caller maps it to rc=16 ENV-FAIL, not a
+    # FRESH-FAIL that burns the ticket's 3 retries on an infrastructure defect.
+    cause = _pod_infra_cause(_pod_of_job(fresh_name, ns, timeout_s=30), ns)
+    if cause:
+        return (1, f"EXEC_ERROR: fresh Pod {cause} — infrastructure defect")
     exit_rc, tail = _job_rc_and_tail(fresh_name, ns)
     if not tail.strip():
         tail = f"the fresh Job did not complete (exit {exit_rc})"
@@ -889,6 +938,16 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             with open(pod_log, encoding="utf-8", errors="replace") as f:
                 payload = extract_payload(f.read(), nonce)
         if payload is None or "summary.json" not in payload:
+            cause = _pod_infra_cause(pod, ns)
+            if cause:
+                # BL-4 (a1): the Pod died of an infrastructure cause (cgroup
+                # OOM / kubelet eviction) — rc=16 ENV-FAIL, not the generic
+                # 'missing' abort: the 3 ticket retries are not burned on it.
+                log(f"K8S: worker Pod {cause} — infrastructure defect (rc=16)")
+                rc = int(ExitCode.ENV_FAIL)
+                write_env_fail_summary(cfg, label,
+                                      f"worker Pod {cause} — infrastructure defect")
+                return rc
             log("K8S: no evidence payload block — run treated as aborted "
                 "(status 'missing'), no verdict published")
             return rc
