@@ -12,6 +12,15 @@
 #   {{OPIK_BACKEND_IP}} — the Opik backend's container address on the compose
 #                         network (STANOK_OPIK_BACKEND_IP; pinned in the
 #                         compose override — see the CC-225 note below)
+#   {{NAMESPACE}}       — the effective Job namespace (STANOK_K8S_NAMESPACE,
+#                         default "default") — the SAME knob the Job templates
+#                         render (worker/fresh-job.yaml.tmpl). A policy in
+#                         another namespace does not select these Pods, so the
+#                         boundary must live where the Jobs do (external review
+#                         2026-10-16: the hardcoded default was latent-correct
+#                         only while the knob was unset). The namespace line is
+#                         semantic content: a different namespace -> a
+#                         different revision -> new object names.
 # A grep for a dotted IPv4 literal in this file must find nothing: the
 # addresses live in configuration, not in the manifest.
 #
@@ -56,7 +65,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: stanok-worker-egress-{{REVISION}}
-  namespace: default
+  namespace: {{NAMESPACE}}
 spec:
   podSelector:
     matchLabels:
@@ -90,7 +99,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: stanok-fresh-deny-all-{{REVISION}}
-  namespace: default
+  namespace: {{NAMESPACE}}
 spec:
   podSelector:
     matchLabels:

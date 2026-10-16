@@ -58,6 +58,13 @@ DEADLINE_POD = {"status": {"phase": "Failed", "containerStatuses": [
 TESTFAIL_POD = {"status": {"phase": "Failed", "containerStatuses": [
     {"name": "worker", "state": {"terminated": {"exitCode": 1,
                                                 "reason": "Error"}}}]}}
+# Job-level fixtures (deadline contract, external review 2026-10-16): the
+# Pod shows a bare 137; the Job's Failed condition carries the honest reason.
+DEADLINE_JOB = {"status": {"conditions": [
+    {"type": "Failed", "status": "True", "reason": "DeadlineExceeded",
+     "message": "Job was active longer than specified deadline"}]}}
+OTHER_FAILED_JOB = {"status": {"conditions": [
+    {"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}]}}
 
 
 class _FakeCompleted:
@@ -107,6 +114,41 @@ def test_fail_soft_is_none(monkeypatch):
     monkeypatch.setattr(k8s, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, "{}"))
     assert k8s._pod_infra_cause("pod-x", "default") is None  # no status
+
+
+# --- 1b: _job_infra_cause — the Job-level deadline signal ------------------------
+
+def _stub_job(monkeypatch, job_json, rc=0):
+    def fake(*a, **k):
+        if rc != 0:
+            return _FakeCompleted(rc, "", "jobs not found")
+        return _FakeCompleted(0, json.dumps(job_json))
+    monkeypatch.setattr(k8s, "_kubectl", fake)
+
+
+def test_job_deadline_exceeded_condition_is_classified(monkeypatch):
+    _stub_job(monkeypatch, DEADLINE_JOB)
+    assert k8s._job_infra_cause("stanok-job-lbl", "default") == "DeadlineExceeded"
+
+
+def test_other_failed_reason_is_not_deadline(monkeypatch):
+    # BackoffLimitExceeded etc. stay the 'missing'/ticket path — only the
+    # deadline reason is the Job-level infrastructure signal.
+    _stub_job(monkeypatch, OTHER_FAILED_JOB)
+    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
+    _stub_job(monkeypatch, {"status": {"conditions": [
+        {"type": "Complete", "status": "True"}]}})
+    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
+
+
+def test_job_infra_cause_fail_soft_is_none(monkeypatch):
+    _stub_job(monkeypatch, DEADLINE_JOB, rc=1)
+    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
+    monkeypatch.setattr(k8s, "_kubectl",
+                        lambda *a, **k: _FakeCompleted(0, "not json"))
+    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
+    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0, "{}"))
+    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
 
 
 # --- 2: _fresh_job — infra cause -> EXEC_ERROR; normal failure unchanged ---------
@@ -210,10 +252,11 @@ def _repo(tmp_path):
 
 
 def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
-              real_fresh=False):
+              real_fresh=False, job_json=None):
     """host_launch_k8s with the cluster cycle mocked (the
     test_scenarios_verdict harness shape) plus: pod_json — what `get pod -o
-    json` answers (None -> not found); real_fresh — the REAL _fresh_job runs
+    json` answers (None -> not found); job_json — what `get job -o json`
+    answers (None -> empty status); real_fresh — the REAL _fresh_job runs
     against the mocked cluster (worker Job completes, fresh Job fails)."""
     repo, cfg = _repo(tmp_path)
     ticket = tmp_path / "ticket.md"
@@ -234,6 +277,8 @@ def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
             if pod_json is None:
                 return _FakeCompleted(1, "", "pods not found")
             return _FakeCompleted(0, json.dumps(pod_json))
+        if a[:2] == ("get", "job") and job_json is not None:
+            return _FakeCompleted(0, json.dumps(job_json))
         return _FakeCompleted(0)
     monkeypatch.setattr(k8s, "_kubectl", fake_kubectl)
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
@@ -289,13 +334,31 @@ def test_worker_pod_oom_publishes_env_fail(tmp_path, monkeypatch):
 
 
 def test_worker_pod_bare_137_keeps_missing_path(tmp_path, monkeypatch):
-    # regression: a deadline kill (137, no reason) is NOT OOM — the run
-    # stays the 'missing' abort (rc=17, nothing published).
+    # regression: a bare 137 with NO reason is NOT OOM, and without a
+    # Job-level DeadlineExceeded condition the run stays the 'missing'
+    # abort (rc=17, nothing published) — neither channel may be guessed.
     repo, cfg, args, calls = _scenario(tmp_path, monkeypatch, payload=False,
                                        pod_json=DEADLINE_POD)
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     assert rc == 17
     assert not (repo / "evidence" / "lbl" / "summary.json").exists()
+
+
+def test_worker_job_deadline_exceeded_publishes_env_fail(tmp_path, monkeypatch):
+    # Deadline contract (external review 2026-10-16): the session outlived
+    # the Job's activeDeadlineSeconds — the Job condition says
+    # DeadlineExceeded (the Pod shows only a bare 137): rc=16 ENV-FAIL with
+    # the cause and the knobs named, not a generic 'missing'.
+    repo, cfg, args, calls = _scenario(tmp_path, monkeypatch, payload=False,
+                                       pod_json=DEADLINE_POD,
+                                       job_json=DEADLINE_JOB)
+    rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
+    assert rc == 16
+    dst = _published(repo)
+    assert dst["rc"] == 16
+    assert dst["probe_result"] == "ENV-FAIL"
+    failures = _published_failures(repo)
+    assert any("DeadlineExceeded" in x for x in failures)
 
 
 def test_fresh_pod_oom_maps_to_env_fail(tmp_path, monkeypatch):

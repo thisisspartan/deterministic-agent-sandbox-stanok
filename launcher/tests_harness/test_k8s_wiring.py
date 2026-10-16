@@ -33,6 +33,13 @@ Tests:
      unified k8s._preflight (disk/image/Opik/cluster/RuntimeClass/dangling) —
      the wiring tests mock it; the check logic itself lives in
      test_k8s_preflight.py, the _preflight_cluster branches stay tested here
+ Verdict cross-check (external review 2026-10-16): the payload carries
+     internal_rc.txt (the in-Pod session's own exit code, pod_runner.py);
+     cli.py writes summary.json's "rc" and returns the same value, so a
+     mismatch between the two channels is verdict-substitution — rc=16
+     infrastructure defect, the worker verdict is never published. Absent
+     (an image predating the contract) -> no check. The pod_runner side is
+     tested in test_k8s_manifests.py
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_wiring.py -q
 """
@@ -329,3 +336,104 @@ def test_pod_image_id_fail_soft_is_none(monkeypatch):
     assert k8s._pod_image_id("pod-x", "default") is None
     monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0, ""))
     assert k8s._pod_image_id("pod-x", "default") is None
+
+
+# --- Verdict cross-check (external review 2026-10-16): internal_rc vs summary rc ---
+
+def _payload_host_run(tmp_path, monkeypatch, payload):
+    """Drive host_launch_k8s to the payload stage with a synthetic payload
+    (extract_payload mocked — the nonce framing is tested in the transport
+    tests); the post-payload stages are mocked so the test isolates the
+    internal-rc comparison. Returns (cfg, rc)."""
+    repo, cfg = _k8s_repo(tmp_path)
+    args = _k8s_args(tmp_path)
+    monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
+    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
+    monkeypatch.setattr(k8s, "_image_ref",
+                        lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
+    monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
+    monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
+    _no_real_cluster_calls(monkeypatch)
+    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0))
+    monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: None)
+    monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "succeeded")
+    # The payload path requires pod-stdout.log to exist; its content is
+    # irrelevant — extract_payload is mocked to return the synthetic payload.
+    _, live_dir = cfg.label_paths("lbl")
+    os.makedirs(live_dir, exist_ok=True)
+    with open(os.path.join(live_dir, "pod-stdout.log"), "w", encoding="utf-8") as f:
+        f.write("synthetic")
+    monkeypatch.setattr(k8s, "extract_payload", lambda text, nonce: payload)
+    # Post-payload stages: mocked so the test is about the comparison only.
+    monkeypatch.setattr(k8s, "patch_gate", lambda text: [])
+    monkeypatch.setattr(k8s, "apply_patch_scratch",
+                        lambda blob, text: str(tmp_path / "scratch"))
+    monkeypatch.setattr(k8s, "scratch_contract_violations",
+                        lambda cfg, before, scratch, declared: [])
+    monkeypatch.setattr(k8s, "_fresh_job", lambda *a, **k: (0, "green"))
+    return cfg, k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
+
+
+def _summary_payload(rc):
+    return {
+        "changes.patch": b"",
+        "summary.json": json.dumps({"rc": rc, "verifier": "PASS",
+                                    "probe_result": "PROBE-PASS"}).encode("utf-8"),
+    }
+
+
+def test_internal_rc_contradicting_summary_is_infra_defect(tmp_path, monkeypatch):
+    # summary.json claims rc=0 (PASS) but the in-Pod session exited 1 —
+    # one channel substituted a verdict: infrastructure defect (rc=16), the
+    # worker verdict is never published as a verdict.
+    payload = _summary_payload(0)
+    payload["internal_rc.txt"] = b"1\n"
+    cfg, rc = _payload_host_run(tmp_path, monkeypatch, payload)
+    assert rc == 16
+    evidence_dir, _ = cfg.label_paths("lbl")
+    with open(os.path.join(evidence_dir, "summary.json"), encoding="utf-8") as f:
+        summary = json.load(f)
+    assert summary["rc"] == 16
+    assert summary["probe_result"] == "ENV-FAIL"
+    with open(os.path.join(evidence_dir, "failures.log"), encoding="utf-8") as f:
+        text = f.read()
+    assert "verdict-substitution" in text
+    assert "exit 1" in text and "rc=0" in text  # both channels named
+
+
+def test_internal_rc_matching_summary_is_not_a_defect(tmp_path, monkeypatch):
+    # Positive control: internal_rc == summary rc -> the comparison is inert,
+    # the normal flow continues (here: published PASS, rc=0).
+    payload = _summary_payload(0)
+    payload["internal_rc.txt"] = b"0\n"
+    cfg, rc = _payload_host_run(tmp_path, monkeypatch, payload)
+    assert rc == 0
+    evidence_dir, _ = cfg.label_paths("lbl")
+    with open(os.path.join(evidence_dir, "summary.json"), encoding="utf-8") as f:
+        summary = json.load(f)
+    assert summary["rc"] == 0
+    assert summary["probe_result"] != "ENV-FAIL"
+
+
+def test_internal_rc_absent_is_no_check(tmp_path, monkeypatch):
+    # An image predating the contract ships no internal_rc.txt — the host
+    # must not invent a mismatch: the flow continues unchanged.
+    payload = _summary_payload(0)
+    cfg, rc = _payload_host_run(tmp_path, monkeypatch, payload)
+    assert rc == 0
+    evidence_dir, _ = cfg.label_paths("lbl")
+    with open(os.path.join(evidence_dir, "summary.json"), encoding="utf-8") as f:
+        assert json.load(f)["rc"] == 0
+
+
+def test_missing_summary_payload_names_internal_exit(tmp_path, monkeypatch):
+    # Payload block WITHOUT a summary.json: still aborted (rc=17, status
+    # 'missing') — but the in-Pod exit code, if the payload carried one, is
+    # named in the abort log: the session ran and died, the transport did
+    # not deliver a verdict.
+    payload = {"changes.patch": b"", "internal_rc.txt": b"137\n"}
+    logs = []
+    monkeypatch.setattr(k8s, "log", lambda *a: logs.append(" ".join(map(str, a))))
+    _, rc = _payload_host_run(tmp_path, monkeypatch, payload)
+    assert rc == 17
+    assert any("exit code was 137" in line for line in logs)

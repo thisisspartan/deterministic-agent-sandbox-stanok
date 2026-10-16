@@ -6,6 +6,8 @@ this project into a pre-launch ENV-FAIL (rc=16) with the fix named:
   image label != digest of the current tree -> a stale entrypoint would run
   Opik unreachable     -> OTLP silently drops spans mid-run
   runtimeclass missing -> the Pod would die mid-run on a name typo
+  netpol boundary absent in the Job namespace -> the worker would run with no
+    egress restriction, the fresh Pod not deny-all (external review 2026-10-16)
   dangling stanok Jobs/Pods -> leftovers of a crashed run collide
 Each check is tested in isolation with fakes (no real cluster, no real
 docker, no real network); _preflight composition (host-side checks run
@@ -168,6 +170,62 @@ def test_runtimeclass_present_is_none(monkeypatch):
     assert k8s._preflight_runtime_class(None) is None
 
 
+# --- NetworkPolicy boundary (namespace-scoped, coverage by name prefix) -----------
+
+def _fake_netpol(monkeypatch, *, rc=0, out=""):
+    seen = []
+
+    def fake(*a, **k):
+        seen.append(a)
+        return _FakeCompleted(rc, out, "boom" if rc else "")
+    monkeypatch.setattr(k8s, "_kubectl", fake)
+    return seen
+
+
+def test_netpol_present_any_revision_is_none(monkeypatch):
+    # Coverage by NAME PREFIX, any revision: make-before-break (Package 1)
+    # means an older revision may legitimately be the applied one — presence
+    # of the boundary is the contract, never revision match.
+    _fake_netpol(monkeypatch, out="stanok-worker-egress-d662f083ea71 "
+                                  "stanok-fresh-deny-all-000000000000")
+    assert k8s._preflight_netpol(None) is None
+
+
+def test_netpol_check_is_namespace_scoped(monkeypatch):
+    # A policy in another namespace does not select these Pods: the check
+    # lists the namespace the Jobs render into (STANOK_K8S_NAMESPACE).
+    monkeypatch.setenv("STANOK_K8S_NAMESPACE", "stanok-jobs")
+    seen = _fake_netpol(monkeypatch, out="")
+    reason = k8s._preflight_netpol(None)
+    assert reason and "stanok-jobs" in reason and "netpol-smoke.sh" in reason
+    assert seen and seen[0][:2] == ("get", "networkpolicy")
+    assert seen[0][2:4] == ("-n", "stanok-jobs")
+
+
+def test_netpol_missing_is_reason_naming_the_fix(monkeypatch):
+    monkeypatch.delenv("STANOK_K8S_NAMESPACE", raising=False)
+    _fake_netpol(monkeypatch, out="foreign-policy")
+    reason = k8s._preflight_netpol(None)
+    assert reason and "stanok-worker-egress-" in reason \
+        and "stanok-fresh-deny-all-" in reason
+    assert "default" in reason and "netpol-smoke.sh" in reason  # named fix
+
+
+def test_netpol_partial_coverage_names_only_the_missing(monkeypatch):
+    # worker boundary present, fresh deny-all absent -> still a defect, and
+    # the reason names only what is missing
+    _fake_netpol(monkeypatch, out="stanok-worker-egress-abc123def456")
+    reason = k8s._preflight_netpol(None)
+    assert reason and "stanok-fresh-deny-all-" in reason
+    assert "stanok-worker-egress-" not in reason
+
+
+def test_netpol_list_failure_is_infra_reason(monkeypatch):
+    _fake_netpol(monkeypatch, rc=1)
+    reason = k8s._preflight_netpol(None)
+    assert reason and "cannot list NetworkPolicies" in reason
+
+
 # --- dangling stanok Jobs/Pods -----------------------------------------------------
 
 def _fake_kubectl(monkeypatch, *, jobs_out="", pods_out="", rc=0):
@@ -222,7 +280,8 @@ def _mock_checks(monkeypatch, results):
             return results.get(name)
         return check
     for name in ("_preflight_disk", "_preflight_image_label", "_preflight_opik",
-                 "_preflight_cluster", "_preflight_runtime_class", "_preflight_dangling"):
+                 "_preflight_cluster", "_preflight_runtime_class",
+                 "_preflight_netpol", "_preflight_dangling"):
         monkeypatch.setattr(k8s, name, make(name.lstrip("_")))
     return order
 
@@ -232,7 +291,8 @@ def test_preflight_all_clean_is_none(monkeypatch):
     assert k8s._preflight(None) is None
     # the documented order: cheap host-side checks before the cluster checks
     assert order == ["preflight_disk", "preflight_image_label", "preflight_opik",
-                     "preflight_cluster", "preflight_runtime_class", "preflight_dangling"]
+                     "preflight_cluster", "preflight_runtime_class",
+                     "preflight_netpol", "preflight_dangling"]
 
 
 def test_preflight_first_reason_wins_and_stops(monkeypatch):

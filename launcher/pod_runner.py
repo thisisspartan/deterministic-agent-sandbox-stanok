@@ -12,6 +12,13 @@ Exit contract: 0 once the payload block is emitted (the verdict is inside
 the payload — a defect verdict is a SUCCESSFUL transport); 1 only if this
 runner itself died before emitting (the host then treats the run as
 aborted, status `missing`).
+
+Verdict cross-check (external review 2026-10-16): the payload also carries
+internal_rc.txt — the session subprocess's own exit code. In a healthy run
+cli.py writes job["rc"] = rc to summary.json and returns the same rc, so
+internal_rc == summary["rc"]; the host compares them and a mismatch is
+verdict-substitution (an infrastructure defect, rc=16), not a silent trust
+of one channel.
 """
 
 import base64
@@ -119,10 +126,15 @@ def main() -> int:
         "CLAUDE_PROJECT_DIR": REPO,
         "PYTHONDONTWRITEBYTECODE": "1",
     })
-    subprocess.run(
+    proc = subprocess.run(
         [sys.executable, os.path.join(REPO, "launcher", "stanok.py"),
          "run", TICKET_PATH, "--", label],
         cwd=REPO, env=env)
+    # The session's own exit code travels in the payload: the host compares
+    # it against summary.json's "rc" (cli.py writes both from the same
+    # value — a contradiction between the two channels is verdict
+    # substitution, external review 2026-10-16).
+    internal_rc = proc.returncode
 
     # 5. changes.patch: only the writable zones (the machine's contract);
     # anything the session left elsewhere stays untracked.
@@ -132,7 +144,8 @@ def main() -> int:
                            capture_output=True).stdout
 
     # 6. The payload: one base64 block between the nonce markers.
-    files = {"changes.patch": patch}
+    files = {"changes.patch": patch,
+             "internal_rc.txt": f"{internal_rc}\n".encode("ascii")}
     run_dir = os.path.join(LOG_DIR, label)
     for name in ("summary.json", "launcher.stdout.log", "failures.log"):
         p = os.path.join(run_dir, name)

@@ -47,7 +47,9 @@
 #   KUBECONFIG=<kubeconfig> STANOK_SERVER_URL=http://<model-host>:8080 \
 #     [STANOK_LAN_PEER=<ssh-host>] infra/netpol-smoke.sh
 # Knobs: STANOK_PY (default <repo>/.venv/bin/python — the netpol renderer),
-#        STANOK_KUBECTL (default kubectl), STANOK_NAMESPACE (default),
+#        STANOK_KUBECTL (default kubectl), STANOK_K8S_NAMESPACE (default) —
+#        the SAME knob the launcher and the rendered manifests use
+#        (k8s._namespace; the old STANOK_NAMESPACE alias is retired),
 #        STANOK_IMAGE (default stanok-machine:latest — the image the Jobs use;
 #        probe Pods pin imagePullPolicy: IfNotPresent, kubectl run would force
 #        Always for :latest and fail with ErrImagePull),
@@ -64,7 +66,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KUBECTL="${STANOK_KUBECTL:-kubectl}"
-NS="${STANOK_NAMESPACE:-default}"
+NS="${STANOK_K8S_NAMESPACE:-default}"
 IMAGE="${STANOK_IMAGE:-stanok-machine:latest}"
 TS="$(date +%F-%H%M%S)"
 EV="$ROOT/evidence/netpol-$TS"

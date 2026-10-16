@@ -15,7 +15,10 @@ Tests (synthetic kubelet fixtures; no test reaches a real cluster):
   2  _ResourceSampler: max-tracking over monotonic samples (peak == the
      last value, samples counted); all-errors -> None; pod never in stats
      -> samples 0 -> None; None fields never clobber a known peak, a later
-     value fills them; max ignores None
+     value fills them; max ignores None;
+     2b py311 join contract: the same functional path on python3.11 (the
+     image's version) — CPython 3.11 join() calls self._stop(), an Event
+     named _stop shadows it (TypeError); skipped when python3.11 absent
   3  _node_of_pod / _kubelet_stats: kubectl wrappers, fail-soft to None
   4  _fresh_job wiring: with a peaks holder the sampler runs and the holder
      is filled on BOTH the success and the failure path; without a holder
@@ -24,7 +27,13 @@ Tests (synthetic kubelet fixtures; no test reaches a real cluster):
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_resource_peaks.py -q
 """
 import json
+import os
+import pathlib
+import shutil
+import subprocess
 import time
+
+import pytest
 
 from launcher import k8s
 from launcher.config import Config
@@ -136,6 +145,41 @@ def test_sampler_merge_max_ignores_none_and_fills_later():
     assert out["cpu_peak_nanocores"] == 50
     assert out["mem_peak_usage_bytes"] == 9000
     assert out["mem_peak_working_set_bytes"] == 4000
+
+
+_PY311_SCRIPT = """
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from launcher import k8s
+s = k8s._ResourceSampler("p", "default", interval_s=0.02, fetch=lambda: {
+    "pods": [{"podRef": {"name": "p", "namespace": "default"},
+              "cpu": {"usageNanoCores": 7},
+              "memory": {"usageBytes": 8, "workingSetBytes": 9}}]})
+s.start()
+time.sleep(0.08)
+out = s.stop_and_peaks()
+assert out is not None and out["samples"] >= 1
+assert out["cpu_peak_nanocores"] == 7
+print("py311-join-ok")
+"""
+
+
+def test_py311_join_contract():
+    """External review 2026-10-16 (P1), reproduced on 3.11.15: CPython 3.11
+    Thread._wait_for_tstate_lock calls self._stop() inside join() — an Event
+    attribute named _stop shadows the internal and stop_and_peaks() raises
+    TypeError. The host venv is 3.13, so the functional tests above cannot
+    see this class; the production image is 3.11 (bookworm), so a launcher
+    running on the image's version would hit it. Runs the same functional
+    path on python3.11 when available (STANOK_PY311 or PATH)."""
+    py = os.environ.get("STANOK_PY311") or shutil.which("python3.11")
+    if not py:
+        pytest.skip("python3.11 not available — image version untestable here")
+    repo = str(pathlib.Path(__file__).resolve().parents[2])
+    r = subprocess.run([py, "-c", _PY311_SCRIPT, repo],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, f"python3.11 join contract failed:\n{r.stderr}"
+    assert "py311-join-ok" in r.stdout
 
 
 # --- 3: kubectl wrappers -----------------------------------------------------------

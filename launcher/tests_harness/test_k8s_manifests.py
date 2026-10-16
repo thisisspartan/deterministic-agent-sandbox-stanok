@@ -5,7 +5,10 @@ checks (no YAML parser in the image — the checks are text invariants):
   1  networkpolicy.yaml.tmpl (2.4 + Package 1, operator spec 2026-10-10):
      carries NO addresses — only the {{MODEL_IP}}/{{OPIK_HOST_IP}}/
      {{OPIK_BACKEND_IP}} placeholders (a dotted IPv4 literal in the
-     template is a defect); rendered via launcher.netpol it gives worker
+     template is a defect) plus {{NAMESPACE}} — the effective Job namespace
+     from STANOK_K8S_NAMESPACE, the SAME knob the Job templates render
+     (external review 2026-10-16: a hardcoded default left the boundary in
+     the wrong namespace whenever the knob was set); rendered via launcher.netpol it gives worker
      egress ONLY to the model host:8080 and the Opik endpoints:8080 —
      NO kube-dns rule (full DNS egress blackout: the endpoints are IP
      literals in the Job env); the fresh Pod is default-deny in BOTH
@@ -28,10 +31,11 @@ checks (no YAML parser in the image — the checks are text invariants):
      it from the session env (the agent's Bash must not see $STANOK_NONCE);
      the fresh Job's HOME/TMPDIR point into the /stanok-work emptyDir (the
      read-only root makes the image default /home/stanok unwritable)
-  6  CC-230 (operator spec 2026-10-10): Job timeouts — ttlSecondsAfterFinished
-     300 in BOTH templates (auto-cleanup); activeDeadlineSeconds rendered
-     from job_deadline(), default 1800 (30-min insurance), env override
-     STANOK_K8S_JOB_DEADLINE_S
+  6  CC-230 (operator spec 2026-10-10) + deadline contract (external review
+     2026-10-16): Job timeouts — ttlSecondsAfterFinished 300 in BOTH
+     templates (auto-cleanup); activeDeadlineSeconds rendered from
+     job_deadline(cfg), default turn_timeout_s + startup margin (the Job
+     must outlive the turn timer); env override STANOK_K8S_JOB_DEADLINE_S
   7  CC-234 (operator spec 2026-10-11): writable /tmp — an emptyDir tmp-dir
      (512Mi) mounted at /tmp in BOTH job templates (the CLI Bash tool
      mkdirs (CLAUDE_CODE_TMPDIR||/tmp)/claude-<uid>; a read-only /tmp
@@ -57,6 +61,11 @@ checks (no YAML parser in the image — the checks are text invariants):
      operator's decision 2026-10-14 (dry-run of both Pods clean under enforce,
      negative control Forbidden) with this explicit test edit — same
      single-source convention as the G1 values
+  12 Verdict cross-check (external review 2026-10-16): pod_runner.py captures
+     the session subprocess's exit code and ships it in the payload as
+     internal_rc.txt; the host compares it against summary.json's "rc"
+     (cli.py writes both from the same value — a mismatch is
+     verdict-substitution, rc=16; host side tested in test_k8s_wiring.py)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_manifests.py -q
 """
@@ -66,6 +75,7 @@ from pathlib import Path
 import pytest
 
 from launcher import k8s, netpol
+from launcher.config import Config
 
 K8S_DIR = Path(__file__).resolve().parents[2] / "k8s"
 
@@ -140,13 +150,36 @@ def test_netpol_model_ip_fail_closed(monkeypatch):
 
 
 def test_netpol_defaults(monkeypatch):
-    for var in ("STANOK_OPIK_HOST_IP", "STANOK_OPIK_BACKEND_IP"):
+    for var in ("STANOK_OPIK_HOST_IP", "STANOK_OPIK_BACKEND_IP",
+                "STANOK_K8S_NAMESPACE"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("STANOK_SERVER_URL", "http://192.168.8.131:8080")
     v = netpol.netpol_variables()
     assert v["MODEL_IP"] == "192.168.8.131"
+    assert v["NAMESPACE"] == "default"  # the STANOK_K8S_NAMESPACE default
     assert v["OPIK_HOST_IP"] == "192.168.122.156"
     assert v["OPIK_BACKEND_IP"] == "172.25.0.250"
+
+
+def test_networkpolicy_namespace_follows_job_knob(monkeypatch):
+    # External review 2026-10-16: the boundary must live where the Jobs run.
+    # The template carries {{NAMESPACE}}; netpol_variables() supplies it from
+    # k8s._namespace() — the same knob worker/fresh-job.yaml.tmpl render.
+    y = _read("networkpolicy.yaml.tmpl")
+    assert y.count("namespace: {{NAMESPACE}}") == 2
+
+    monkeypatch.delenv("STANOK_K8S_NAMESPACE", raising=False)
+    monkeypatch.setenv("STANOK_SERVER_URL", "http://192.168.8.131:8080")
+    y_def, rev_def = netpol.render_netpol_with_revision()
+    assert "namespace: default" in y_def and "{{" not in y_def
+
+    monkeypatch.setenv("STANOK_K8S_NAMESPACE", "stanok-jobs")
+    y_cust, rev_cust = netpol.render_netpol_with_revision()
+    assert "namespace: stanok-jobs" in y_cust
+    assert "namespace: default" not in y_cust and "{{" not in y_cust
+    # the namespace line is canonical content: a different namespace is a
+    # semantic change -> new revision -> new versioned object names
+    assert rev_cust != rev_def
 
 
 def test_worker_job_hardening():
@@ -229,6 +262,17 @@ def test_pod_runner_exports_claude_project_dir():
     assert '"CLAUDE_PROJECT_DIR": REPO' in src
 
 
+def test_pod_runner_ships_internal_rc():
+    # Verdict cross-check (external review 2026-10-16): the session's own
+    # exit code must travel in the payload — the host compares it against
+    # summary.json's "rc" (the host-side comparison is tested in
+    # test_k8s_wiring.py).
+    src = (Path(__file__).resolve().parents[1] / "pod_runner.py").read_text(
+        encoding="utf-8")
+    assert "internal_rc = proc.returncode" in src
+    assert '"internal_rc.txt": f"{internal_rc}\\n".encode("ascii")' in src
+
+
 # --- CC-232: Pod-only test guard marker in both Pod templates ----------
 
 def test_pod_templates_mark_in_pod():
@@ -249,11 +293,19 @@ def test_job_timeouts():
         assert "activeDeadlineSeconds: {{DEADLINE}}" in y
 
 
-def test_job_deadline_default_and_override(monkeypatch):
+def test_job_deadline_default_and_override(tmp_path, monkeypatch):
+    # Deadline contract (external review 2026-10-16): the default must
+    # STRICTLY exceed the turn timeout — the old 1800 == STANOK_TURN_TIMEOUT_S
+    # meant the Job killed the Pod exactly when the turn timer would have
+    # produced a clean verdict. The env override stays an explicit operator
+    # knob (wins over the contract, no validation).
     monkeypatch.delenv("STANOK_K8S_JOB_DEADLINE_S", raising=False)
-    assert k8s.job_deadline() == 1800  # 30-min insurance (operator spec)
+    cfg = Config(repo_root=str(tmp_path), log_dir=str(tmp_path / "logs"))
+    d = k8s.job_deadline(cfg)
+    assert d > cfg.turn_timeout_s
+    assert d == int(cfg.turn_timeout_s) + k8s._DEADLINE_MARGIN_S
     monkeypatch.setenv("STANOK_K8S_JOB_DEADLINE_S", "600")
-    assert k8s.job_deadline() == 600
+    assert k8s.job_deadline(cfg) == 600
 
 
 def test_rendered_names_are_versioned(monkeypatch):

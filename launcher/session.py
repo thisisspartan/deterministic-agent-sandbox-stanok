@@ -869,11 +869,36 @@ def _hook_selfcheck(cfg, job: dict) -> int | None:
     with exactly this value (cfg.repo_root). Fail-closed: ENV-FAIL (rc=16)
     before a single model token is spent. Returns None when OK."""
     settings_path = os.path.join(cfg.repo_root, ".claude", "settings.json")
+    # Fail-closed split (external review 2026-10-16): ABSENT settings mean
+    # no registered hooks — nothing to resolve, pass. EXISTING-but-broken
+    # settings (unreadable, invalid JSON) mean the hooks they register are
+    # unresolvable — the old single `except (OSError, ValueError): return
+    # None` greenlit a corrupt settings.json, the exact file whose hooks
+    # this check exists to guard (a corrupt file is also what the CLI would
+    # choke on mid-run).
     try:
         with open(settings_path, encoding="utf-8") as f:
-            settings = json.load(f)
-    except (OSError, ValueError):
-        return None  # no project settings -> no registered hooks -> nothing to resolve
+            text = f.read()
+    except FileNotFoundError:
+        return None  # no project settings -> no registered hooks
+    except OSError as e:
+        log(f"ENV-FAIL: hook self-check failed — {settings_path} exists but "
+            f"is unreadable ({e}); no model call was made")
+        job["error"] = f"ENV-FAIL: hook self-check failed: settings unreadable: {e}"
+        job["verifier"] = "FAIL"
+        job["turns"] = 0
+        return int(ExitCode.ENV_FAIL)
+    try:
+        settings = json.loads(text)
+    except ValueError as e:
+        log(f"ENV-FAIL: hook self-check failed — {settings_path} is not "
+            f"valid JSON ({e}); registered hooks are unresolvable; no model "
+            "call was made")
+        job["error"] = (f"ENV-FAIL: hook self-check failed: settings.json is "
+                        f"not valid JSON: {e}")
+        job["verifier"] = "FAIL"
+        job["turns"] = 0
+        return int(ExitCode.ENV_FAIL)
     bad = []
     for group in (settings.get("hooks") or {}).values():
         for entry in group or []:

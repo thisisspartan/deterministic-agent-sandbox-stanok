@@ -97,6 +97,28 @@ def test_settings_without_hooks_is_ok(tmp_path):
     assert job == {}
 
 
+def test_absent_settings_is_ok(tmp_path):
+    # ABSENT settings.json: no registered hooks -> nothing to resolve, pass.
+    job = {}
+    assert session._hook_selfcheck(_Cfg(tmp_path), job) is None
+    assert job == {}
+
+
+def test_broken_json_settings_is_envfail(tmp_path):
+    # Fail-closed split (external review 2026-10-16): an EXISTING but
+    # corrupt settings.json is not "no hooks" — the hooks it registers are
+    # unresolvable; the file this check exists to guard is broken.
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / "settings.json").write_text('{"hooks": {"PreToolUse": [}}} broken')
+    job = {}
+    rc = session._hook_selfcheck(_Cfg(tmp_path), job)
+    assert rc == 16  # ExitCode.ENV_FAIL
+    assert job["verifier"] == "FAIL"
+    assert "not valid JSON" in job["error"]
+    assert job["turns"] == 0  # no turn was ever started
+
+
 def test_session_stops_before_model_on_hook_envfail(tmp_path, monkeypatch):
     # Wiring: run_continuous_session runs the hook self-check BEFORE the
     # client is created. The Bash self-check passes first (writable

@@ -319,9 +319,11 @@ def _parent_repo_state():
 def test_supervisor_zone_not_published():
     # The parent repo is published (main -> github). Supervisor-zone state
     # files (CONTEXT.md, specs/STATUS.md, specs/RISK-ACCEPTANCES.md), their
-    # archives (specs/ARCHIVE/*), analysis records (specs/ANALYSIS-*.md) and
+    # archives (specs/ARCHIVE/*), analysis records (specs/ANALYSIS-*.md),
     # the tickets (tickets/ — private by operator decision 2026-10-13; the
-    # machine reads them from the supervisor's local directory) carry internal
+    # machine reads them from the supervisor's local directory) and the live
+    # .mcp.json (external review 2026-10-16: machine-local absolute paths;
+    # the published template is .mcp.json.example) carry internal
     # addresses/hosts and incident history — they must NEVER be tracked there
     # (rule: .claude/sync-skeleton.sh + the parent .gitignore; enforced here).
     # A tracked path is a published path; present-but-UNTRACKED (the
@@ -343,7 +345,7 @@ def test_supervisor_zone_not_published():
     out = subprocess.run(
         ["git", "-C", str(REPO_ROOT.parent), "ls-files",
          "CONTEXT.md", "specs/STATUS.md", "specs/RISK-ACCEPTANCES.md",
-         "specs/ARCHIVE", "specs/ANALYSIS-*.md", "tickets"],
+         "specs/ARCHIVE", "specs/ANALYSIS-*.md", "tickets", ".mcp.json"],
         capture_output=True, text=True,
     )
     if out.returncode != 0:
@@ -354,6 +356,37 @@ def test_supervisor_zone_not_published():
         f"supervisor-zone files tracked in the parent repo (would be "
         f"published): {tracked} — they must stay gitignored (local-only zone)"
     )
+
+
+def test_ci_workflow_sha_pinned_and_least_privilege():
+    # External review 2026-10-16: third-party action refs must be full commit
+    # SHAs (a tag is movable, a SHA is not) and the workflow must declare
+    # least-privilege permissions (contents: read only). Guarded in the
+    # published-parent layout only (the workflow lives in the parent; CI runs
+    # it there) — outside it, skip, never a vacuous pass.
+    state = _parent_repo_state()
+    if state != "present":
+        pytest.skip(f"parent layout state {state!r} — the CI workflow guard "
+                    "applies to the published parent only")
+    wf = REPO_ROOT.parent / ".github" / "workflows" / "harness.yml"
+    if not wf.is_file():
+        pytest.fail("published parent has no .github/workflows/harness.yml — "
+                    "the harness CI contract is published, its absence is a defect")
+    text = wf.read_text(encoding="utf-8")
+    import re
+    for ref in re.findall(r"^\s*uses:\s*(\S+)", text, re.M):
+        org = ref.split("@", 1)[0]
+        if org.startswith("actions/"):
+            sha = ref.split("@", 1)[1] if "@" in ref else ""
+            assert re.fullmatch(r"[0-9a-f]{40}", sha), (
+                f"CI action {ref!r} is not pinned to a full commit SHA — "
+                "resolve the tag via git ls-remote and pin the SHA")
+    assert re.search(r"^permissions:\n(?:[ \t]+\S+[^\n]*\n)*", text, re.M), \
+        "workflow has no top-level permissions: block"
+    perms_block = re.search(r"^permissions:\n((?:[ \t]+\S+[^\n]*\n)*)", text, re.M).group(1)
+    scopes = re.findall(r"([a-z-]+):\s*(\S+)", perms_block)
+    assert scopes and all(s == ("contents", "read") for s in scopes), \
+        f"permissions must be exactly contents: read, got {scopes}"
 
 
 def test_claude_md_matches_registry():

@@ -466,6 +466,28 @@ def _pod_infra_cause(pod, ns: str):
     return None
 
 
+def _job_infra_cause(name: str, ns: str):
+    """Deadline contract (external review 2026-10-16): a Job killed by its
+    own activeDeadlineSeconds reports Job condition Failed with
+    reason="DeadlineExceeded". The Pod side shows only a bare SIGKILL
+    (137, no reason), which _pod_infra_cause deliberately refuses to guess
+    — the Job-level reason is the honest signal. Infrastructure defect:
+    the session outlived the Job deadline, not a ticket defect.
+    Fail-soft: no job / kubectl error / unparseable JSON -> None."""
+    r = _kubectl("get", "job", name, "-n", ns, "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        conds = json.loads(r.stdout).get("status", {}).get("conditions", [])
+    except json.JSONDecodeError:
+        return None
+    for c in conds:
+        if (c.get("type") == "Failed" and c.get("status") == "True"
+                and c.get("reason") == "DeadlineExceeded"):
+            return "DeadlineExceeded"
+    return None
+
+
 def _wait_job_terminal(name: str, ns: str, timeout_s: int) -> str:
     """Poll the Job until a terminal condition: 'complete' | 'failed' | 'timeout'.
     `kubectl wait --for=condition=complete` blocks for the WHOLE timeout when the
@@ -487,11 +509,25 @@ def _wait_job_terminal(name: str, ns: str, timeout_s: int) -> str:
         time.sleep(5)
 
 
-def job_deadline() -> int:
-    """CC-230: Job activeDeadlineSeconds — 30-minute insurance against a
-    hung container (both Jobs share this value; STANOK_K8S_JOB_DEADLINE_S
-    overrides)."""
-    return int(os.environ.get("STANOK_K8S_JOB_DEADLINE_S", "1800"))
+# Startup margin over the turn timeout: tree unpack, git init, settings
+# rewrite, CLI start (external review 2026-10-16).
+_DEADLINE_MARGIN_S = 300
+
+
+def job_deadline(cfg) -> int:
+    """CC-230 + the deadline contract (external review 2026-10-16): Job
+    activeDeadlineSeconds must STRICTLY EXCEED the session's own turn
+    timeout. The old default (1800) equalled STANOK_TURN_TIMEOUT_S (1800):
+    the Job SIGKILLed the Pod at the exact moment the in-Pod turn timer
+    would have produced a clean TURN-TIMEOUT verdict — the verdict channel
+    lost to the insurance timer. Default: cfg.turn_timeout_s + startup
+    margin; it stays below the supervisor's wait cap (test_timer_contract
+    pins the ordering). STANOK_K8S_JOB_DEADLINE_S overrides explicitly —
+    the operator's knob wins over the contract, no questions asked."""
+    override = os.environ.get("STANOK_K8S_JOB_DEADLINE_S")
+    if override:
+        return int(override)
+    return int(cfg.turn_timeout_s) + _DEADLINE_MARGIN_S
 
 
 def _runtime_class_name() -> str:
@@ -567,7 +603,12 @@ class _ResourceSampler(threading.Thread):
         super().__init__(daemon=True)
         self.pod, self.ns, self.interval_s = pod, ns, interval_s
         self._fetch = fetch or self._default_fetch
-        self._stop = threading.Event()
+        # NOT "_stop": CPython 3.11 Thread._wait_for_tstate_lock calls
+        # self._stop() at join() — an Event attribute there shadows the
+        # internal and join() raises TypeError (external review 2026-10-16,
+        # reproduced on 3.11.15; the host venv is 3.13, so only a 3.11
+        # launcher hits it — pinned by test_py311_join_contract).
+        self._stop_event = threading.Event()
         self.samples = 0
         self.errors = 0
         self._peak = None
@@ -579,7 +620,7 @@ class _ResourceSampler(threading.Thread):
         return _kubelet_stats(node)
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 peak = _peak_from_stats(self._fetch(), self.pod, self.ns)
                 if peak is not None:
@@ -587,7 +628,7 @@ class _ResourceSampler(threading.Thread):
                     self._merge(peak)
             except Exception:
                 self.errors += 1
-            self._stop.wait(self.interval_s)
+            self._stop_event.wait(self.interval_s)
 
     def _merge(self, peak: dict) -> None:
         if self._peak is None:
@@ -602,7 +643,7 @@ class _ResourceSampler(threading.Thread):
     def stop_and_peaks(self):
         """Stop sampling, return the typed record (peaks + samples/errors), or
         None when nothing was ever observed (never a 0 masquerade)."""
-        self._stop.set()
+        self._stop_event.set()
         self.join(timeout=2 * self.interval_s + 5)
         if self.samples == 0:
             return None
@@ -814,6 +855,36 @@ def _preflight_runtime_class(cfg):
     return None
 
 
+_NETPOL_PREFIXES = ("stanok-worker-egress-", "stanok-fresh-deny-all-")
+
+
+def _preflight_netpol(cfg):
+    """The network boundary (SPEC-STANOK-K8S-RUNTIME §7) must EXIST in the
+    effective namespace before any run: without it the worker Pod runs with
+    no egress restriction and the fresh Pod is not deny-all — the boundary
+    silently absent. The Jobs render their namespace from STANOK_K8S_NAMESPACE
+    (worker/fresh-job.yaml.tmpl) and the netpol template from the same knob;
+    a policy applied to another namespace does not select these Pods, so the
+    check is namespace-scoped (external review 2026-10-16).
+    Coverage by NAME PREFIX, any revision: the make-before-break cutover
+    (Package 1) means an older revision may legitimately be the applied one
+    — presence of the boundary is the contract, never revision match."""
+    ns = _namespace()
+    r = _kubectl("get", "networkpolicy", "-n", ns, "-o",
+                 "jsonpath={.items[*].metadata.name}")
+    if r.returncode != 0:
+        return (f"cannot list NetworkPolicies in namespace {ns} "
+                f"(rc={r.returncode}) — infrastructure defect")
+    names = r.stdout.split()
+    missing = [p for p in _NETPOL_PREFIXES
+               if not any(n.startswith(p) for n in names)]
+    if missing:
+        want = " or ".join(f"{p}<revision>" for p in missing)
+        return (f"no NetworkPolicy {want} in namespace {ns} — the network "
+                "boundary is absent; fix: run infra/netpol-smoke.sh")
+    return None
+
+
 def _preflight_dangling(cfg):
     """No dangling stanok Jobs/Pods: the run lock serializes runs, so any
     stanok-labeled ACTIVE resource at preflight time is a leftover of a
@@ -852,11 +923,12 @@ def _preflight_dangling(cfg):
 def _preflight(cfg):
     """The unified gate (operator spec 2026-10-12): host-side checks first
     (disk, image staleness, Opik), then the cluster checks (health+manifest,
-    RuntimeClass, dangling). Returns None when launch-ready, else the first
-    reason — an infrastructure defect (rc=16), never a ticket defect."""
+    RuntimeClass, NetworkPolicy boundary, dangling). Returns None when
+    launch-ready, else the first reason — an infrastructure defect (rc=16),
+    never a ticket defect."""
     for check in (_preflight_disk, _preflight_image_label, _preflight_opik,
                   _preflight_cluster, _preflight_runtime_class,
-                  _preflight_dangling):
+                  _preflight_netpol, _preflight_dangling):
         reason = check(cfg)
         if reason:
             return reason
@@ -983,7 +1055,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     # run; the tree the verdict was computed against is the scratch).
     before_manifest = verify.contract_snapshot(cfg)
     nonce = new_nonce()
-    deadline = job_deadline()
+    deadline = job_deadline(cfg)
     # CC-225: the run-start bound for the Opik trace scan (the API list is
     # newest-first; the scan stops at this timestamp).
     run_start_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
@@ -1075,8 +1147,31 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 write_env_fail_summary(cfg, label,
                                       f"worker Pod {cause} — infrastructure defect")
                 return rc
+            # The in-Pod exit code, when the payload carried it but not a
+            # summary: name it in the abort log — the session ran and died,
+            # the evidence transport did not deliver a verdict.
+            internal = ""
+            if payload is not None:
+                internal = payload.get("internal_rc.txt", b"").strip().decode(
+                    "ascii", "replace")
+            # Deadline contract (external review 2026-10-16): the Job's own
+            # condition says DeadlineExceeded — the session outlived the Job
+            # deadline. Infrastructure defect (rc=16), not a 'missing' abort:
+            # the 3 ticket retries are not burned on it.
+            if _job_infra_cause(job_name, ns) == "DeadlineExceeded":
+                log("K8S: Job hit activeDeadlineSeconds (DeadlineExceeded) — "
+                    "infrastructure defect (rc=16); fix: raise "
+                    "STANOK_K8S_JOB_DEADLINE_S or lower STANOK_TURN_TIMEOUT_S")
+                rc = int(ExitCode.ENV_FAIL)
+                write_env_fail_summary(
+                    cfg, label,
+                    "Job DeadlineExceeded — the session outlived the Job "
+                    "activeDeadlineSeconds (infrastructure defect)")
+                return rc
             log("K8S: no evidence payload block — run treated as aborted "
-                "(status 'missing'), no verdict published")
+                "(status 'missing'), no verdict published"
+                + (f" (in-Pod session exit code was {internal})"
+                   if internal else ""))
             return rc
         for name, data in payload.items():
             with open(os.path.join(live_dir, name), "wb") as f:
@@ -1145,6 +1240,29 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 worker_rc = int(json.load(f).get("rc", 1))
         except (OSError, ValueError, json.JSONDecodeError):
             pass
+
+        # Verdict cross-check (external review 2026-10-16): pod_runner ships
+        # the session subprocess's own exit code in internal_rc.txt. cli.py
+        # writes summary.json's "rc" and returns the same value, so a healthy
+        # run has internal_rc == summary rc. A contradiction means one of the
+        # two channels substituted its own verdict — an infrastructure defect
+        # (rc=16), not a ticket defect: the 3 ticket retries are not burned
+        # on it. Absent (an image predating the contract) -> no check.
+        internal_rc = None
+        try:
+            internal_rc = int(payload["internal_rc.txt"].strip())
+        except (KeyError, ValueError):
+            pass
+        if internal_rc is not None and internal_rc != worker_rc:
+            log(f"K8S INTERNAL-RC: in-Pod session exited {internal_rc} but "
+                f"summary.json claims rc={worker_rc} — verdict-substitution, "
+                "infrastructure defect (rc=16)")
+            rc = int(ExitCode.ENV_FAIL)
+            write_env_fail_summary(
+                cfg, label,
+                f"in-Pod session exit {internal_rc} contradicts summary.json "
+                f"rc={worker_rc} — verdict-substitution, infrastructure defect")
+            return rc
 
         # Strict UTF-8 decode first (a non-UTF-8 patch never reaches the
         # gate), then the patch gate (a symlink/traversal/absolute/.git/
