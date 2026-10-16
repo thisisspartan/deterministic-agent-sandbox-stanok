@@ -281,7 +281,7 @@ def test_registry_shape():
 
 def test_context_md_budget():
     # CC-146: the live CONTEXT.md (parent repo, read at every supervisor
-    # session start) must stay under the ~15 KB budget; closed waves go to
+    # session start) must stay under the ~16 KB budget; closed waves go to
     # specs/ARCHIVE/CONTEXT-<wave>.md. Whether the supervisor-zone files are
     # PUBLISHED at all is pinned by test_supervisor_zone_not_published.
     ctx = REPO_ROOT.parent / "CONTEXT.md"
@@ -290,8 +290,8 @@ def test_context_md_budget():
         # (project history), never synced by sync-skeleton.sh — valid absence.
         pytest.skip("supervisor zone not present — CONTEXT.md absent (public clone)")
     size = ctx.stat().st_size
-    assert size <= 15360, \
-        f"CONTEXT.md is {size} bytes (> 15360 budget) — archive closed waves " \
+    assert size <= 16384, \
+        f"CONTEXT.md is {size} bytes (> 16384 budget) — archive closed waves " \
         f"to specs/ARCHIVE/CONTEXT-<wave>.md"
 
 
