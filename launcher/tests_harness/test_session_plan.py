@@ -30,9 +30,16 @@ the declared paths (declared_carveout) instead of being a second policy list
 in the plan.
 
 C (PLAN-HYGIENE 2026-10-08): the hub facade is gone — the functions live in
-ticket/verify/gates and take the Config explicitly; the quarantine dir comes
-from the passed-in RunState. ARCH-REVIEW C (2026-10-08): SessionPlan moved
-to launcher/plan.py — the single-source invariant (I1) is unchanged.
+ticket/verify/gates and take the Config explicitly. ARCH-REVIEW C
+(2026-10-08): SessionPlan moved to launcher/plan.py — the single-source
+invariant (I1) is unchanged.
+
+B1 (review 2026-10-17): the prepare_workspace/quarantine mechanism is DELETED
+(it was dead: assert_create_paths_are_new runs before it in every caller, so
+a create-declared path that exists never reached the workspace step). The
+invariant it once provided — a stale create-declared artifact must not leak
+into a run — is pinned by the parse-time refusal below (CC-133) and by
+test_doctor.py's end-to-end rc=13 test.
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_session_plan.py -q
 """
@@ -41,7 +48,7 @@ import dataclasses
 import pytest
 
 from launcher import gates, plan as plan_mod, ticket, verify, zones
-from launcher.config import Config, RunState
+from launcher.config import Config
 
 from conftest import repo, write
 
@@ -58,12 +65,6 @@ def _build_plan(cfg, ticket_text):
         accept_paths=tuple(accept_paths),
         accept_mode=accept_mode,
     )
-
-
-def _run_state(tmp_path) -> RunState:
-    return RunState(evidence_dir=str(tmp_path / "evidence"),
-                    live_dir=str(tmp_path / "live"),
-                    marker_path=str(tmp_path / ".running"))
 
 
 _TICKET = (
@@ -147,7 +148,8 @@ _EDIT_TICKET = (
 
 def test_edit_path_parsed_and_still_declared():
     # CC-125: `edit:` is declared like any path (union) but also reported
-    # separately so prepare_workspace can skip it.
+    # separately so the create-vs-edit gates (CC-133/CC-206) can tell the
+    # two directions apart.
     declared, edit_paths, reset_none, accept_paths, accept_mode = \
         ticket.parse_ticket_header(Config(), _EDIT_TICKET)
     assert declared == ["tests/new_test.py", "tests/existing_test.py"]
@@ -158,24 +160,6 @@ def test_edit_path_parsed_and_still_declared():
     assert plan.edit_paths == ("tests/existing_test.py",)
 
 
-def test_prepare_workspace_quarantines_create_not_edit(repo, tmp_path):
-    write(repo / "tests" / "new_test.py", "stale create artifact\n")
-    write(repo / "tests" / "existing_test.py", "modify me in place\n")
-    cfg = Config(repo_root=str(repo))
-    live = tmp_path / "live"
-    live.mkdir()
-    run_state = RunState(evidence_dir=str(tmp_path / "evidence"),
-                         live_dir=str(live),
-                         marker_path=str(tmp_path / ".running"))
-
-    assert ticket.prepare_workspace(cfg, run_state, _build_plan(cfg, _EDIT_TICKET)) == 0
-
-    # The create-declared path is moved aside (proves it is built from scratch).
-    assert not (repo / "tests" / "new_test.py").exists()
-    assert (live / "pre-existing" / "tests" / "new_test.py").exists()
-    # The edit-declared path stays in the tree (no "recreate verbatim" dance).
-    assert (repo / "tests" / "existing_test.py").exists()
-    assert not (live / "pre-existing" / "tests" / "existing_test.py").exists()
 
 
 # --- CC-132: one source for zones/kinds ----------------------------------------
@@ -195,16 +179,13 @@ def test_zones_have_one_source():
 def test_zone_consumers_read_the_constant(tmp_path, monkeypatch):
     # After CC-135 the constant has two readers: hidden_files_gate (which dirs
     # to scan) and declared_carveout (a bare zone name is undeclarable).
-    # prepare_workspace no longer reads it — the zone dirs used to be the rw
-    # mount points, and T4 derives the carve-outs from the ticket instead, so
-    # nothing manufactures them any more.
+    # (B1 2026-10-17: prepare_workspace is gone — nothing ever manufactured
+    # zone dirs again.)
     repo_dir = tmp_path / "repo"
     (repo_dir / "src").mkdir(parents=True)
     cfg = Config(repo_root=str(repo_dir))
     monkeypatch.setattr(zones, "WRITABLE_ZONES", ("src", "zoneA"))
 
-    assert ticket.prepare_workspace(cfg, _run_state(tmp_path), _build_plan(cfg, "")) == 0
-    assert not (repo_dir / "zoneA").exists()      # no manufactured zone dir
     assert ticket.declared_carveout(cfg, "zoneA") is None       # a bare zone
     assert ticket.declared_carveout(cfg, "zoneA/x.py") is None  # absent, no ancestor
 

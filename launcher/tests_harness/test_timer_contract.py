@@ -13,6 +13,12 @@ Pins the DELIBERATE relationship of the timers:
     incident this extension closes); above the cap the supervisor's
     kill-switch would fire before the Job could self-terminate with a
     classifiable DeadlineExceeded.
+  - the observation chain (A3, review 2026-10-17): the host's log stream
+    (+_STREAM_GRACE_S) and terminal wait (+_TERMINAL_GRACE_S) run in
+    sequence AFTER the Job deadline; the whole chain from Job creation
+    must stay under the wait cap, else the supervisor's kill-switch
+    (rc=124) fires while the host is still legitimately collecting the
+    Pod's evidence.
 Evidence: no rc=124 in any evidence/summary.json; the longest real run is
 far below the cap. A silent drift of either constant (e.g. "fixing" the
 mismatch by raising the cap) must fail this test and force an explicit
@@ -53,6 +59,22 @@ def test_job_deadline_sits_between_turn_timeout_and_cap(monkeypatch):
     d = k8s.job_deadline(CFG)
     assert d > CFG.turn_timeout_s
     assert d < cli.WAIT_TIMEOUT_S
+
+
+def test_observation_chain_stays_under_the_cap(monkeypatch):
+    # A3 (review 2026-10-17): the host's post-deadline windows run in
+    # sequence after the Job deadline (log stream, then terminal wait).
+    # The whole chain from Job creation must stay strictly under the
+    # supervisor's wait cap: at the cap the supervisor's kill-switch
+    # (rc=124, CLAUDE.supervisor.md §4) would fire while the host is
+    # still legitimately collecting the Pod's evidence. The exact sum is
+    # pinned so that raising any grace forces an explicit decision.
+    monkeypatch.delenv("STANOK_K8S_JOB_DEADLINE_S", raising=False)
+    chain = (k8s.job_deadline(CFG) + k8s._STREAM_GRACE_S
+             + k8s._TERMINAL_GRACE_S)
+    assert chain == 2340  # 2100 + 180 + 60 (turn-timeout default already
+                          # pinned by the 5400 worst-case test above)
+    assert chain < cli.WAIT_TIMEOUT_S
 
 
 def test_protocol_documents_the_kill_switch():

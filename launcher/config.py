@@ -106,7 +106,7 @@ class Config:
         """(evidence_dir, live_dir) for a label.
 
         Host: evidence/<label> holds the verdict (summary.json) the supervisor
-        reads, LOG_DIR/<label> the session jsonl + quarantine.
+        reads, LOG_DIR/<label> the session jsonl.
 
         Container (CC-134): evidence/ is read-only through the repo :ro mount, so
         BOTH paths resolve into the rw LOG_DIR/<label>; the host publishes the

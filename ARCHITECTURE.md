@@ -65,7 +65,9 @@ label guard (rc=15) -> role-leak (rc=24) -> ticket resolution (rc=13)
      Job -> publish -> live apply
    in-container child / no-sandbox test mode: lock (rc=21) -> cmd_run:
      ticket header + declared-path validation (rc=13) -> server /props
-     preflight (rc=20) -> workspace prep (rc=14) -> the session
+     preflight (rc=20) -> the session (B1, review 2026-10-17: the
+     workspace-prep step and rc=14 are gone — the parse-time create/edit
+     refusal (rc=13) already guarantees a declared create path is new)
 ```
 
 - Network policy. The worker Job is bounded by the NetworkPolicy

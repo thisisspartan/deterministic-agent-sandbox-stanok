@@ -3,7 +3,7 @@
 Pins the fail-closed verdict paths in launcher/ticket.py, launcher/verify.py
 and launcher/summary.py (C: no hub facade — the Config is passed explicitly):
   1  _validate_declared_path: a bare zone name (`src`, `tests/`, `scripts`)
-     is rejected — it is not a file and must not be quarantined; file paths
+     is rejected — it is not a file and must not be declared; file paths
      inside the zones are accepted; absolute/`..` paths stay rejected
   2  verify_gate: `run.sh list` rc!=0 with claimed tests on stdout -> a
      `(list)` failure is recorded (the unrun test must not pass silently)

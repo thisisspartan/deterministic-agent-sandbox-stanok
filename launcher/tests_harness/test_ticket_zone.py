@@ -146,7 +146,8 @@ def test_refusal_before_any_workspace_mutation(repo):
     with pytest.raises(ValueError):
         ticket.parse_ticket_header(cfg, "edit: launcher\n")
     # parse_ticket_header is cmd_run's first ticket step (cli.py): a raise here
-    # means prepare_workspace/docker never run — nothing was quarantined.
+    # means the session never starts — no workspace mutation ever ran (B1,
+    # review 2026-10-17: the prepare_workspace/quarantine step is gone).
     assert (repo / "launcher").is_dir()
 
 

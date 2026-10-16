@@ -20,7 +20,9 @@ Pinned here:
      (backward compatibility, pinned again in test_session_plan.py)
   4  immutability: a MODIFIED/DELETED trusted test is a contract-lock
      violation — accept gets NO exemption (it is not in declared_paths)
-  5  prepare_workspace does not quarantine an accept path
+  5  the accept path survives the production sequence untouched (B1
+     review 2026-10-17: the former prepare_workspace quarantine is gone —
+     a stale create-declared path is REFUSED (rc=13), never moved aside)
   6  verify_gate: an accept path the project runner does not list is an
      "(acceptance)" failure (ACCEPTANCE NOT REGISTERED) — the hole W12
      leaves open (a tests/ file with a non-registry name is silently
@@ -39,8 +41,8 @@ from pathlib import Path
 
 import pytest
 
-from launcher import plan as plan_mod, ticket, verify
-from launcher.config import Config, RunState
+from launcher import ticket, verify
+from launcher.config import Config
 from launcher.plan import SessionPlan
 
 from conftest import PY_PASS, repo, write
@@ -204,28 +206,32 @@ def test_deleted_trusted_test_is_a_contract_lock_violation(repo):
                for v in job.get("contract_lock_violations", [])), job
 
 
-# --- 5: prepare_workspace does not quarantine an accept path ---------------------
+# --- 5: the accept path survives the production sequence -------------------------
 
-def test_accept_path_is_not_quarantined(repo, tmp_path):
+def test_accept_path_survives_the_create_edit_assertion(repo):
+    # B1 (review 2026-10-17): the former test pinned "prepare_workspace does
+    # not quarantine an accept path" — the mechanism is gone. What matters is
+    # the production sequence itself (cli._read_ticket_contract): parse, then
+    # the filesystem-derived create/edit assertion. The trusted check
+    # pre-exists, is not a declared path, and must survive untouched; a
+    # create-declared path that exists is REFUSED (rc=13 upstream), never
+    # moved aside.
     write(repo / "tests" / "acc_test.py", PY_PASS)
-    write(repo / "tests" / "new_test.py", "stale create artifact\n")
     cfg = _cfg(repo)
     declared, edit_paths, _, accept_paths, accept_mode = \
         ticket.parse_ticket_header(
             cfg, "test: tests/new_test.py\naccept: tests/acc_test.py\n")
-    plan = plan_mod.SessionPlan(
-        declared_paths=tuple(declared), edit_paths=tuple(edit_paths),
-        accept_paths=tuple(accept_paths), accept_mode=accept_mode)
-    live = tmp_path / "live"
-    live.mkdir()
-    run_state = RunState(evidence_dir=str(tmp_path / "evidence"),
-                         live_dir=str(live), marker_path=str(tmp_path / ".running"))
+    assert accept_paths == ["tests/acc_test.py"] and accept_mode == "provided"
 
-    assert ticket.prepare_workspace(cfg, run_state, plan) == 0
-    # the declared create is moved aside; the trusted check stays in the tree
+    ticket.assert_create_paths_are_new(cfg, declared, edit_paths)  # absent create: passes
+    assert (repo / "tests" / "acc_test.py").exists()              # trusted check untouched
     assert not (repo / "tests" / "new_test.py").exists()
+
+    # The stale-artifact case the old quarantine handled: now a refusal.
+    write(repo / "tests" / "new_test.py", "stale create artifact\n")
+    with pytest.raises(ValueError):
+        ticket.assert_create_paths_are_new(cfg, declared, edit_paths)
     assert (repo / "tests" / "acc_test.py").exists()
-    assert not (live / "pre-existing" / "tests" / "acc_test.py").exists()
 
 
 # --- 6: verify_gate — the single enforcement point -------------------------------

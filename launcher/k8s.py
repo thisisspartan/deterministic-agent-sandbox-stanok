@@ -534,6 +534,16 @@ def _wait_job_terminal(name: str, ns: str, timeout_s: int) -> str:
 # rewrite, CLI start (external review 2026-10-16).
 _DEADLINE_MARGIN_S = 300
 
+# A3 (review 2026-10-17): the post-deadline observation graces, named. The
+# host keeps watching past the Job's own activeDeadlineSeconds so it can
+# still read the Pod's logs and the Job's terminal condition after the Pod
+# self-terminates. These windows run in sequence after the deadline, so the
+# whole chain (job_deadline + stream grace + terminal grace) must stay under
+# the supervisor's wait cap (cli.WAIT_TIMEOUT_S) — test_timer_contract pins
+# the SUM, not just the deadline stage.
+_STREAM_GRACE_S = 180
+_TERMINAL_GRACE_S = 60
+
 
 def job_deadline(cfg) -> int:
     """CC-230 + the deadline contract (external review 2026-10-16): Job
@@ -717,7 +727,8 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
         if fresh_pod is not None:
             sampler = _ResourceSampler(fresh_pod, ns)
             sampler.start()
-    completed = _wait_job_terminal(fresh_name, ns, deadline + 60) == "complete"
+    completed = _wait_job_terminal(fresh_name, ns,
+                                  deadline + _TERMINAL_GRACE_S) == "complete"
     if sampler is not None:
         peaks_out["peaks"] = sampler.stop_and_peaks()
     if completed:
@@ -1167,8 +1178,8 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 sampler.start()
                 stream_failed = not _stream_pod_logs(
                     pod, ns, os.path.join(live_dir, "pod-stdout.log"),
-                    deadline + 180)
-            _wait_job_terminal(job_name, ns, deadline + 60)
+                    deadline + _STREAM_GRACE_S)
+            _wait_job_terminal(job_name, ns, deadline + _TERMINAL_GRACE_S)
             if sampler is not None:
                 worker_peaks = sampler.stop_and_peaks()
         except RuntimeError as e:

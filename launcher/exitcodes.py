@@ -16,7 +16,7 @@ class ExitCode(IntEnum):
     1  defect (exhausted retries / contract violation);
     13 ticket: not found, header parse error, create-edit conflict, protected edit,
        zone-symlink ban (symlink in a writable zone);
-    14 workspace prep error; 15 invalid label;
+    15 invalid label;
     16 ENV-FAIL: infrastructure unavailable — test runner missing in the image
        (image defect, not a red test), kubectl/K8s runtime unavailable, launch
        preflight failure, fresh check unavailable, zone-symlink scan failure
@@ -30,7 +30,6 @@ class ExitCode(IntEnum):
     """
     DEFECT = 1
     TICKET = 13
-    WORKSPACE = 14
     BAD_LABEL = 15
     ENV_FAIL = 16
     CHILD_DIED = 17

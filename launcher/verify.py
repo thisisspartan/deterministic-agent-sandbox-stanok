@@ -363,8 +363,9 @@ def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
     several). A declared
     path is exempt (runner-update ticket, P2;
     behavior-identical to the old scripts/run.sh exemption, since the
-    manifest is snapshotted AFTER quarantine and a declared path is
-    therefore never in the manifest)."""
+    manifest is snapshotted before the run and a create-declared path
+    that already exists is refused at parse (CC-133), so a declared
+    path is never in the manifest)."""
     after = _tests_manifest(cfg)
     violations = _compare_manifests(before, after, plan.declared_paths)
     if violations:

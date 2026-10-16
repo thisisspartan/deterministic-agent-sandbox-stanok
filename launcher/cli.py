@@ -38,7 +38,7 @@ from launcher.summary import (
 )
 from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
-    parse_ticket_header, prepare_workspace,
+    parse_ticket_header,
 )
 
 
@@ -212,7 +212,7 @@ def cmd_run(cfg, args) -> int:
     if declared_paths:
         log(f"DECLARED PATHS: {declared_paths}")
     if edit_paths:
-        log(f"EDIT-IN-PLACE PATHS (not quarantined): {edit_paths}")
+        log(f"EDIT-IN-PLACE PATHS (modified in place): {edit_paths}")
     # G4: the acceptance-contract state is recorded for the verdict
     # (summary.json `acceptance`), never silently absent.
     job["acceptance"] = {"mode": accept_mode, "paths": list(accept_paths)}
@@ -231,10 +231,10 @@ def cmd_run(cfg, args) -> int:
         return _fail_early(cfg, run_state, job, start_ts, ExitCode.SERVER,
                            f"Server unavailable ({cfg.server_url})")
 
-    if prepare_workspace(cfg, run_state, plan) != 0:
-        return _fail_early(cfg, run_state, job, start_ts, ExitCode.WORKSPACE,
-                           "workspace prep error")
-
+    # B1 (review 2026-10-17): the former prepare_workspace/quarantine step is
+    # gone — assert_create_paths_are_new (in _read_ticket_contract above)
+    # already refuses a create-declared path that exists (rc=13), so nothing
+    # could ever be moved aside.
     rc = _run_session(cfg, run_state, job, ticket_prompt, args.local_retries, plan, start_ts)
     log(f"RUN FINISHED: rc={rc}")
     return rc
@@ -419,7 +419,7 @@ def launch_background(cfg, args) -> int:
     deadline = time.monotonic() + 60
     while not os.path.exists(marker):
         if child.poll() is not None:
-            # The child exited. A fast abort (rc=13/20/14) writes summary.json
+            # The child exited. A fast abort (rc=13/20) writes summary.json
             # and removes the marker BEFORE exiting — a process exit means all
             # its writes are complete, so a present summary.json is a finished
             # run, not a launch failure. No summary = the child died before

@@ -1,19 +1,23 @@
-"""ticket — the ticket header contract and workspace preparation.
+"""ticket — the ticket header contract.
 
 parse_ticket_header (incl. the G4 `accept:` acceptance-contract kind,
 SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14) / create-edit assertions (CC-133,
 CC-206), the declared-path rule (declared_carveout, T4/CC-135 — gate-only
-since CC-258 removed the Docker mount derivation) and prepare_workspace. The repo root
-comes from the passed-in Config; the quarantine dir from the passed-in
-RunState (C).
+since CC-258 removed the Docker mount derivation). The repo root comes from
+the passed-in Config.
+
+B1 (review 2026-10-17): prepare_workspace and its quarantine are deleted.
+The mechanism was dead: assert_create_paths_are_new (CC-133) runs before it
+in every caller (cli._read_ticket_contract, k8s), so a create-declared path
+that exists never reaches the workspace step — the loop could not move
+anything. The invariant it once provided (a stale artifact must not leak
+into a run) is enforced by the parse-time refusal (rc=13), pinned in
+test_session_plan.py / test_doctor.py.
 """
 
 import os
 import re
-import shutil
 from launcher import zones
-from launcher.exitcodes import ExitCode
-from launcher.logs import log
 from launcher.verify import _protected_files
 
 # The ONE kind list for a ticket header (CC-132). `scripts` is a ZONE, not a
@@ -21,8 +25,8 @@ from launcher.verify import _protected_files
 # any other path. `scripts: x.sh` is therefore not a declaration — it ends
 # the header (this is the fix for the old docstring that advertised it).
 # G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): `accept:` is a header kind —
-# a TRUSTED acceptance check, NOT a deliverable: it is not quarantined, not
-# in declared_paths, and must pre-exist under tests/ (see parse_ticket_header).
+# a TRUSTED acceptance check, NOT a deliverable: it is not in declared_paths
+# and must pre-exist under tests/ (see parse_ticket_header).
 _FILE_LINE_RE = re.compile(r"^(impl|test|docs|edit|accept):\s*([A-Za-z0-9_./-]+)\s*$")
 _RESET_NONE_RE = re.compile(r"^reset:\s*none\s*$", re.IGNORECASE)
 # `none` matches the path charset of _FILE_LINE_RE, so `accept: none` must be
@@ -43,9 +47,9 @@ def declared_carveout(cfg, rel: str) -> str | None:
     if the path is undeclarable (T4, CC-135; CC-258: the Docker rw-mount
     derivation is gone — this now serves only the declaration gate).
 
-    Literal declared paths are ticket-supplied input: prepare_workspace's
-    quarantine shutil.move()s them (so an unvalidated `impl: /etc/passwd` could
-    destroy host files). Fail-closed:
+    Literal declared paths are ticket-supplied input: they feed the
+    declaration gate and the contract-lock manifest (so an unvalidated
+    `impl: /etc/passwd` must be refused). Fail-closed:
 
       - relative, no `..`, no symlink resolving OUTSIDE the repo (a link
         inside the repo could smuggle an outside dir in — run.sh already
@@ -63,8 +67,7 @@ def declared_carveout(cfg, rel: str) -> str | None:
         out-of-zone dir (`launcher/`) made an absent path declarable through
         the ancestor rule and the machine burned ~141 s discovering the write
         is physically impossible; refusal is at header parse (rc=13) instead;
-      - a bare zone name (`src`, `tests/`) is not a file -> None (quarantine
-        would move the whole zone out of the tree);
+      - a bare zone name (`src`, `tests/`) is not a file -> None;
       - the path exists (file or dir) -> itself;
       - the path is absent -> its NEAREST EXISTING ANCESTOR dir, which must
         be BELOW the repo root: an absent path is declarable only through an
@@ -122,7 +125,7 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
 
     G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): `accept: <path>` declares a
     TRUSTED acceptance check — an independent test the agent must not author.
-    It is NOT a deliverable: it never enters declared_paths (no quarantine, no
+    It is NOT a deliverable: it never enters declared_paths (no
     positive-contract existence claim, no contract-lock exemption). Validated
     fail-closed (ValueError -> rc=13 upstream, before any launch):
       - the path passes the same declared_carveout rules as any declared path;
@@ -136,7 +139,8 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
     `accept: none` explicitly declares "no independent acceptance tests".
 
     `edit:` marks a path that the ticket MODIFIES IN PLACE — it is declared
-    like any other path but is NOT quarantined (CC-125). CC-206: `edit:` on a
+    like any other path but is MODIFIED IN PLACE, never moved aside (CC-125).
+    CC-206: `edit:` on a
     protected file (pre-existing `tests/**` or an existing `scripts/run.sh`) is
     refused by assert_edit_paths_are_not_protected (rc=13) before the container
     starts — a pre-existing test/entrypoint is immutable to the machine. Paths are validated against the
@@ -231,7 +235,7 @@ def _validate_accept_paths(cfg, accept_entries: list[str],
     declared as a deliverable (impl:/test:/docs:/edit:). The file stays
     protected: pre-existing tests/** is in _protected_files(), so the contract
     lock catches MODIFIED/DELETED; being absent from declared_paths it gets no
-    contract-lock exemption and is never quarantined."""
+    contract-lock exemption."""
     for rel in accept_entries:
         if not _validate_declared_path(cfg, rel):
             raise ValueError(
@@ -328,43 +332,5 @@ def assert_edit_paths_are_not_protected(cfg, edit_paths: list[str]) -> None:
             )
 
 
-def prepare_workspace(cfg, run_state, plan: "SessionPlan") -> int:
-    # SEC-01: .git is read-only inside the container — NO git writes here.
-    # The cleanliness gate is dirty_tree_gate() (single source, called by main()
-    # rc=22). This function only prepares the writable workspace.
-    #
-    # CC-135: the former zone-makedirs loop is gone. It existed because the
-    # zone dirs were the rw mount points (a missing mount point would have been
-    # created root-owned). T4 derives the carve-outs from the ticket and refuses
-    # a declared path with no existing carve-out, so every dir the run needs
-    # already exists — and inside the container a makedirs of a non-carved-out
-    # zone would now be an EROFS error, not a no-op.
-    try:
-        # Ticket-scoped invariant (W2.2): QUARANTINE (not delete) the artifacts
-        # the ticket declares, so the run starts in a state where they do not
-        # exist. Non-destructive: moved to _live_dir/pre-existing/ (outside the
-        # repo — dirty_tree_gate is unaffected). Called ONCE before the session:
-        # retries never wipe the model's work.
-        # CC-125: `edit:`-declared paths are the exception — the ticket modifies
-        # them IN PLACE (e.g. an existing test whose contract changes), so moving
-        # them aside would force a "recreate verbatim from git show" dance.
-        quarantined = []
-        for rel in plan.declared_paths:
-            if rel in plan.edit_paths:
-                continue
-            src_path = os.path.join(cfg.repo_root, rel)
-            if not os.path.exists(src_path):
-                continue
-            dest = os.path.join(run_state.live_dir, "pre-existing", rel)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.move(src_path, dest)
-            quarantined.append(rel)
-        if quarantined:
-            log(f"QUARANTINE: {len(quarantined)} pre-existing declared path(s) "
-                f"moved to {run_state.live_dir}/pre-existing/: {quarantined}")
-        return 0
-    except OSError as e:
-        log(f"ERROR: repo prep failed: {e}")
-        return int(ExitCode.WORKSPACE)
 
 

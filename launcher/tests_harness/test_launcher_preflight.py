@@ -26,6 +26,10 @@ launcher/session.py, launcher/summary.py:
      /props (model_alias / model_path_aliases elements / model_path basename
      without extension); no identity in /props -> fail-closed; mismatch ->
      rc=20 log "server model ... != configured STANOK_MODEL ..."
+  11 C4 (review 2026-10-17): STANOK_SKIP_SERVER_CHECK has ONE meaning —
+     value-compare "1" — in gates.py, in both P0-launch.sh gates (the former
+     bare `-n` at the endpoint-check gate diverged: `=0` skipped the endpoint
+     check but not the window check).
 
 CC-106: the former test 8 (full path digest mismatch -> process rc=25) is
 gone with the launch-path preflight — the digest check now lives in doctor
@@ -416,3 +420,35 @@ def test_build_agent_env_exports_claude_project_dir(tmp_path):
     cfg = Config()
     env = session.build_agent_env(cfg, _run_state(tmp_path))
     assert env["CLAUDE_PROJECT_DIR"] == cfg.repo_root
+
+
+# --- 11: C4 — STANOK_SKIP_SERVER_CHECK has one meaning (review 2026-10-17) ----
+
+def test_skip_server_check_value_compare_in_gates(monkeypatch):
+    # gates.py: only the literal "1" skips; "0" (and any other value) does
+    # NOT skip — the documented contract is `STANOK_SKIP_SERVER_CHECK=1`.
+    # Hermetic: _fetch_server_props is stubbed dead, so "not skipped" is
+    # observable as False without touching the live server.
+    monkeypatch.setattr(gates, "_fetch_server_props", lambda cfg: None)
+    results = []
+    for val in ("1", "0", "", "yes"):
+        monkeypatch.setenv("STANOK_SKIP_SERVER_CHECK", val)
+        results.append(gates.preflight_server(Config()))
+    assert results[0] is True                       # "1" -> skip
+    assert all(v is False for v in results[1:])     # anything else runs the check
+
+
+def test_skip_server_check_has_one_meaning_in_p0_launch():
+    # Text-pin (same style as the role-text pins in test_timer_contract.py):
+    # every P0-launch.sh gate on the variable must compare the VALUE to "1"
+    # (== or !=). The former bare `-n` at the endpoint-check gate diverged:
+    # `=0` skipped the endpoint check but not the window check.
+    script = REPO_ROOT.parent / "P0-launch.sh"
+    if not script.is_file():
+        pytest.skip("parent repo not present (standalone stanok checkout)")
+    src = script.read_text(encoding="utf-8")
+    hits = [ln for ln in src.splitlines()
+            if "STANOK_SKIP_SERVER_CHECK" in ln and "[[" in ln]
+    assert hits, "P0-launch.sh no longer gates on STANOK_SKIP_SERVER_CHECK"
+    for ln in hits:
+        assert ('== "1"' in ln or '!= "1"' in ln), ln
