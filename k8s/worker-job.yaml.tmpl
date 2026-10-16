@@ -96,11 +96,15 @@ spec:
           # prevents node saturation (throttling, not a guarantee); the memory
           # limit bounds the container (OOM-kill instead of node-pressure
           # eviction of others). requests = expected typical usage (admission,
-          # fair CPU share, eviction accounting). Values are conservative
-          # estimates pending post-deploy measurement (no peak history exists).
+          # fair CPU share, eviction accounting). CPU request raised 250m->500m
+          # (operator decision 2026-10-16) on two measured peaks from
+          # resource_peaks (host-stamped summary.json): 244m (cc269-measure),
+          # 288m (cc270-fire) — the request must cover the observed peak;
+          # 500m keeps headroom and stays half the limit. Memory request
+          # unchanged: measured peaks ~344Mi stay well under 1Gi.
           resources:
             requests:
-              cpu: 250m
+              cpu: 500m
               memory: "1Gi"
               ephemeral-storage: "1Gi"
             limits:

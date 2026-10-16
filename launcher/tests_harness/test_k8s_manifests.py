@@ -49,7 +49,7 @@ checks (no YAML parser in the image — the checks are text invariants):
      empty (no runtimeClassName field == RuntimeDefault, the pre-gVisor
      behavior); any other value renders `runtimeClassName: <value>`
   10 G1 (SPEC-HOSTSIDE-WORKFLOW-2026-10-14): explicit CPU/RAM requests+limits
-     in BOTH job templates (worker 250m/1Gi -> 1000m/2Gi; fresh 250m/512Mi ->
+     in BOTH job templates (worker 500m/1Gi -> 1000m/2Gi; fresh 250m/512Mi ->
      500m/1Gi — the fresh Pod has no agent CLI); limits >= requests; the
      existing disk bound, deadline and securityContext are untouched
   11 PSA (SPEC-PSA-2026-10-14): namespace.yaml pins the PSA labels on the
@@ -312,7 +312,7 @@ def test_job_cpu_ram_bounds():
     # lighter (no agent CLI). The values are the single source (same
     # convention as test_job_disk_bounds); refinement is a deliberate edit.
     expected = {
-        "worker-job.yaml.tmpl": ("cpu: 250m", "cpu: 1000m",
+        "worker-job.yaml.tmpl": ("cpu: 500m", "cpu: 1000m",
                                  'memory: "1Gi"', 'memory: "2Gi"'),
         "fresh-job.yaml.tmpl": ("cpu: 250m", "cpu: 500m",
                                 'memory: "512Mi"', 'memory: "1Gi"'),
