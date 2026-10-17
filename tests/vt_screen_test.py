@@ -170,6 +170,24 @@ def test_child_sees_the_window_size():
     assert all(v is None for v in outcomes.values())
 
 
+def test_feed_reaches_the_program():
+    # The judge writes the user's keystrokes to the master; the program reads
+    # them from its stdin (the slave). The tty echoes them back (ECHO is on
+    # when the feed is written — the child has not had time to change
+    # attributes), so the raw stream carries the echo on its own line; the
+    # contract is that the program RECEIVES the feed and the screen stays
+    # clean (the echo line and the reply share origin 0 — stable).
+    result = vt.run_pty(
+        [_PY, "-c",
+         'import sys\n'
+         'ch = sys.stdin.buffer.read(1)\n'
+         'sys.stdout.write("got:" + ch.decode() + "\\r\\n")'],
+        feed=b"z\n", timeout=10.0)
+    assert b"got:z" in result.raw
+    outcomes = vt.check_all(result)
+    assert all(v is None for v in outcomes.values()), outcomes
+
+
 def test_timeout_is_a_failure_not_a_pass():
     result = _run('import time; time.sleep(30)', timeout=1.0)
     assert result.timed_out is True
