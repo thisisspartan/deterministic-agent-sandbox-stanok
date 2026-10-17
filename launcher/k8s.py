@@ -537,12 +537,26 @@ _DEADLINE_MARGIN_S = 300
 # A3 (review 2026-10-17): the post-deadline observation graces, named. The
 # host keeps watching past the Job's own activeDeadlineSeconds so it can
 # still read the Pod's logs and the Job's terminal condition after the Pod
-# self-terminates. These windows run in sequence after the deadline, so the
-# whole chain (job_deadline + stream grace + terminal grace) must stay under
-# the supervisor's wait cap (cli.WAIT_TIMEOUT_S) — test_timer_contract pins
-# the SUM, not just the deadline stage.
+# self-terminates. The whole observation chain (job_deadline + stream grace +
+# terminal grace) must stay under the supervisor's wait cap
+# (cli.WAIT_TIMEOUT_S) — test_timer_contract pins the SUM, not just the
+# deadline stage.
 _STREAM_GRACE_S = 180
 _TERMINAL_GRACE_S = 60
+
+
+def _observation_timeout(obs_start: float, deadline: int, grace_s: int) -> int:
+    """A3 fix (external review 2026-10-17): _stream_pod_logs and
+    _wait_job_terminal take a DURATION measured from the call, so fresh
+    durations handed to the two sequential worker-path calls could reach
+    (deadline+180)+(deadline+60)=4440 — past the supervisor's wait cap.
+    Both windows instead share ONE absolute end point measured from
+    obs_start (Job creation): a call gets only the time remaining to
+    obs_start + deadline + grace_s. Worst case from Job creation is then
+    deadline + _STREAM_GRACE_S + _TERMINAL_GRACE_S = 2340 < cap. Call this
+    at each call site, never precompute — the remaining time is what bounds
+    the chain."""
+    return max(0, int(obs_start + deadline + grace_s - time.monotonic()))
 
 
 def job_deadline(cfg) -> int:
@@ -1165,6 +1179,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                     "RUNTIME_CLASS": _runtime_class(),
                 }))
             created.append(("job", job_name))
+            obs_start = time.monotonic()  # A3: anchor of the observation chain
             pod = _pod_of_job(job_name, ns)
             worker_peaks = None
             sampler = None
@@ -1178,8 +1193,9 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 sampler.start()
                 stream_failed = not _stream_pod_logs(
                     pod, ns, os.path.join(live_dir, "pod-stdout.log"),
-                    deadline + _STREAM_GRACE_S)
-            _wait_job_terminal(job_name, ns, deadline + _TERMINAL_GRACE_S)
+                    _observation_timeout(obs_start, deadline, _STREAM_GRACE_S))
+            _wait_job_terminal(job_name, ns, _observation_timeout(
+                obs_start, deadline, _STREAM_GRACE_S + _TERMINAL_GRACE_S))
             if sampler is not None:
                 worker_peaks = sampler.stop_and_peaks()
         except RuntimeError as e:

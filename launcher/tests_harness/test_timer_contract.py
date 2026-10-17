@@ -69,12 +69,39 @@ def test_observation_chain_stays_under_the_cap(monkeypatch):
     # (rc=124, CLAUDE.supervisor.md §4) would fire while the host is
     # still legitimately collecting the Pod's evidence. The exact sum is
     # pinned so that raising any grace forces an explicit decision.
+    #
+    # This sum is the genuine worst case only because both windows share
+    # ONE absolute end point anchored at Job creation (k8s._observation_
+    # timeout): each call gets only the time remaining to that point, so
+    # the sequential chain cannot exceed deadline + stream + terminal.
+    # The original defect (external review 2026-10-17, finding 1) was
+    # fresh per-call durations: (deadline+180)+(deadline+60)=4440 > cap.
+    # test_observation_windows_are_remaining_time... below pins that the
+    # code actually implements the shared-end model this sum assumes.
     monkeypatch.delenv("STANOK_K8S_JOB_DEADLINE_S", raising=False)
     chain = (k8s.job_deadline(CFG) + k8s._STREAM_GRACE_S
              + k8s._TERMINAL_GRACE_S)
     assert chain == 2340  # 2100 + 180 + 60 (turn-timeout default already
                           # pinned by the 5400 worst-case test above)
     assert chain < cli.WAIT_TIMEOUT_S
+
+
+def test_observation_windows_are_remaining_time_to_one_absolute_end(monkeypatch):
+    # A3 fix (external review 2026-10-17, finding 1): _stream_pod_logs and
+    # _wait_job_terminal take a DURATION measured from the call. The worker
+    # path must therefore hand each call only the time remaining to one
+    # absolute end (obs_start + deadline + grace), never a fresh duration.
+    # Here: 2280 s already elapsed since obs_start, deadline 2100 —
+    # the stream window (grace 180) is fully spent -> 0; the terminal
+    # window (grace 240) has exactly 60 s left. max(0, ...) floor: a
+    # call never receives a negative timeout.
+    obs_start = 1000.0
+    monkeypatch.setattr(k8s.time, "monotonic", lambda: obs_start + 2280)
+    stream_t = k8s._observation_timeout(obs_start, 2100, k8s._STREAM_GRACE_S)
+    terminal_t = k8s._observation_timeout(
+        obs_start, 2100, k8s._STREAM_GRACE_S + k8s._TERMINAL_GRACE_S)
+    assert stream_t == 0
+    assert terminal_t == 60
 
 
 def test_protocol_documents_the_kill_switch():
