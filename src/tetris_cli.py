@@ -131,10 +131,31 @@ def _frame(state: engine.GameState) -> str:
     return render.render_board(state.board, active=active)
 
 
-def _emit(out: IO[str], state: engine.GameState) -> None:
+# Cursor home (CUP ESC[H): moves the cursor to the top-left of the screen.
+# Emitted before every interactive frame after the first, so the frame is
+# redrawn over the previous one and the screen never scrolls (CC-281).
+CURSOR_HOME = "\x1b[H"
+
+
+def _is_tty(stream: IO[str]) -> bool:
+    """True when the stream is a real terminal — the only output for which
+    in-place redraw applies (CC-281). Any failure to ask (closed stream, no
+    fileno) counts as 'not a terminal'."""
+    try:
+        return bool(stream.isatty())
+    except Exception:
+        return False
+
+
+def _emit(out: IO[str], state: engine.GameState, home: bool = False) -> None:
     """Write one frame plus a newline; fall back to raw UTF-8 bytes when the
-    text stream cannot encode the half-block glyph."""
+    text stream cannot encode the half-block glyph. `home` prefixes the CUP
+    sequence so the frame overwrites the previous one in place instead of
+    scrolling the screen down — used only on a TTY in interactive mode
+    (CC-281); pipe output stays byte-identical."""
     text = _frame(state) + "\n"
+    if home:
+        text = CURSOR_HOME + text
     try:
         out.write(text)
         out.flush()
@@ -360,7 +381,12 @@ def _run_bounded(
 def _run_interactive(state: engine.GameState, fps: float, stdin: IO[str], out: IO[str]) -> int:
     """Redraw every 1/fps seconds. Input is hybrid: raw terminal keys on a
     TTY, command lines on a pipe. q, Ctrl-C, SIGINT or the end of piped
-    input end the run cleanly with rc 0."""
+    input end the run cleanly with rc 0.
+
+    On a real terminal (stdout is a tty) every frame after the first is
+    preceded by the CUP home sequence: the frame is redrawn in place and the
+    screen never scrolls (CC-281). On a pipe the output stays a plain stream
+    of frames, byte-identical to before."""
     stop = {"quit": False}
 
     def _on_signal(signum: int, frame: Any) -> None:
@@ -368,6 +394,7 @@ def _run_interactive(state: engine.GameState, fps: float, stdin: IO[str], out: I
 
     previous = signal.signal(signal.SIGINT, _on_signal)
     raw = _enter_raw(stdin)
+    redraw_in_place = _is_tty(out)
     period = 1.0 / fps
     try:
         _emit(out, state)
@@ -392,7 +419,7 @@ def _run_interactive(state: engine.GameState, fps: float, stdin: IO[str], out: I
             if stop["quit"]:
                 break
             state = engine.tick(state)
-            _emit(out, state)
+            _emit(out, state, home=redraw_in_place)
     except KeyboardInterrupt:
         return EXIT_OK
     finally:

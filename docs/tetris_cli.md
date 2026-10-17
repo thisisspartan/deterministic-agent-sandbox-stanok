@@ -66,15 +66,26 @@ non-blockingly, apply it, sleep to the deadline, `engine.tick`, redraw.
 nothing more can ever be typed) ends the run with `rc 0`. Terminal attributes
 and the signal handler are restored on exit.
 
+**In-place redraw (CC-281, TTY only):** when `stdout.isatty()`, every frame
+after the first is preceded by the CUP home sequence `ESC[H` (`CURSOR_HOME`):
+the cursor returns to the top-left of the screen and the frame is redrawn over
+the previous one — the screen never scrolls. The frame height is constant
+(`height / 2 + 2` terminal rows), so each redraw fully overwrites the previous
+frame. On a pipe (`not isatty()`) the output is unchanged: a plain stream of
+frames, byte-identical to before. The bounded mode `--ticks` never homes — it
+is a pipe tool and stays a stream of frames.
+
 ## Frames
 
 Each frame is `render.render_board(board, active=(piece_matrix, x, y))` plus a
 newline; in a game-over state the active overlay is omitted. Written to
 `sys.stdout`; if the text stream cannot encode `▀`, the UTF-8 bytes are written
-to `sys.stdout.buffer` instead.
+to `sys.stdout.buffer` instead. In interactive TTY mode each frame after the
+first carries the `ESC[H` prefix described above.
 
 ## Constants
 
 `DEFAULT_SEED = 1`, `DEFAULT_FPS = 2.0`, `PIPE_COMMANDS`, `KEY_COMMANDS`,
 `ARROW_COMMANDS` (`ESC [ A/B/C/D` → rotate / soft / right / left),
-`INPUT_GRACE = 0.05`, `EXIT_OK = 0`, `EXIT_USAGE = 2`.
+`INPUT_GRACE = 0.05`, `EXIT_OK = 0`, `EXIT_USAGE = 2`, `CURSOR_HOME = "\x1b[H"`
+(CUP home, interactive TTY redraw only).
