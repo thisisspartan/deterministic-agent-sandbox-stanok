@@ -204,8 +204,14 @@ def _actions_from_line(line: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 def _raw_attrs(attrs: List[Any]) -> List[Any]:
-    """Raw mode terminal attributes (tty.setraw equivalent, non-blocking reads)."""
+    """Raw-mode attributes for INPUT (tty.setraw equivalent, non-blocking
+    reads). OPOST stays ON: frames are emitted with bare LF and the tty must
+    keep translating LF->CRLF, otherwise every line starts one column further
+    than the previous one (a staircase under a real terminal). cc is copied
+    before mutation: the caller keeps `attrs` as the restore state, and a
+    shallow copy would let VMIN=0/VTIME=0 leak into it (CC-280)."""
     iflag, oflag, cflag, lflag, ispeed, ospeed, cc = list(attrs)
+    cc = list(cc)
     iflag &= ~(
         termios.IGNBRK
         | termios.BRKINT
@@ -216,7 +222,6 @@ def _raw_attrs(attrs: List[Any]) -> List[Any]:
         | termios.ICRNL
         | termios.IXON
     )
-    oflag &= ~termios.OPOST
     lflag &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG | termios.IEXTEN)
     cflag &= ~(termios.CSIZE | termios.PARENB)
     cflag |= termios.CS8

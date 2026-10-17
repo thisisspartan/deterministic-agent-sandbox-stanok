@@ -100,6 +100,25 @@ def test_unmodelled_csi_is_skipped_without_geometry():
     assert s.line_origins == [0]
 
 
+def test_home_redraw_does_not_scroll():
+    # CUP modelled per the CC-281 incident: a program that homes and redraws
+    # overwrites the same rows — no scroll, stable origins; line_origins
+    # records draw events (each frame's lines), not the final screen state.
+    s = _frames(b"ab\r\ncd\r\n\x1b[Hef\r\ngh\r\n")
+    assert s.scrolls == 0
+    assert s.line_origins == [0, 0, 0, 0]
+    vt.assert_no_scroll(s)
+    vt.assert_stable_line_origin(s)
+
+
+def test_cursor_up_moves_the_row():
+    # CUU: up 2 rows from row 2 -> row 0, then draw there.
+    s = _frames(b"a\r\nb\r\n\x1b[2Ac\r\n")
+    assert s.scrolls == 0
+    assert s.line_origins == [0, 0, 0]
+    vt.assert_no_scroll(s)
+
+
 # ---------------------------------------------------------------------------
 # Part B: calibration matrix under a real PTY
 # ---------------------------------------------------------------------------
@@ -136,10 +155,28 @@ TOYS = {
         'termios.tcsetattr(1,termios.TCSADRAIN,b)\n'
         'sys.stdout.write("ok\\r\\n")\n',
         "termios_restored"),
+    # shallow copy shares the cc list: the "restore" writes back the already
+    # mutated cc, so VMIN survives — exactly the tetris_cli cc-alias shape.
+    # A flags-only comparison would pass this toy; the full-attrs comparison
+    # must catch it (CC-280 review, 2026-10-17).
+    "cc_alias": (
+        'import sys,termios\n'
+        'a=termios.tcgetattr(1); b=list(a)\n'
+        'b[6][termios.VMIN]=0\n'
+        'termios.tcsetattr(1,termios.TCSADRAIN,b)\n'
+        'sys.stdout.write("ok\\r\\n")\n'
+        'termios.tcsetattr(1,termios.TCSADRAIN,a)\n',
+        "termios_restored"),
     "wide": ('import sys; sys.stdout.write("w" * 100 + "\\r\\n")',
              "no_wrap"),
     "cursor_hidden": ('import sys; sys.stdout.write("\\x1b[?25lok\\r\\n")',
                       "cursor_restored"),
+    # homes and redraws the same rows: the judge must read this as a CLEAN
+    # screen (no_scroll GREEN-on-good) — the shape of the CC-281 fix.
+    "home_ok": ('import sys\n'
+                'for i in range(3):\n'
+                '    sys.stdout.write("\\x1b[H" + "x\\r\\n" * 10)\n',
+                None),
 }
 
 
@@ -186,6 +223,34 @@ def test_feed_reaches_the_program():
     assert b"got:z" in result.raw
     outcomes = vt.check_all(result)
     assert all(v is None for v in outcomes.values()), outcomes
+
+
+def test_delayed_feed_arrives_after_the_delay():
+    # A (delay, chunk) schedule simulates a user who types LATER: the toy
+    # prints "start", then waits up to 3 s for one byte. The chunk is due at
+    # 0.5 s — the program must receive it and reply. The order in the raw
+    # stream proves the delay was honoured (start before got).
+    result = vt.run_pty(
+        [_PY, "-c",
+         'import sys,select\n'
+         'sys.stdout.write("start\\r\\n"); sys.stdout.flush()\n'
+         'sel = select.select([sys.stdin.buffer], [], [], 3.0)\n'
+         'ch = sys.stdin.buffer.read(1) if sel[0] else b"-"\n'
+         'sys.stdout.write("got:" + ch.decode() + "\\r\\n")'],
+        feed=[(0.5, b"z\n")], timeout=10.0)  # \n: canonical mode delivers a line
+    assert b"start" in result.raw and b"got:z" in result.raw
+    assert result.raw.index(b"start") < result.raw.index(b"got:z")
+    vt.assert_exit(result)
+
+
+def test_feed_due_after_the_child_exits_is_harmless():
+    # The child is gone before the chunk is due: the write to the master
+    # fails (EIO) and must not crash the judge or change the verdict.
+    result = vt.run_pty(
+        [_PY, "-c", 'import sys; sys.stdout.write("done\\r\\n")'],
+        feed=[(5.0, b"x")], timeout=10.0)
+    assert b"done" in result.raw and b"x" not in result.raw
+    vt.assert_exit(result)
 
 
 def test_timeout_is_a_failure_not_a_pass():

@@ -31,8 +31,9 @@ Unknown flag, unparseable value, out-of-range value or an odd `--height` →
 
 ## Input (hybrid, chosen by `stdin.isatty()`)
 
-- **TTY** → the terminal is put into raw mode via `termios` (attributes are
-  restored on exit). Keys: `a`/`←` left, `d`/`→` right, `s`/`↓` soft drop,
+- **TTY** → the terminal is put into raw mode via `termios` — for **input**
+  only: output translation (`OPOST`, LF→CRLF) stays on, and ALL attributes
+  (control characters included) are restored on exit. Keys: `a`/`←` left, `d`/`→` right, `s`/`↓` soft drop,
   `w`/`x`/`↑` rotate (clockwise), `Space` hard drop, `q` or `Ctrl-C` quit.
   Keys are polled with `select` inside the frame period; a partial escape
   sequence is ignored.

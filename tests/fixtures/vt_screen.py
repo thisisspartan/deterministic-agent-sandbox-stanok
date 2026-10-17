@@ -24,9 +24,11 @@ Modelled VT subset (the boundary vocabulary needs exactly this): printable
 chars (1 column each), CR, LF (LF moves down, KEEPS the column — real
 terminal semantics; ONLCR translation happens in the tty, so cooked output
 arrives already CRLF-translated), line wrap, scroll, SGR sequences (skipped,
-no geometry), DEC private mode ?25h/l (cursor visibility). Cursor addressing
-(ESC[H etc.) is NOT modelled: no ticket in this line emits it; extend by
-incident, not by speculation.
+no geometry), DEC private mode ?25h/l (cursor visibility), and cursor
+addressing — CUP (ESC[H, ESC[<row>[;<col>]H) and CUU (ESC[<n>A) — modelled
+per the CC-281 incident: an in-place redraw must home or move up, and the
+judge must read that as "no scroll", not as geometry. ESC[2J and other
+CSIs stay unmodelled; extend by incident, not by speculation.
 
 gVisor/runsc constraint (fresh-Job probe 2026-10-17): TIOCSWINSZ-set works
 on master and slave, but the 2-argument fcntl.ioctl(fd, TIOCGWINSZ) form
@@ -130,7 +132,26 @@ class Screen:
             if final in "hl" and params.startswith("?"):
                 if params[1:] == "25":
                     self.cursor_visible = final == "h"
+            elif final == "H" and not params.startswith("?"):
+                # CUP: ESC[<row>[;<col>]H, 1-based, defaults 1. Addressing
+                # clamps to the window; it never scrolls (CC-281).
+                row = _csi_int(params, 0, 1)
+                col = _csi_int(params, 1, 1)
+                self.row = max(0, min(row - 1, self.rows - 1))
+                self.col = max(0, min(col - 1, self.cols - 1))
+                self._row_used = False
+            elif final == "A" and not params.startswith("?"):
+                # CUU: ESC[<n>A — move up n rows (min 1). Never scrolls.
+                self.row = max(0, self.row - max(1, _csi_int(params, 0, 1)))
+                self._row_used = False
         return i
+
+
+def _csi_int(params: str, index: int, default: int) -> int:
+    parts = params.split(";")
+    if index < len(parts) and parts[index].isdigit():
+        return int(parts[index])
+    return default
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +239,7 @@ def set_window_size(fd: int, rows: int, cols: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("hhhh", rows, cols, 0, 0))
 
 
-def run_pty(argv, feed: bytes = b"", rows: int = 24, cols: int = 80,
+def run_pty(argv, feed=b"", rows: int = 24, cols: int = 80,
             timeout: float = 10.0, cwd: Optional[str] = None,
             env: Optional[dict] = None) -> Result:
     """Run argv under a real PTY (the consumer's view): the program's stdin,
@@ -226,9 +247,14 @@ def run_pty(argv, feed: bytes = b"", rows: int = 24, cols: int = 80,
     is set on the master BEFORE the child starts (TIOCSWINSZ works on the
     master under runsc; the child sees it via os.get_terminal_size).
 
-    `feed` is written to the master (the user's keystrokes). Returns the raw
-    master byte stream, the exit code, the interpreted Screen, and whether
-    the termios settings were restored."""
+    `feed` is written to the master (the user's keystrokes): either plain
+    bytes (written once, as a user who types before the program starts) or a
+    sequence of (delay_seconds, bytes) chunks (a user who types LATER — the
+    only way to force a paced program to draw more than one frame before
+    quitting; CC-281: a single-shot feed is consumed in the first poll and
+    makes no_scroll vacuous). Returns the raw master byte stream, the exit
+    code, the interpreted Screen, and whether the termios settings were
+    restored."""
     master, slave = pty.openpty()
     set_window_size(master, rows, cols)
     attrs_before = termios.tcgetattr(slave)
@@ -257,9 +283,25 @@ def run_pty(argv, feed: bytes = b"", rows: int = 24, cols: int = 80,
 
     # The judge keeps BOTH ends open: the master for the byte stream, the
     # slave for the termios read-back (the canonical location of the state).
-    if feed:
-        os.write(master, feed)
+    schedule = None
+    if isinstance(feed, (bytes, bytearray)):
+        if feed:
+            os.write(master, feed)
+    else:
+        schedule = sorted((float(d), bytes(c)) for d, c in feed)
 
+    def _write_due(now: float) -> None:
+        # A chunk whose delay has elapsed. If the child is already gone the
+        # write fails (EIO) — the keystroke never reached a user, which is
+        # the program's business, not the judge's.
+        while schedule and schedule[0][0] <= now - t_feed:
+            _, chunk = schedule.pop(0)
+            try:
+                os.write(master, chunk)
+            except OSError:
+                pass
+
+    t_feed = time.monotonic()
     raw = b""
     timed_out = True
     deadline = time.monotonic() + timeout
@@ -275,6 +317,8 @@ def run_pty(argv, feed: bytes = b"", rows: int = 24, cols: int = 80,
                 chunk = b""
             if chunk:
                 raw += chunk
+        if schedule:
+            _write_due(time.monotonic())
         done = os.waitpid(pid, os.WNOHANG)
         if done[0] == pid:
             timed_out = False
