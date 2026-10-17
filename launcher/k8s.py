@@ -266,8 +266,16 @@ def _live_tree_drift(cfg) -> str | None:
     if not start_commit:
         return ("STANOK_START_COMMIT is unset — the run's start commit is "
                 "unknown, the live tree cannot be proven unchanged")
-    r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cfg.repo_root,
-                       capture_output=True, text=True)
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cfg.repo_root,
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        # Fail closed (the docstring above): a git call that RAISES is an
+        # unknown tree state, same as a non-zero rc. Same shape as
+        # cli._capture_start_commit (cli.py:635-644), the host's other
+        # call to this exact command.
+        return (f"git rev-parse HEAD raised {e} — the live tree cannot "
+                "be proven unchanged")
     if r.returncode != 0:
         return (f"git rev-parse HEAD failed (rc={r.returncode}): "
                 f"{r.stderr.strip()} — the live tree cannot be proven unchanged")
@@ -577,11 +585,12 @@ _DEADLINE_MARGIN_S = 300
 # Honest whole-run note (A3 doc honesty, review 2026-10-17): the cap
 # bounds the worker chain (2340 < 2700), NOT the whole run. The fresh
 # check runs after it: _fresh_job waits deadline + _TERMINAL_GRACE_S
-# (2160, k8s.py:778) after up to 30 s of Pod lookups (:773, :787) — a
-# whole run can reach at least 4530 s, past the 2700 s cap. Consequence
-# if that happens: the supervisor hits rc=124 (45-min cap) -> `launch.sh
-# status` -> `launch.sh stop` (SIGTERM); finally removes only the
-# resources the run created; the patch is NOT applied. Reconsideration
+# (2160) after up to two 30 s Pod lookups (_pod_of_job calls inside
+# _fresh_job) — a whole run can reach at least 4530 s, past the 2700 s
+# cap. Consequence if that happens: the supervisor hits rc=124
+# (45-min cap) -> `launch.sh status` -> `launch.sh stop` (SIGTERM);
+# finally removes only the resources the run created; the patch is NOT
+# applied. Reconsideration
 # trigger: the first real run that hits the cap during the fresh phase.
 _STREAM_GRACE_S = 180
 _TERMINAL_GRACE_S = 60

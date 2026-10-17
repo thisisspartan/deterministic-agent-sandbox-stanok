@@ -303,7 +303,7 @@ def cmd_status(cfg, label: str) -> int:
 
 
 WAIT_POLL_S = 5
-WAIT_TIMEOUT_S = 2700  # 45 min — the cap §3 of CLAUDE.supervisor.md names
+WAIT_TIMEOUT_S = 2700  # 45 min — the cap §4 of CLAUDE.supervisor.md names
 
 
 def cmd_wait(cfg, label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:

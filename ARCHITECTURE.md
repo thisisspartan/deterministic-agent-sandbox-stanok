@@ -177,7 +177,7 @@ lands on the live tree ONLY on a clean verdict on an unchanged tree ->
 tracked-resource cleanup (`create`-not-`apply`) -> marker removal
 
 -> evidence/<label>/summary.json is read exactly once by the supervisor
-(CLAUDE.supervisor.md §3)
+(CLAUDE.supervisor.md §4)
 ```
 
 `probe_result` values: `CLEAN-FIRST | PASS-AFTER-LOCAL-RETRY | VERIFY-FAIL |

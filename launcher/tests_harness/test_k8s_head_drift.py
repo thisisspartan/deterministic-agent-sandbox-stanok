@@ -27,7 +27,9 @@ Operator requirements (decision 2026-10-17, variant 1, STATUS.md):
 Cases: HEAD moved during the run; tree dirtied during the run; clean tree
 passes the guard and the deliverable lands; unset STANOK_START_COMMIT;
 git apply is NOT called when the guard fires; the message names the real
-patch file in both branches.
+patch file in both branches; a git call that RAISES in the guard is
+drift too (fail closed — the guard's own docstring; B1a review
+2026-10-17, finding 1).
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_head_drift.py -q
 """
@@ -274,3 +276,33 @@ def test_message_names_the_real_patch_file(tmp_path, monkeypatch, branch, hook):
     assert "(temporary, lives under /tmp)" in msg
     # nothing was copied: the patch lives ONLY in live_dir, not in evidence/
     assert not (repo / "evidence" / "lbl" / "changes.patch").exists()
+
+
+# --- 7: a git call that RAISES in the guard is drift (fail closed) -------------
+
+def test_raising_git_call_in_guard_downgrades(tmp_path, monkeypatch):
+    # B1a review 2026-10-17, finding 1: the guard's docstring promises
+    # "a git error counts as drift (unknown state)" — that must include a
+    # call that RAISES (OSError / SubprocessError), not only a non-zero
+    # rc. Without the try/except the exception would propagate AFTER the
+    # PASS was published (k8s.py, _publish_evidence precedes the guard)
+    # and the run would exit unaligned. Same fail-closed shape as
+    # gates.dirty_tree_gate (gates.py:43-52) and cli._capture_start_commit
+    # (cli.py:635-644).
+    real_run = subprocess.run
+
+    def raiser(cmd, *a, **k):
+        # Only the guard's own call (exact argv, no -C): the fixture's
+        # start-commit export and the git setup use "-C" argvs.
+        if [str(c) for c in cmd] == ["git", "rev-parse", "HEAD"]:
+            raise OSError("simulated git failure")
+        return real_run(cmd, *a, **k)
+    monkeypatch.setattr(k8s.subprocess, "run", raiser)
+    repo, cfg, rc = _scenario(tmp_path, monkeypatch)
+    assert rc == 16
+    dst = _published(repo)
+    assert dst["rc"] == 16
+    assert dst["probe_result"] == "ENV-FAIL"
+    assert any("git rev-parse HEAD raised" in x
+               for x in _published_failures(repo))
+    assert not (repo / "tests" / "new_test.py").exists()

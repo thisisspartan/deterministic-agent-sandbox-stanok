@@ -4,7 +4,7 @@ deadline contract, external review 2026-10-16).
 Pins the DELIBERATE relationship of the timers:
   - the machine's worst case: TURN_TIMEOUT_S * (1 + DEFAULT_RETRIES) = 5400 s;
   - the supervisor's wait cap: WAIT_TIMEOUT_S = 2700 s — SHORTER on purpose:
-    at rc=124 the supervisor protocol (CLAUDE.supervisor.md §3) runs
+    at rc=124 the supervisor protocol (CLAUDE.supervisor.md §4) runs
     `status` then `stop` — the cap is a kill-switch, not a mismatch bug.
   - the Job deadline (job_deadline): STRICTLY between the turn timeout and
     the wait cap. Below the turn timeout the Job would SIGKILL the Pod at
