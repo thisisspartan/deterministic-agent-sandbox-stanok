@@ -13,12 +13,19 @@ Pins the DELIBERATE relationship of the timers:
     incident this extension closes); above the cap the supervisor's
     kill-switch would fire before the Job could self-terminate with a
     classifiable DeadlineExceeded.
-  - the observation chain (A3, review 2026-10-17): the host's log stream
-    (+_STREAM_GRACE_S) and terminal wait (+_TERMINAL_GRACE_S) run in
-    sequence AFTER the Job deadline; the whole chain from Job creation
+  - the WORKER observation chain (A3, review 2026-10-17): the host's log
+    stream (+_STREAM_GRACE_S) and terminal wait (+_TERMINAL_GRACE_S) run
+    in sequence AFTER the Job deadline; the worker chain from Job creation
     must stay under the wait cap, else the supervisor's kill-switch
     (rc=124) fires while the host is still legitimately collecting the
-    Pod's evidence.
+    Pod's evidence. Honest whole-run note (doc honesty, review
+    2026-10-17): the cap bounds the worker chain (2340 < 2700), NOT the
+    whole run — the fresh check adds a 2160 s wait plus up to 30 s of
+    Pod lookups, so a whole run can reach at least 4530 s. If it does:
+    rc=124 -> `launch.sh status` -> `launch.sh stop` (SIGTERM), finally
+    removes only the resources the run created, the patch is NOT applied.
+    Reconsideration trigger: the first real run hitting the cap during
+    the fresh phase.
 Evidence: no rc=124 in any evidence/summary.json; the longest real run is
 far below the cap. A silent drift of either constant (e.g. "fixing" the
 mismatch by raising the cap) must fail this test and force an explicit
@@ -64,14 +71,24 @@ def test_job_deadline_sits_between_turn_timeout_and_cap(monkeypatch):
 def test_observation_chain_stays_under_the_cap(monkeypatch):
     # A3 (review 2026-10-17): the host's post-deadline windows run in
     # sequence after the Job deadline (log stream, then terminal wait).
-    # The whole chain from Job creation must stay strictly under the
-    # supervisor's wait cap: at the cap the supervisor's kill-switch
-    # (rc=124, CLAUDE.supervisor.md §4) would fire while the host is
-    # still legitimately collecting the Pod's evidence. The exact sum is
-    # pinned so that raising any grace forces an explicit decision.
+    # The WORKER observation chain from Job creation must stay strictly
+    # under the supervisor's wait cap: at the cap the supervisor's
+    # kill-switch (rc=124, CLAUDE.supervisor.md §4) would fire while the
+    # host is still legitimately collecting the Pod's evidence. The exact
+    # sum is pinned so that raising any grace forces an explicit decision.
     #
-    # This sum is the genuine worst case only because both windows share
-    # ONE absolute end point anchored at Job creation (k8s._observation_
+    # Honest whole-run note (doc honesty, review 2026-10-17): this sum
+    # bounds the worker chain only. The fresh check runs after it
+    # (_fresh_job waits deadline + _TERMINAL_GRACE_S = 2160 after up to
+    # 30 s of Pod lookups), so a whole run can reach at least 4530 s —
+    # past the 2700 s cap. Consequence: rc=124 -> `launch.sh status` ->
+    # `launch.sh stop` (SIGTERM); finally removes only the resources the
+    # run created; the patch is NOT applied. Reconsideration trigger: the
+    # first real run hitting the cap during the fresh phase.
+    #
+    # This sum is the genuine worst case for the worker chain only
+    # because both windows share ONE absolute end point anchored at Job
+    # creation (k8s._observation_
     # timeout): each call gets only the time remaining to that point, so
     # the sequential chain cannot exceed deadline + stream + terminal.
     # The original defect (external review 2026-10-17, finding 1) was

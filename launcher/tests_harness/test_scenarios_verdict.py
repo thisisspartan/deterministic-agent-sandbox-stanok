@@ -19,8 +19,10 @@ Discipline (operator, 2026-10-09, unchanged):
 
 Harness (CC-258): host_launch_k8s with the cluster cycle mocked (kubectl,
 Pod stream, fresh Job, image provenance); the REAL transport (git fixture +
-pack_tree), patch gate, scratch contract recompute, fresh gating and publish
-run. The worker's mid-run tampering arrives the k8s way: as changes.patch in
+pack_tree), patch gate, scratch contract recompute, fresh gating, B4 live-
+tree guard (k8s._live_tree_drift — the fixture exports STANOK_START_COMMIT
+like the real cli and gitignores evidence/ like the real repo, so a clean
+run passes it) and publish run. The worker's mid-run tampering arrives the k8s way: as changes.patch in
 the evidence payload, applied to the scratch tree. The published summary
 carries the host stamps (patch_sha256, image_digest, acceptance — G4: the
 host's own ticket parse, the Pod is not its own judge) — scenarios 1/7/10
@@ -60,7 +62,8 @@ Scenarios:
     rc=16 ENV-FAIL, the deliverable does NOT land (the old WARN kept
     publishing rc=0/PASS with the patch unapplied);
   13 A5: the live `git apply` fails -> rc=16 ENV-FAIL, the live tree keeps
-    its foreign content (same downgrade, natural failure).
+    its foreign content (same downgrade, natural failure; the B4 guard is
+    stubbed — the drift appears in the guard->apply TOCTOU window).
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_scenarios_verdict.py -q
 """
@@ -100,6 +103,12 @@ def _repo(tmp_path):
     (repo / "tests" / "t_test.py").write_text("def test_x():\n    assert 1 == 1\n",
                                                encoding="utf-8")
     (repo / "scripts" / "run.sh").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    # B4 guard fidelity: the fixture mirrors the real repo's .gitignore
+    # (.gitignore:2) — evidence/ is a run artifact, not tree content.
+    # Without it the published evidence would dirty the fixture tree and the
+    # live-apply guard (k8s._live_tree_drift) would fire on every clean
+    # scenario.
+    (repo / ".gitignore").write_text("evidence/\n", encoding="utf-8")
     git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,
                                     capture_output=True, text=True)
     git("init", "-q")
@@ -169,6 +178,14 @@ def _k8s_scenario(tmp_path, monkeypatch, *, worker_summary=CLEAN_WORKER,
     args, calls) — calls records the kubectl verbs and "fresh" (whether the
     fresh Job ran)."""
     repo, cfg = _repo(tmp_path)
+    # B4 guard precondition: the real cli captures the start commit and
+    # exports STANOK_START_COMMIT before any launch (cli.py:627-639) — the
+    # fixture must do the same, or the guard's unset-env branch would fire
+    # on every scenario that reaches the live apply.
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True,
+                          check=True).stdout.strip()
+    monkeypatch.setenv("STANOK_START_COMMIT", head)
     ticket = tmp_path / "ticket.md"
     ticket.write_text(ticket_text, encoding="utf-8")
     args = argparse.Namespace(label="lbl", ticket="ticket.md",
@@ -466,6 +483,13 @@ def test_scenario_live_apply_failure_downgrades(tmp_path, monkeypatch):
             "# foreign content, not the patch\n", encoding="utf-8")
         return (0, "")
     monkeypatch.setattr(k8s, "_fresh_job", rogue_fresh)
+    # B4 guard interaction: the guard is a point-in-time check and would
+    # catch this drift before the apply (dirty-tree branch, tested in
+    # test_k8s_head_drift.py). To keep the apply-failure branch reachable,
+    # the guard is stubbed as if it had run BEFORE the drift appeared — the
+    # TOCTOU window between guard and `git apply` is exactly where a real
+    # apply failure lives.
+    monkeypatch.setattr(k8s, "_live_tree_drift", lambda cfg: None)
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     assert rc == 16
     dst = _published(repo)

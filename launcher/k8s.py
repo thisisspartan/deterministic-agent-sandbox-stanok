@@ -248,6 +248,39 @@ def patch_identity_ok(patch_file: str, expected: str) -> bool:
         return False
 
 
+def _live_tree_drift(cfg) -> str | None:
+    """B4 (external review 2026-10-17): the live-apply is only sound if the
+    live tree is still the tree the run started from. The verdict was
+    computed against the TRANSPORTED tree (`git archive HEAD` at snapshot
+    time) + patch — never against the live tree; STANOK_START_COMMIT
+    (cli._capture_start_commit, exported before launch) pins the commit the
+    run started from. A moved HEAD or uncommitted changes mean something
+    OUTSIDE this run changed the apply target between the snapshot and this
+    moment — fail closed: a git error counts as drift (unknown state), an
+    unset STANOK_START_COMMIT means the start commit is unknowable.
+    Returns a drift description, or None when the tree is provably
+    unchanged. Point-in-time by nature: drift appearing between this check
+    and `git apply` is still caught by the apply itself (conflicting patch,
+    scenario 13)."""
+    start_commit = os.environ.get("STANOK_START_COMMIT", "")
+    if not start_commit:
+        return ("STANOK_START_COMMIT is unset — the run's start commit is "
+                "unknown, the live tree cannot be proven unchanged")
+    r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cfg.repo_root,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return (f"git rev-parse HEAD failed (rc={r.returncode}): "
+                f"{r.stderr.strip()} — the live tree cannot be proven unchanged")
+    head = r.stdout.strip()
+    if head != start_commit:
+        return (f"live tree HEAD {head} != run start commit {start_commit} — "
+                "the tree moved since the run began")
+    if gates.dirty_tree_gate(cfg):
+        return ("live tree has uncommitted changes (git status --porcelain "
+                "non-empty) — the tree was touched since the run began")
+    return None
+
+
 def apply_patch_scratch(tree_blob: str, patch_text: str) -> str:
     """The scratch tree the k8s-mode verdict is computed against: extracted
     transport tree + `git apply` of the Pod's patch (git apply works outside
@@ -537,10 +570,19 @@ _DEADLINE_MARGIN_S = 300
 # A3 (review 2026-10-17): the post-deadline observation graces, named. The
 # host keeps watching past the Job's own activeDeadlineSeconds so it can
 # still read the Pod's logs and the Job's terminal condition after the Pod
-# self-terminates. The whole observation chain (job_deadline + stream grace +
-# terminal grace) must stay under the supervisor's wait cap
-# (cli.WAIT_TIMEOUT_S) — test_timer_contract pins the SUM, not just the
-# deadline stage.
+# self-terminates. The WORKER observation chain (job_deadline + stream
+# grace + terminal grace, all sharing one absolute end anchored at Job
+# creation) must stay under the supervisor's wait cap (cli.WAIT_TIMEOUT_S)
+# — test_timer_contract pins the SUM, not just the deadline stage.
+# Honest whole-run note (A3 doc honesty, review 2026-10-17): the cap
+# bounds the worker chain (2340 < 2700), NOT the whole run. The fresh
+# check runs after it: _fresh_job waits deadline + _TERMINAL_GRACE_S
+# (2160, k8s.py:778) after up to 30 s of Pod lookups (:773, :787) — a
+# whole run can reach at least 4530 s, past the 2700 s cap. Consequence
+# if that happens: the supervisor hits rc=124 (45-min cap) -> `launch.sh
+# status` -> `launch.sh stop` (SIGTERM); finally removes only the
+# resources the run created; the patch is NOT applied. Reconsideration
+# trigger: the first real run that hits the cap during the fresh phase.
 _STREAM_GRACE_S = 180
 _TERMINAL_GRACE_S = 60
 
@@ -552,8 +594,10 @@ def _observation_timeout(obs_start: float, deadline: int, grace_s: int) -> int:
     (deadline+180)+(deadline+60)=4440 — past the supervisor's wait cap.
     Both windows instead share ONE absolute end point measured from
     obs_start (Job creation): a call gets only the time remaining to
-    obs_start + deadline + grace_s. Worst case from Job creation is then
-    deadline + _STREAM_GRACE_S + _TERMINAL_GRACE_S = 2340 < cap. Call this
+    obs_start + deadline + grace_s. Worst case for the worker observation
+    chain from Job creation is then deadline + _STREAM_GRACE_S +
+    _TERMINAL_GRACE_S = 2340 < cap (the whole run, fresh check included,
+    can exceed the cap — see the constants-block note). Call this
     at each call site, never precompute — the remaining time is what bounds
     the chain."""
     return max(0, int(obs_start + deadline + grace_s - time.monotonic()))
@@ -1450,17 +1494,40 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                     f"final PASS but patch identity mismatch before live "
                     f"apply (expected {patch_sha}) — patch not applied")
             else:
-                r = subprocess.run(["git", "apply", patch_file],
-                                   cwd=cfg.repo_root,
-                                   capture_output=True, text=True)
-                if r.returncode != 0:
-                    log(f"ERROR: final PASS but git apply on the live tree "
-                        f"failed (rc={r.returncode}): {r.stderr.strip()}")
+                # B4 (external review 2026-10-17): the identity check above
+                # proves the BYTES; this proves the TARGET — the patch may
+                # only land on the tree the run started from (HEAD ==
+                # STANOK_START_COMMIT, porcelain clean). Drift means the
+                # apply target is not the tree the verdict was computed
+                # against: same downgrade as the identity branch (rc=16
+                # ENV-FAIL, summary overwritten via write_env_fail_summary).
+                # Nothing is copied or deleted (operator decision 2026-10-17,
+                # variant 1): changes.patch stays exactly where it was
+                # written — live_dir under LOG_DIR (/tmp/stanok-logs on the
+                # host, config.py:83) — temporary by design; the message
+                # names the path from the `patch_file` variable itself, so
+                # it cannot diverge from the real file.
+                drift = _live_tree_drift(cfg)
+                if drift is not None:
+                    log(f"ERROR: final PASS but {drift} — apply SKIPPED")
                     rc = int(ExitCode.ENV_FAIL)
                     write_env_fail_summary(
                         cfg, label,
-                        f"final PASS but git apply on the live tree failed "
-                        f"(rc={r.returncode}): {r.stderr.strip()}")
+                        f"final PASS but {drift} — patch NOT applied; "
+                        f"changes.patch retained at {patch_file} "
+                        "(temporary, lives under /tmp)")
+                else:
+                    r = subprocess.run(["git", "apply", patch_file],
+                                       cwd=cfg.repo_root,
+                                       capture_output=True, text=True)
+                    if r.returncode != 0:
+                        log(f"ERROR: final PASS but git apply on the live tree "
+                            f"failed (rc={r.returncode}): {r.stderr.strip()}")
+                        rc = int(ExitCode.ENV_FAIL)
+                        write_env_fail_summary(
+                            cfg, label,
+                            f"final PASS but git apply on the live tree failed "
+                            f"(rc={r.returncode}): {r.stderr.strip()}")
         return rc
     except KeyboardInterrupt:
         return run_state.interrupted_rc or 130

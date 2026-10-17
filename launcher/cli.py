@@ -59,8 +59,8 @@ def _fail_early(cfg, run_state, job: dict, start_ts: int, code: int, error: str)
     """Early-failure exit for cmd_run: write the summary, remove the marker.
 
     The same three steps every pre-session refusal in cmd_run needs (ticket
-    parse, no-declared-paths, server preflight, workspace prep) — one place,
-    so no refusal path can forget the marker cleanup.
+    parse, no-declared-paths, server preflight) — one place, so no refusal
+    path can forget the marker cleanup.
     """
     job["rc"] = int(code)
     job["error"] = error

@@ -24,7 +24,10 @@ the Pod works on the transported copy (no host `.git` — it re-inits git only
 to produce `changes.patch`); the Pod returns evidence + patch as a
 nonce-marked base64 payload; the live tree is never touched during the run.
 The host applies the patch to a scratch tree for the contract recompute and
-lands it on the live tree ONLY on a clean verdict. Echelon 1 (`:ro` file
+lands it on the live tree ONLY on a clean verdict AND only on the tree the
+run started from (B4 guard `k8s._live_tree_drift`, review 2026-10-17: HEAD
+== STANOK_START_COMMIT + porcelain clean, re-checked immediately before the
+apply; drift = rc=16 ENV-FAIL, patch not applied). Echelon 1 (`:ro` file
 binds) is abolished (operator decision 2026-10-10): the contract recompute is
 host-side on the scratch tree, same `_tests_manifest`/`_compare_manifests`
 code path. The unified launch preflight (`k8s._preflight`, rc=16) runs
@@ -166,8 +169,12 @@ same `_compare_manifests` code path) -> k8s._fresh_job (fresh Job on the
 scratch tree, T3-3; runs ONLY when the payload was retrieved AND the contract
 is intact — spec §1.6) -> summary._publish_evidence (the HOST issues the
 final verdict, Authority below; publishes nothing when the files are absent)
--> patch lands on the live tree ONLY on a clean verdict -> tracked-resource
-cleanup (`create`-not-`apply`) -> marker removal
+-> live-apply gates (A5+B4, review 2026-10-17): third identity re-check
+(k8s.patch_identity_ok — the BYTES) + k8s._live_tree_drift (the TARGET:
+HEAD == STANOK_START_COMMIT, porcelain clean; drift = rc=16 ENV-FAIL, the
+patch is NOT applied, changes.patch stays in live_dir, temporary) -> patch
+lands on the live tree ONLY on a clean verdict on an unchanged tree ->
+tracked-resource cleanup (`create`-not-`apply`) -> marker removal
 
 -> evidence/<label>/summary.json is read exactly once by the supervisor
 (CLAUDE.supervisor.md §3)
@@ -286,7 +293,7 @@ promise code correctness.
 | `launcher/logs.py` | logging (`log()`; the per-run sink `_stdout_log_f` assigned by `cli.cmd_run`) |
 | `launcher/cli.py` | the gate order + launch-level rc codes; run/wait/status/stop |
 | `launcher/gates.py` | fail-closed gates: root refusal, dirty tree, test config, hidden files, zone-symlink ban, server preflight |
-| `launcher/ticket.py` | ticket header parse, declared-path validation, workspace prep |
+| `launcher/ticket.py` | ticket header parse, declared-path validation |
 | `launcher/k8s.py` | the ONLY runtime (CC-258): kubectl Jobs (worker + fresh), ConfigMap transport (`pack_tree`/payload nonce rules), patch gate + `patch_sha256`, image provenance stamp (`image_digest` — the Pod's containerStatuses imageID, host-stamped, None when unavailable), scratch recompute, unified launch preflight (`_preflight`: disk/image/Opik/cluster/RuntimeClass/dangling, rc=16), tracked-resource cleanup (`create`-not-`apply` ownership proof) |
 | `launcher/netpol.py` | NetworkPolicy template rendering (addresses from config/env, never hardcoded) |
 | `launcher/pod_runner.py` | the in-Pod runner: tree reconstruction from the transport, the Pod's git base commit, the settings tracing rewrite (CC-225), the in-container session call, the evidence payload (one nonce-marked block) |
