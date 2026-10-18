@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import VENV_BIN  # interpreter pin, same as the run.sh suites (CC-156)
 from launcher import gates, verify
 from launcher.config import Config
 from launcher.plan import SessionPlan
@@ -128,6 +129,99 @@ def test_write_paths_exist():
 
 def test_git_repo_initialized():
     assert (REPO_ROOT / ".git").exists()
+
+
+# --- Trusted fixtures (boundary oracles): incident 7fb18e6 -------------------
+# 7fb18e6 "chore: clean for new task — infra only" deleted 12 files/2505
+# lines from a clean tree, including the boundary-judge pair
+# (tests/fixtures/vt_screen.py + tests/vt_screen_test.py). No gate could
+# see it: the two-echelon protection fires on MACHINE patches inside a turn
+# (verify.py manifest diff; verify.py:305) and the host has no turn. A
+# HEAD-anchored check does not help either — once the deletion is committed,
+# HEAD matches the tree and the check greens again. Operator decision
+# 2026-10-18 ("option (a) plus manifest-check"): trusted helpers stay in
+# tests/fixtures and are declared in this check. Removal is possible only by
+# editing TRUSTED_FIXTURES here — an explicit, reviewable host-side diff.
+
+# The manifest of trusted fixture modules (repo-relative). A fixture is
+# trusted infrastructure (an accept oracle), not product: cleanup sweeps
+# that remove product files must not remove these.
+TRUSTED_FIXTURES = ("tests/fixtures/vt_screen.py",)
+
+
+def _fixture_selftests(fixture_rel):
+    """Self-tests that prove one fixture: tests/**/<stem>_test.py.
+
+    tests/fixtures/ itself is excluded: fixtures are the trusted side, not
+    checks (the same exemption run.sh applies in test discovery,
+    scripts/run.sh:120,129, and CLAUDE.md's W12 exemptions).
+    """
+    tests_dir = REPO_ROOT / "tests"
+    stem = Path(fixture_rel).stem
+    out = []
+    if not tests_dir.is_dir():
+        return out
+    for p in tests_dir.rglob(f"{stem}_test.py"):
+        if "fixtures" in p.relative_to(tests_dir).parts:
+            continue
+        out.append(p)
+    return out
+
+
+def _all_fixtures_on_disk():
+    fx = REPO_ROOT / "tests" / "fixtures"
+    if not fx.is_dir():
+        return []
+    return sorted(str(p.relative_to(REPO_ROOT)) for p in fx.rglob("*.py"))
+
+
+def test_trusted_fixtures_present_and_paired():
+    # (1) every declared trusted fixture exists on disk; (2) every fixture
+    # on disk — declared or not — has a pairing self-test. (1) guards the
+    # trusted set against silent deletion (the 7fb18e6 class); (2) makes
+    # "trusted" mean testable, not just present.
+    missing = [f for f in TRUSTED_FIXTURES if not (REPO_ROOT / f).is_file()]
+    assert not missing, (
+        f"trusted fixtures missing from the working tree: {missing} — "
+        "host-side cleanup never passes any pipeline gate (no gate sees a "
+        "host action); this check IS the gate. Restore the files, or edit "
+        "TRUSTED_FIXTURES deliberately (a host-side diff, reviewable).")
+    unpaired = [f for f in sorted(set(TRUSTED_FIXTURES) | set(_all_fixtures_on_disk()))
+                if not _fixture_selftests(f)]
+    assert not unpaired, (
+        f"fixtures without a pairing self-test (tests/**/<stem>_test.py): "
+        f"{unpaired} — a fixture nobody tests is not a trusted helper")
+
+
+def test_trusted_fixture_selftests_green():
+    # Existence is not trust: each pairing self-test must actually run
+    # green. Subprocess isolation on purpose — the judge's own suite opens
+    # real PTYs and must be executed the way run.sh's py runner executes
+    # them: the image-pinned interpreter (conftest.VENV_BIN, CC-156) when
+    # .venv is present, otherwise the harness's own interpreter — the same
+    # convention as conftest's run() helper. run.sh's two hygiene flags
+    # (-p no:cacheprovider, PYTHONDONTWRITEBYTECODE) are carried over so a
+    # doctor probe cannot dirty the tree it guards. The bound is looser than
+    # run.sh's per-file 60 s (scripts/run.sh:199): this guard invokes a
+    # whole suite once and is capped by subprocess.run's timeout.
+    targets = sorted({t for f in TRUSTED_FIXTURES
+                      for t in _fixture_selftests(f)})
+    assert targets, "no pairing self-tests found for TRUSTED_FIXTURES"
+    for t in targets:
+        env = dict(os.environ)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if VENV_BIN.is_dir():
+            env["PATH"] = str(VENV_BIN) + os.pathsep + env.get("PATH", "")
+        proc = subprocess.run(
+            ["python3", "-m", "pytest", "-p", "no:cacheprovider", "-q",
+             str(t.relative_to(REPO_ROOT))],
+            cwd=str(REPO_ROOT), env=env, capture_output=True, text=True,
+            timeout=180,
+        )
+        assert proc.returncode == 0, (
+            f"trusted-fixture self-test {t.relative_to(REPO_ROOT)} is not "
+            f"green (rc={proc.returncode}):\n"
+            f"{(proc.stdout + proc.stderr)[-1500:]}")
 
 
 @_NO_DOCKER
