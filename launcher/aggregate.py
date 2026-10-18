@@ -10,6 +10,16 @@ is NOT imported by the run path (cli/session/k8s never import it) and adds no
 dependencies (stdlib only). It reports observations — no STOP thresholds, no
 causation claims.
 
+Metrics extension (host-side, evidence-metrics task 2026-10-18): a per-run
+table, machine-quality eligibility (machine outcomes + an explicitly declared
+acceptance.mode), context-time Σ(live_context × turn-duration) in
+token-seconds from per-turn telemetry (NOT the top-level elapsed_s, which is
+wall time including transport/gates), and min/median/max over eligible
+records only. Rules held as code, not prose: an absent or invalid field is
+`unknown`, never a zero; launch-level outcomes and records with an
+undeclared acceptance.mode are listed separately with a reason; absence of
+retry chains in a window is NOT first-pass acceptance.
+
 CLI: python3 -m launcher.aggregate [evidence_dir]
 """
 
@@ -17,6 +27,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 import sys
 from pathlib import Path
 
@@ -31,6 +42,17 @@ CONTEXT_BUCKETS = [(0, 20_000), (20_000, 40_000), (40_000, 60_000),
 # launch-level (infrastructure/ticket-input) failure, not a model outcome.
 TIMEOUT_RC = 124
 INFRA_RCS = {13, 14, 15, 16, 17, 20, 21, 22, 24, 26, 27}
+
+# Outcomes that represent a machine run whose verdict was produced.
+# INFRA/TIMEOUT/MISSING/CORRUPT are launch-level (host-side) outcomes: real
+# observations, but never mixed into machine-quality views.
+MACHINE_OUTCOMES = ("PASS", "NO-OP", "DEFECT")
+
+# acceptance.mode values that mean the ticket declared its acceptance
+# explicitly ("none" is a declared decision, not a gap). Anything else —
+# missing block, "undeclared" — is a data-quality defect: such records stay
+# in the table but never in a machine-quality denominator.
+DECLARED_ACCEPTANCE = ("none", "provided")
 
 MARKERS = ("CONTEXT-ROT", "PREFIX-BREAK")
 
@@ -76,6 +98,57 @@ def max_live_context(summary: dict) -> int | None:
     return max(values) if values else None
 
 
+def context_time_seconds(summary: dict) -> float | None:
+    """Σ live_context_tokens × elapsed_s over inference_telemetry.per_turn.
+
+    A load approximation in token-seconds, NOT a GPU measurement. Sums the
+    per-turn durations from telemetry; the top-level elapsed_s (wall time
+    including transport/gates) is deliberately not used. Valid only when
+    EVERY turn carries a non-negative int context and a non-negative numeric
+    duration; otherwise None — unknown, never zero.
+    """
+    telemetry = summary.get("inference_telemetry")
+    if not isinstance(telemetry, dict):
+        return None
+    turns = telemetry.get("per_turn")
+    if not isinstance(turns, list) or not turns:
+        return None
+    total = 0.0
+    for turn in turns:
+        if not isinstance(turn, dict):
+            return None
+        ctx = turn.get("live_context_tokens")
+        dur = turn.get("elapsed_s")
+        if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx < 0:
+            return None
+        if isinstance(dur, bool) or not isinstance(dur, (int, float)) or dur < 0:
+            return None
+        total += ctx * dur
+    return total
+
+
+def acceptance_mode(summary: dict):
+    """acceptance.mode as recorded (None when the block is absent)."""
+    acceptance = summary.get("acceptance")
+    return acceptance.get("mode") if isinstance(acceptance, dict) else None
+
+
+def exclusion_reason(summary: dict, outcome: str) -> str | None:
+    """None → eligible for machine-quality views; else the stated reason.
+
+    Two independent exclusions, both reported verbatim when both apply:
+    a launch-level outcome (host-side, not a machine defect), and an
+    acceptance.mode that was not explicitly declared (data-quality defect).
+    """
+    reasons = []
+    if outcome not in MACHINE_OUTCOMES:
+        reasons.append(f"outcome {outcome} (launch-level, not machine quality)")
+    mode = acceptance_mode(summary)
+    if mode not in DECLARED_ACCEPTANCE:
+        reasons.append(f"acceptance.mode={mode!r} not declared")
+    return "; ".join(reasons) if reasons else None
+
+
 def retry_of(label: str) -> tuple[str | None, int | None]:
     """Split a label into (base_label, retry_number); (None, None) if not a retry."""
     m = _RETRY_RE.match(label)
@@ -115,6 +188,9 @@ def load_record(label_dir: Path) -> dict:
         "turns": None,
         "elapsed_s": None,
         "max_live_context": None,
+        "context_time_s": None,
+        "acceptance_mode": None,
+        "excluded_reason": "no summary.json parsed (MISSING/CORRUPT)",
         "markers": {m: 0 for m in MARKERS},
         "failures_lines": 0,
         "other_files": [],
@@ -157,6 +233,9 @@ def load_record(label_dir: Path) -> dict:
         "turns": summary.get("turns"),
         "elapsed_s": summary.get("elapsed_s"),
         "max_live_context": max_live_context(summary),
+        "context_time_s": context_time_seconds(summary),
+        "acceptance_mode": acceptance_mode(summary),
+        "excluded_reason": exclusion_reason(summary, outcome),
         "markers": count_markers(label_dir / "launcher.stdout.log"),
     })
     failures = label_dir / "failures.log"
@@ -234,6 +313,43 @@ def build_report(records: list[dict]) -> str:
     lines += ["", f"incomplete evidence: {len(incomplete)}"]
     for r in incomplete:
         lines.append(f"  {r['label']}: {r['outcome']} ({r['note']})")
+
+    # --- metrics extension: table, eligibility, quantiles -----------------
+    lines += ["", "per-run table (unknown = field absent/invalid, never zero):"]
+    for r in records:
+        lines.append(
+            f"  {r['label']}: outcome={r['outcome']} subtype={r['subtype'] or '-'}"
+            f" rc={r['rc']} verifier={r['verifier']} turns={r['turns']}"
+            f" elapsed_s={r['elapsed_s']} max_live_context={r['max_live_context']}"
+            f" context_time_s={r['context_time_s']}"
+            f" acceptance={r['acceptance_mode']}"
+            f" eligible={'yes' if r['excluded_reason'] is None else 'no'}")
+
+    excluded = [r for r in records if r["excluded_reason"] is not None]
+    lines += ["", f"excluded from machine-quality views: {len(excluded)}"]
+    for r in excluded:
+        lines.append(f"  {r['label']}: {r['excluded_reason']}")
+
+    eligible = [r for r in records if r["excluded_reason"] is None]
+    lines += ["", f"machine-quality quantiles (eligible runs: {len(eligible)}) —"
+                  " sample is the retained evidence only: observations, no"
+                  " thresholds, no causation, no system-wide performance claim;"
+                  " absence of retry chains in a window is NOT first-pass"
+                  " acceptance:"]
+    for name in ("context_time_s", "max_live_context", "elapsed_s"):
+        values = [r[name] for r in eligible
+                  if not isinstance(r[name], bool)
+                  and isinstance(r[name], (int, float))]
+        if not values:
+            lines.append(f"  {name}: unknown (no eligible record with valid data)")
+            continue
+        ordered = sorted(values)
+        unit = (" token-seconds (Σ live_context×turn-duration, load"
+                " approximation, not a GPU measurement)"
+                if name == "context_time_s" else "")
+        lines.append(f"  {name}: n={len(ordered)} min={ordered[0]}"
+                     f" median={statistics.median(ordered)}"
+                     f" max={ordered[-1]}{unit}")
     return "\n".join(lines)
 
 
