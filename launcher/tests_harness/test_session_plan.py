@@ -193,10 +193,19 @@ def test_zone_consumers_read_the_constant(tmp_path, monkeypatch):
     assert gates.hidden_files_gate(cfg) is True     # zoneA is scanned now
 
 
-def test_header_kinds_are_impl_test_docs_edit_accept():
+def test_header_kinds_are_impl_test_docs_edit_accept(tmp_path):
+    # Hermetic (post-TETRIS2 cleanup): `accept:` requires the trusted file to
+    # pre-exist, so the test provides its own under a tmp repo instead of
+    # depending on a live tests/ fixture (the former
+    # tests/runtime_contract_test.py was deleted by the infra cleanup).
+    # The declared paths must sit under existing directories in the tmp repo.
+    write(tmp_path / "src" / ".keep", "")
+    write(tmp_path / "docs" / ".keep", "")
+    write(tmp_path / "tests" / "b_test.py", "")
+    write(tmp_path / "tests" / "runtime_contract_test.py", "")
     declared, edit_paths, reset_none, accept_paths, accept_mode = \
         ticket.parse_ticket_header(
-            Config(),
+            Config(repo_root=str(tmp_path)),
             "impl: src/a.py\n"
             "test: tests/a_test.py\n"
             "docs: docs/a.md\n"
