@@ -6,9 +6,10 @@ live `tickets/` dir and `evidence/` of the parent repo do NOT reach the Pod
 (transport = `git archive HEAD` = tracked tree only).
 
 Each sample is signed: what is bad, which rule catches it, expected rc and
-exact stdout. Headers are mutations of REAL ticket headers: a scan of the 154
-live tickets found zero violations of these rules, so historical bad samples
-do not exist — the bad samples are honestly synthetic mutations, signed below.
+exact stdout. Headers are mutations of REAL ticket headers: the scan of the
+live ticket corpus at authoring time (2026-10-18) found zero violations of
+these rules, so historical bad samples do not exist — the bad samples are
+honestly synthetic mutations, signed below.
 Synthetic numbers 900+ are outside the live ticket-number range. Privacy: no
 IPs, no home paths (this dir is published with the repo).
 
