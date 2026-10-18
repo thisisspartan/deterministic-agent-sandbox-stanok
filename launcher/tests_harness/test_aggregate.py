@@ -10,7 +10,9 @@ over per-turn telemetry (exact sum on valid data, None/unknown on every
 invalid variant, never zero), acceptance-mode eligibility (declared
 "none"/"provided" vs missing/"undeclared" data-quality defect),
 launch-level vs machine-quality exclusion reasons, per-run table and
-quantile rendering in the report.
+quantile rendering in the report, quantiles GROUPED by acceptance.mode
+(no pooling of none with provided; a mode with no eligible runs is
+omitted) — operator decision 2026-10-18 after external review.
 """
 import hashlib
 import json
@@ -365,10 +367,27 @@ def test_report_metrics_table_exclusions_and_quantiles(tmp_path):
 
     assert "machine-quality quantiles (eligible runs: 3)" in report
     # per-turn duration == the run's elapsed_s here: ctx×dur = 10000/40000/90000.
-    assert ("context_time_s: n=3 min=10000.0 median=40000.0 max=90000.0"
-            " token-seconds") in report
-    assert "max_live_context: n=3 min=1000 median=2000 max=3000" in report
-    assert "elapsed_s: n=3 min=10.0 median=20.0 max=30.0" in report
+    # Quantiles are grouped per acceptance.mode — none and provided are never
+    # pooled in one n=3 sample (external review 2026-10-18; operator decision).
+    lines = report.splitlines()
+    none_i = next(i for i, l in enumerate(lines)
+                  if "acceptance=none: eligible runs: 2" in l)
+    prov_i = next(i for i, l in enumerate(lines)
+                  if "acceptance=provided: eligible runs: 1" in l)
+    none_block = "\n".join(lines[none_i + 1:none_i + 4])
+    prov_block = "\n".join(lines[prov_i + 1:prov_i + 4])
+    assert ("context_time_s: n=2 min=10000.0 median=50000.0 max=90000.0"
+            " token-seconds") in none_block
+    assert "max_live_context: n=2 min=1000 median=2000.0 max=3000" in none_block
+    assert "elapsed_s: n=2 min=10.0 median=20.0 max=30.0" in none_block
+    assert ("context_time_s: n=1 min=40000.0 median=40000.0 max=40000.0"
+            " token-seconds") in prov_block
+    assert "max_live_context: n=1 min=2000 median=2000 max=2000" in prov_block
+    assert "elapsed_s: n=1 min=20.0 median=20.0 max=20.0" in prov_block
+    # No pooled-mode quantile may exist anywhere in the report.
+    assert not any("n=3" in l for l in lines
+                   if "context_time_s:" in l or "max_live_context:" in l
+                   or "elapsed_s:" in l)
 
 
 def test_quantiles_render_unknown_when_no_valid_values(tmp_path):

@@ -15,7 +15,9 @@ table, machine-quality eligibility (machine outcomes + an explicitly declared
 acceptance.mode), context-time Σ(live_context × turn-duration) in
 token-seconds from per-turn telemetry (NOT the top-level elapsed_s, which is
 wall time including transport/gates), and min/median/max over eligible
-records only. Rules held as code, not prose: an absent or invalid field is
+records, GROUPED by acceptance.mode — "none" and "provided" are never pooled
+in one sample (external review 2026-10-18; operator decision 2026-10-18:
+segment the view, do NOT add a boundary field to the ticket contract). Rules held as code, not prose: an absent or invalid field is
 `unknown`, never a zero; launch-level outcomes and records with an
 undeclared acceptance.mode are listed separately with a reason; absence of
 retry chains in a window is NOT first-pass acceptance.
@@ -335,21 +337,29 @@ def build_report(records: list[dict]) -> str:
                   " sample is the retained evidence only: observations, no"
                   " thresholds, no causation, no system-wide performance claim;"
                   " absence of retry chains in a window is NOT first-pass"
-                  " acceptance:"]
-    for name in ("context_time_s", "max_live_context", "elapsed_s"):
-        values = [r[name] for r in eligible
-                  if not isinstance(r[name], bool)
-                  and isinstance(r[name], (int, float))]
-        if not values:
-            lines.append(f"  {name}: unknown (no eligible record with valid data)")
+                  " acceptance; grouped by acceptance.mode (modes are never"
+                  " pooled in one sample; a mode without eligible runs is"
+                  " omitted):"]
+    for mode in DECLARED_ACCEPTANCE:
+        group = [r for r in eligible if r["acceptance_mode"] == mode]
+        if not group:
             continue
-        ordered = sorted(values)
-        unit = (" token-seconds (Σ live_context×turn-duration, load"
-                " approximation, not a GPU measurement)"
-                if name == "context_time_s" else "")
-        lines.append(f"  {name}: n={len(ordered)} min={ordered[0]}"
-                     f" median={statistics.median(ordered)}"
-                     f" max={ordered[-1]}{unit}")
+        lines.append(f"  acceptance={mode}: eligible runs: {len(group)}")
+        for name in ("context_time_s", "max_live_context", "elapsed_s"):
+            values = [r[name] for r in group
+                      if not isinstance(r[name], bool)
+                      and isinstance(r[name], (int, float))]
+            if not values:
+                lines.append(f"    {name}: unknown (no eligible record"
+                             " with valid data)")
+                continue
+            ordered = sorted(values)
+            unit = (" token-seconds (Σ live_context×turn-duration, load"
+                    " approximation, not a GPU measurement)"
+                    if name == "context_time_s" else "")
+            lines.append(f"    {name}: n={len(ordered)} min={ordered[0]}"
+                         f" median={statistics.median(ordered)}"
+                         f" max={ordered[-1]}{unit}")
     return "\n".join(lines)
 
 
