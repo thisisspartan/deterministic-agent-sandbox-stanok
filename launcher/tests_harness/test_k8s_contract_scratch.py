@@ -12,10 +12,23 @@ Tests:
   2  a patch that adds only the declared paths -> clean
   3  a patch that MODIFIES a pre-existing protected test -> MODIFIED
      violation
+  4  (wave C, operator 2026-10-20: same failure class as the numstat
+     mkdtemp case — variant 2) apply_patch_scratch: a tempfile.mkdtemp
+     OSError must reach the existing PATCH-APPLY channel (caller maps
+     RuntimeError, k8s.py), never escape as a raw OSError (host_launch_k8s
+     has no except Exception — the run would die with no verdict).
+     Characterization: the channel mapping is pinned end-to-end in
+     test_k8s_wiring.py (real apply, published CONTRACT-FAIL).
+  5  (wave C) a `git apply` failure in the scratch must not leak the
+     scratch temp dir (the variant-2 cleanup discipline; the
+     `git apply failed (rc=...)` literal is characterization — its only
+     source is k8s.py apply_patch_scratch itself).
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_contract_scratch.py -q
 """
+import os
 import subprocess
+import tempfile
 
 from launcher import k8s, verify
 from launcher.config import Config
@@ -90,3 +103,50 @@ def test_modified_protected_test_is_a_violation(tmp_path):
     scratch = k8s.apply_patch_scratch(k8s.pack_tree(str(repo)), patch)
     v = k8s.scratch_contract_violations(cfg, before, scratch, [])
     assert any("MODIFIED: tests/t_test.py" in x for x in v)
+
+
+# --- wave C (operator 2026-10-20): scratch setup failure class (tests 4/5) ---
+
+def test_scratch_mkdtemp_oserror_reaches_the_runtime_error_channel(monkeypatch):
+    # Wave C item (apply_patch_scratch:296): a tempfile.mkdtemp failure must
+    # not escape as a raw OSError — host_launch_k8s catches only
+    # RuntimeError at the call site (k8s.py, "PATCH-APPLY:" mapping) and has
+    # no except Exception, so a raw OSError kills the run without any
+    # published verdict. The channel type (RuntimeError) is pinned
+    # end-to-end in test_k8s_wiring.test_scratch_setup_failure_publishes
+    # _contract_fail; here only the type — the message wording is not a
+    # contract.
+    def boom(*a, **k):
+        raise OSError("mkdtemp: no space left on device")
+    monkeypatch.setattr(k8s.tempfile, "mkdtemp", boom)
+    try:
+        k8s.apply_patch_scratch("ignored-blob", "")
+        raise AssertionError("apply_patch_scratch returned despite mkdtemp failure")
+    except RuntimeError:
+        pass  # correct: mapped, never a raw OSError (OSError would escape)
+
+
+def test_scratch_git_apply_failure_does_not_leak_temp_dir(tmp_path, monkeypatch):
+    # A scratch dir created before a failed `git apply` must be removed —
+    # variant-2 cleanup discipline applied to the existing RuntimeError path
+    # (it raised the right type but left the dir in $TMPDIR). The
+    # "git apply failed" literal is characterization (source: k8s.py).
+    repo = _repo(tmp_path)
+    blob = k8s.pack_tree(str(repo))
+    created = []
+    real_mkdtemp = tempfile.mkdtemp  # bind BEFORE patching: k8s.tempfile is
+    # this same module — calling tempfile.mkdtemp inside the spy self-recurses.
+
+    def spy(*a, **k):
+        d = real_mkdtemp(*a, **k)
+        created.append(d)
+        return d
+    monkeypatch.setattr(k8s.tempfile, "mkdtemp", spy)
+    try:
+        k8s.apply_patch_scratch(blob, "this is not a diff at all\n")
+        raise AssertionError("apply_patch_scratch returned despite bad patch")
+    except RuntimeError as e:
+        assert "git apply failed" in str(e)
+    assert created, "spy never recorded a scratch dir"
+    assert all(not os.path.isdir(d) for d in created), \
+        f"scratch dir leaked: {[d for d in created if os.path.isdir(d)]}"

@@ -428,19 +428,42 @@ def _live_tree_drift(cfg) -> str | None:
 def apply_patch_scratch(tree_blob: str, patch_text: str) -> str:
     """The scratch tree the k8s-mode verdict is computed against: extracted
     transport tree + `git apply` of the Pod's patch (git apply works outside
-    a repo — verified 2026-10-10). Returns the scratch dir."""
-    scratch = tempfile.mkdtemp(prefix="stanok-scratch-")
-    unpack_tree(tree_blob, scratch)
-    if patch_text.strip():
-        patch_file = os.path.join(scratch, ".changes.patch")
-        with open(patch_file, "w", encoding="utf-8") as f:
-            f.write(patch_text)
-        r = subprocess.run(["git", "apply", ".changes.patch"], cwd=scratch,
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError(f"git apply failed (rc={r.returncode}): "
-                               f"{r.stderr.strip()}")
-    return scratch
+    a repo — verified 2026-10-10). Returns the scratch dir.
+
+    Wave C (operator 2026-10-20, the same failure class as the numstat
+    mkdtemp case fixed by variant 2): `tempfile.mkdtemp` runs inside the
+    try and an OSError from scratch setup is re-raised as RuntimeError —
+    the channel the call site in host_launch_k8s already maps to
+    PATCH-APPLY. Before this the mkdtemp was outside any try,
+    host_launch_k8s has no `except Exception` (only KeyboardInterrupt +
+    finally), and a failed mkdtemp escaped as a raw OSError: the run died
+    with no published verdict. A scratch dir created before ANY failure
+    (including the pre-existing `git apply` RuntimeError path, which used
+    to leak it) is removed. The `scratch = None` sentinel and the
+    `if scratch is not None` guard are load-bearing: rmtree(None) RAISES
+    TypeError on the host runtime 3.13.13 (measured 2026-10-19)."""
+    scratch = None
+    try:
+        scratch = tempfile.mkdtemp(prefix="stanok-scratch-")
+        unpack_tree(tree_blob, scratch)
+        if patch_text.strip():
+            patch_file = os.path.join(scratch, ".changes.patch")
+            with open(patch_file, "w", encoding="utf-8") as f:
+                f.write(patch_text)
+            r = subprocess.run(["git", "apply", ".changes.patch"],
+                               cwd=scratch, capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"git apply failed (rc={r.returncode}): "
+                                   f"{r.stderr.strip()}")
+        return scratch  # success: caller owns the dir and removes it
+    except OSError as e:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+        raise RuntimeError(f"scratch setup failed: {e}") from e
+    except BaseException:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+        raise
 
 
 def scratch_contract_violations(cfg, before: dict, scratch_dir: str,

@@ -340,11 +340,13 @@ def test_pod_image_id_fail_soft_is_none(monkeypatch):
 
 # --- Verdict cross-check (external review 2026-10-16): internal_rc vs summary rc ---
 
-def _payload_host_run(tmp_path, monkeypatch, payload):
+def _payload_host_run(tmp_path, monkeypatch, payload, real_apply=False):
     """Drive host_launch_k8s to the payload stage with a synthetic payload
     (extract_payload mocked — the nonce framing is tested in the transport
     tests); the post-payload stages are mocked so the test isolates the
-    internal-rc comparison. Returns (cfg, rc)."""
+    internal-rc comparison. real_apply=True leaves apply_patch_scratch
+    REAL (wave C scratch-failure test); the default keeps every earlier
+    test's mocked flow byte-identical. Returns (cfg, rc)."""
     repo, cfg = _k8s_repo(tmp_path)
     args = _k8s_args(tmp_path)
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
@@ -366,8 +368,9 @@ def _payload_host_run(tmp_path, monkeypatch, payload):
     monkeypatch.setattr(k8s, "extract_payload", lambda text, nonce: payload)
     # Post-payload stages: mocked so the test is about the comparison only.
     monkeypatch.setattr(k8s, "patch_gate", lambda text: [])
-    monkeypatch.setattr(k8s, "apply_patch_scratch",
-                        lambda blob, text: str(tmp_path / "scratch"))
+    if not real_apply:
+        monkeypatch.setattr(k8s, "apply_patch_scratch",
+                            lambda blob, text: str(tmp_path / "scratch"))
     monkeypatch.setattr(k8s, "scratch_contract_violations",
                         lambda cfg, before, scratch, declared: [])
     monkeypatch.setattr(k8s, "_fresh_job", lambda *a, **k: (0, "green"))
@@ -437,3 +440,29 @@ def test_missing_summary_payload_names_internal_exit(tmp_path, monkeypatch):
     _, rc = _payload_host_run(tmp_path, monkeypatch, payload)
     assert rc == 17
     assert any("exit code was 137" in line for line in logs)
+
+
+# --- wave C (operator 2026-10-20): scratch setup failure is a verdict, not a crash ---
+
+def test_scratch_setup_failure_publishes_contract_fail(tmp_path, monkeypatch):
+    # End-to-end with the REAL apply_patch_scratch: tempfile.mkdtemp fails
+    # (OSError) -> the caller's RuntimeError->PATCH-APPLY mapping must
+    # produce a published CONTRACT-FAIL verdict (rc=1), not an uncaught
+    # exception escaping host_launch_k8s (no except Exception exists there
+    # — only KeyboardInterrupt/finally). The "PATCH-APPLY" literal is
+    # characterization (source: k8s.py call site); "CONTRACT-FAIL" is the
+    # existing _publish_evidence vocabulary.
+    def boom(*a, **k):
+        raise OSError("mkdtemp: no space left on device")
+    monkeypatch.setattr(k8s.tempfile, "mkdtemp", boom)
+    payload = _summary_payload(0)
+    payload["internal_rc.txt"] = b"0\n"
+    cfg, rc = _payload_host_run(tmp_path, monkeypatch, payload, real_apply=True)
+    assert rc == 1
+    evidence_dir, _ = cfg.label_paths("lbl")
+    with open(os.path.join(evidence_dir, "summary.json"), encoding="utf-8") as f:
+        summary = json.load(f)
+    assert summary["rc"] == 1
+    assert summary["probe_result"] == "CONTRACT-FAIL"
+    with open(os.path.join(evidence_dir, "failures.log"), encoding="utf-8") as f:
+        assert "PATCH-APPLY" in f.read()
