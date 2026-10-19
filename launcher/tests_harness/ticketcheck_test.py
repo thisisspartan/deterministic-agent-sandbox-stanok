@@ -1,11 +1,11 @@
-"""ticketcheck_test — unit tests for src/ticketcheck.py (CC-296).
+"""ticketcheck_test — unit tests for launcher/ticketcheck.py (CC-296).
 
 tmp_path mini-trees only: the live tickets/ and evidence/ of the parent repo
 do not reach the Pod, so every tree is built here — src/ tests/ docs/,
 scripts/stacks/ with the REAL stack manifests copied from this repo
 (read-only source), fake ticket files and fake accept files. The frozen
-samples under tests/fixtures/tickets/ are read-only references; the
-subprocess boundary over them is tests/ticketcheck_boundary_test.py
+samples under launcher/tests_harness/fixtures_tickets/ are read-only references; the
+subprocess boundary over them is launcher/tests_harness/ticketcheck_boundary_test.py
 (host-authored). Here the API (load_registry / check_ticket / main) is
 exercised in-process.
 """
@@ -13,9 +13,9 @@ exercised in-process.
 import pathlib
 import shutil
 
-from src import ticketcheck
+from launcher import ticketcheck
 
-_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _STACKS_SRC = _REPO_ROOT / "scripts" / "stacks"
 
 

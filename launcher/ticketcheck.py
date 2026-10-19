@@ -27,7 +27,7 @@ tokens and the same loop structure, never a second grammar. Test-name
 registry: the test_glob field of scripts/stacks/*.toml — the single source,
 no hardcoded test-file names.
 
-Usage: python3 -m src.ticketcheck <ticket-file> [<ticket-file> ...]
+Usage: python3 -m launcher.ticketcheck <ticket-file> [<ticket-file> ...]
 run from the repo root (repo_root = os.getcwd()); input paths are echoed
 into messages exactly as given.
 
@@ -49,9 +49,9 @@ import sys
 import tomllib
 import types
 
-# The documented invocation is `python3 -m src.ticketcheck` from the repo
+# The documented invocation is `python3 -m launcher.ticketcheck` from the repo
 # root (repo root on sys.path). The run.sh smoke runner uses the direct form
-# `python3 src/ticketcheck.py`, where sys.path[0] is src/ — make the repo
+# `python3 launcher/ticketcheck.py`, where sys.path[0] is src/ — make the repo
 # root importable there too (a no-op for the -m/pytest forms, which already
 # have it).
 _REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -235,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     EDIT-PATH-MISSING (CC-298) is applied here, at the CLI assembly layer:
     after each file's check_ticket violations, in edit: declaration order
     (a PARSE-failed file skips ALL rules, including this one). The
-    check_ticket unit contract is unchanged — tests/ticketcheck_test.py
+    check_ticket unit contract is unchanged — launcher/tests_harness/ticketcheck_test.py
     pins it: a missing edit: path is not a check_ticket violation."""
     files = list(sys.argv[1:] if argv is None else argv)
     # Zero input files: nothing to check — no violation, no PARSE -> 0

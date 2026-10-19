@@ -1,41 +1,48 @@
-"""ticketcheck_boundary_test — the boundary acceptance for CC-296
-(src/ticketcheck.py).
+"""ticketcheck_boundary_test — the boundary check for launcher/ticketcheck.py
+(CC-296).
 
 Host-authored trusted check (the agent cannot author its own boundary accept;
 policy CC-286). The boundary is REAL: the tool runs as a separate process
-(`sys.executable -m src.ticketcheck`) reading frozen tracked fixture tickets
-under tests/fixtures/tickets/ and returning real exit codes — not an
-in-process monkeypatch. Do not edit or delete from a ticket: this file is the
-wave's acceptance boundary. Expected output strings are signed in
-tests/fixtures/tickets/README.md.
+(`sys.executable -m launcher.ticketcheck`) reading frozen tracked fixture tickets
+under launcher/tests_harness/fixtures_tickets/ and returning real exit codes — not an
+in-process monkeypatch. Do not edit or delete from a ticket. Expected output
+strings are signed in launcher/tests_harness/fixtures_tickets/README.md.
 
-Calibration record (host, 2026-10-18, before first use; etalon lived only
-in /tmp/ticketcheck-ref*, transient copy in src/ per run, removed after —
-FIRE-incident rule: the authoritative copy never lives only in a protected
-zone):
-  - RED on the live tree without src/ticketcheck.py: 6 failed, rc=1,
-    signature "/usr/bin/python3: No module named src.ticketcheck".
-  - GREEN on the /tmp/ticketcheck-ref reference: 6 passed in 0.23s.
-  - RED on /tmp/ticketcheck-ref-bad-name (name rule disabled): exactly
-    test_bad_test_name_rejected failed (1 failed, 5 passed).
-  - RED on /tmp/ticketcheck-ref-bad-location: exactly
+Placement note (host decision, 2026-10-20): the file was moved here from
+tests/ together with the validator. It was the CC-296 wave's provided-accept
+while it lived under tests/; under launcher/ it can no longer be a ticket's
+accept (the parser requires accept paths pre-existing under tests/) — the
+rule-level calibration for future tickets is kept by ticketcheck_contract_test.py
+in the same directory.
+
+Calibration (RE-executed 2026-10-20 after the src->launcher relocation — a
+test-body edit invalidates the previous calibration; lab /tmp/oracle-lab-tc-move,
+drivers mutate.py + mutate_boundary.py; the original calibration of 2026-10-18
+ran against src/ticketcheck.py — its record is superseded by this one):
+  - GREEN on the live tree: 6 passed.
+  - RED on the live tree with launcher/ticketcheck.py removed: 6 failed, rc=1,
+    signature "<sys.executable>: No module named launcher.ticketcheck".
+  - RED with the name rule disabled: exactly test_bad_test_name_rejected
+    failed (1 failed, 5 passed).
+  - RED with the location rule disabled: exactly
     test_bad_test_location_rejected failed.
-  - RED on /tmp/ticketcheck-ref-bad-dup: exactly
+  - RED with the duplicate rule disabled: exactly
     test_duplicate_ticket_number_rejected failed.
-  - After every run src/ left clean (git status --porcelain -- src/ empty).
+  - After every run the containing tree stays clean (no files created outside
+    pytest tmp; git status --porcelain empty).
 """
 
 import os
 import subprocess
 import sys
 
-_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_FIX = "tests/fixtures/tickets"
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_FIX = "launcher/tests_harness/fixtures_tickets"
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "-m", "src.ticketcheck", *args],
+        [sys.executable, "-m", "launcher.ticketcheck", *args],
         cwd=_REPO, capture_output=True, text=True, timeout=30)
 
 

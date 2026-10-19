@@ -1,7 +1,7 @@
 """ticketcheck_edit_path_test — unit tests for the EDIT-PATH-MISSING class
-of src/ticketcheck.py (CC-298).
+of launcher/ticketcheck.py (CC-298).
 
-tmp_path mini-trees only (the same convention as tests/ticketcheck_test.py):
+tmp_path mini-trees only (the same convention as launcher/tests_harness/ticketcheck_test.py):
 the API (check_ticket / main) is exercised in-process over trees built here —
 src/ tests/ docs/ plus the REAL stack manifests copied from this repo.
 Fixtures live in this file (conftest.py is not allowed).
@@ -10,7 +10,7 @@ Contract under test (additive only — the three existing classes and their
 order are pinned here too). The EDIT-PATH-MISSING rule is a CLI-layer rule
 (observed through main: exact stdout lines + rc — the ticket's observable),
 while check_ticket's unit contract is unchanged: a missing edit: path is NOT
-a check_ticket violation (pinned by tests/ticketcheck_test.py):
+a check_ticket violation (pinned by launcher/tests_harness/ticketcheck_test.py):
   - a declared edit: path that is not an existing regular file -> exactly one
     line "VIOLATION EDIT-PATH-MISSING: <ticket-file>: edit path '<rel>'
     does not exist", after all existing violations of the file, in edit:
@@ -24,9 +24,9 @@ a check_ticket violation (pinned by tests/ticketcheck_test.py):
 import pathlib
 import shutil
 
-from src import ticketcheck
+from launcher import ticketcheck
 
-_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _STACKS_SRC = _REPO_ROOT / "scripts" / "stacks"
 
 

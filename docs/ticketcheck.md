@@ -20,15 +20,16 @@ Why these four are the gap:
   here"), so a ticket declaring `edit:` on a missing file only fails after
   the agent burns the run discovering there is nothing to modify in place.
 
-Invocation: `python3 -m src.ticketcheck <ticket-file> [<ticket-file> ...]`
+Invocation: `python3 -m launcher.ticketcheck <ticket-file> [<ticket-file> ...]`
 from the repo root (`repo_root = os.getcwd()`); input paths are echoed into
 messages exactly as given. Stdlib only; the network is not used.
 
-Tests: `bash scripts/run.sh test tests/ticketcheck_test.py` (unit, in-process
-API over tmp_path mini-trees), `tests/ticketcheck_edit_path_test.py` (unit,
-the EDIT-PATH-MISSING class) and `tests/ticketcheck_boundary_test.py`
-(host-authored subprocess boundary over the frozen samples in
-`tests/fixtures/tickets/`).
+Tests (host harness under `launcher/tests_harness/` — not run via run.sh):
+`ticketcheck_test.py` (unit, in-process API over tmp_path mini-trees),
+`ticketcheck_edit_path_test.py` (unit, the EDIT-PATH-MISSING class),
+`ticketcheck_contract_test.py` (contract oracle) and
+`ticketcheck_boundary_test.py` (subprocess boundary over the frozen samples
+in `launcher/tests_harness/fixtures_tickets/`).
 
 ## API (names pinned)
 
@@ -46,7 +47,7 @@ main(argv=None) -> int
   `(violation_lines, parse_lines)`; `parse_lines` is non-empty exactly when
   the file is unreadable or `parse_ticket_header` rejects the header — then
   the rules are skipped for that file. Its unit contract does NOT include
-  rule 4 (pinned by `tests/ticketcheck_test.py`: a missing `edit:` path is
+  rule 4 (pinned by `launcher/tests_harness/ticketcheck_test.py`: a missing `edit:` path is
   not a `check_ticket` violation).
 - `main` — the CLI over argv (default `sys.argv[1:]`); rule 4
   (EDIT-PATH-MISSING) is applied here, after each file's `check_ticket`

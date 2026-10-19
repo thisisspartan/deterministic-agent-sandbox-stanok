@@ -1,22 +1,25 @@
-"""Host-authored contract oracle for src/ticketcheck.py (PLAN-ORACLE-PRACTICE generalization, 2026-10-19; B1 tmp-isolation + B2 provenance tiers + B3 M4 fix applied 2026-10-19).
+"""Host-authored contract oracle for launcher/ticketcheck.py (PLAN-ORACLE-PRACTICE generalization, 2026-10-19; B1 tmp-isolation + B2 provenance tiers + B3 M4 fix applied 2026-10-19).
 
 Execution isolation (B1): the oracle runs ONLY inside a session-scoped pytest
 tmp_path mini-tree (fixture `tree`) copied from the tree this file lives in
-(src, launcher, scripts/stacks, tests/fixtures — copies, never symlinks; plus
-an empty docs/ dir, because the real tree ships one and parse_ticket_header
-validates NEW top-level declared paths against existing directories). The
+(src, launcher — with the signed samples under
+launcher/tests_harness/fixtures_tickets — and scripts/stacks; copies, never
+symlinks; plus empty tests/ and docs/ dirs, because the real tree ships them
+and parse_ticket_header validates NEW top-level declared paths against
+existing directories). The
 containing tree is read-only for this test: no tc-drill*, no
-tests/dup_accept_check.py may ever be created outside pytest's tmp. src/
-ticketcheck is executed as a real subprocess (`sys.executable -B -m
-src.ticketcheck`, cwd = tree root) per the documented CLI contract (SPEC §2:
-`python3 -m src.ticketcheck <ticket-file> ...` from the repo root); the
+tests/dup_accept_check.py may ever be created outside pytest's tmp. The
+module under test (launcher/ticketcheck.py) is executed as a real subprocess
+(`sys.executable -B -m
+launcher.ticketcheck`, cwd = tree root) per the documented CLI contract (SPEC §2:
+`python3 -m launcher.ticketcheck <ticket-file> ...` from the repo root); the
 production module is never imported. The SPEC §2 unit-API line differs from
 the implementation signature, so the oracle pins only the CLI boundary.
 
 Provenance tiers (B2 — honest attribution; do NOT read this file as "all
 literals host-authored"):
   CONTRACT (host-authored sources):
-    C1, C2   tests/fixtures/tickets/README.md — signed exact strings 901/902
+    C1, C2   launcher/tests_harness/fixtures_tickets/README.md — signed exact strings 901/902
     C3       specs/SPEC-SELFHOST-TICKETCHECK.md §2 (first component != tests)
     C4       SPEC §2 (registry = test_glob matching, fnmatch) + the
              case-sensitivity is derived from `run.sh list` semantics
@@ -28,51 +31,52 @@ literals host-authored"):
     C10a     SPEC §2 (the checked rules apply to test:/accept: kinds)
   CHARACTERIZATION (implementation-pinned — the only sources are production
   code or machine-authored docs; NOT a host contract):
-    C8b      `unreadable:` — docs/ticketcheck.md:76 (machine-authored,
-             CC-296) + src/ticketcheck.py
+    C8b      `unreadable:` — docs/ticketcheck.md:101 (machine-authored,
+             CC-296) + launcher/ticketcheck.py
     C9       input path echoed exactly as given, incl. a `..` component —
-             src/ticketcheck.py docstring only
+             launcher/ticketcheck.py docstring only
     C10b     duplicate identical accept lines deduplicate to one line —
              not documented anywhere
 
-Claims (C1..C10) and their mutants (one-line changes in src/ticketcheck.py
+Claims (C1..C10) and their mutants (one-line changes in launcher/ticketcheck.py
 only; each mutant reddens exactly its target test — see calibration below):
-  C1 [contract]   exact signed UNCLAIMED-TEST-NAME line (fixture 901)  M1: msg wording (:185)
-  C2 [contract]   exact signed UNCLAIMED-TEST-PATH line (fixture 902)  M2: msg wording (:180)
+  C1 [contract]   exact signed UNCLAIMED-TEST-NAME line (fixture 901)  M1: msg wording (:225)
+  C2 [contract]   exact signed UNCLAIMED-TEST-PATH line (fixture 902)  M2: msg wording (:220)
   C3 [contract]   tests/ (incl. nested) never location-flagged;         M3: `!= "tests"` ->
-                  outside is                                            `!= "docs"` (:177)
+                  outside is                                            `!= "docs"` (:217)
   C4 [contract]   registry name semantics: good names clean, bad        M4: fnmatchcase(base, glob)
-                  flagged, case-sensitive                                 -> fnmatchcase(base.lower(), glob) (:182)
+                  flagged, case-sensitive                                 -> fnmatchcase(base.lower(), glob) (:222)
   C5 [contract]   the js manifest's test_glob participates (a           M5: `.endswith(".toml")`
-                  .test.js name is claimed)                             -> `.endswith("py.toml")` (:78)
+                  .test.js name is claimed)                             -> `.endswith("py.toml")` (:85)
   C6 [contract]   duplicate semantics: -suffix collides, zero-padding   M6: `int(m.group("num"))`
-                  collides via int-normalization; cross-series and        -> `m.group("num")` (:127)
+                  collides via int-normalization; cross-series and        -> `m.group("num")` (:143)
                   cross-directory same number are NOT collisions; each
                   input gets its own line naming the other file
   C7 [contract]   rc contract: clean -> 0 empty; violations -> 1;       M7: `if parse_failed:` ->
                   PARSE -> 2; PARSE priority over 1 (mixed run -> 2       `if parse_failed and not
-                  AND both outputs present); zero input files -> 0         violations:` (:213)
+                  AND both outputs present); zero input files -> 0         violations:` (:271)
   C8 PARSE line shape:                                                          M8a [contract] "invalid header:" ->
-     `PARSE: <file-as-given>: invalid header: ...` /                              "bad header:" (:173)
+     `PARSE: <file-as-given>: invalid header: ...` /                              "bad header:" (:212)
      `... unreadable: ...`                                                      M8b [characterization]
                                                                                    "unreadable:" ->
-                                                                                   "cannot read:" (:168)
+                                                                                   "cannot read:" (:207)
   C9 [characterization] input paths echoed into messages exactly        M9: `for ticket_file in
-                  as given                                              files:` -> normpath gen (:203)
+                  as given                                              files:` -> normpath gen (:249)
   C10 accept: participates in the checked kinds AND duplicate            M10 [characterization,
       identical accept lines yield exactly one violation line             target of C10b dedup]:
                                                                           `if kind == "accept":` ->
-                                                                          `if False and ...` (:110)
+                                                                          `if False and ...` (:123)
   (note: the earlier M4 formulation `fnmatchcase -> fnmatch` was a NO-OP on
   POSIX — os.path.normcase is identity; the actual mutant lowers the base.)
 
-Calibration (RE-executed 2026-10-19 after the B1 fixture change; a test-body
-edit invalidates the previous calibration; runner: `python -m pytest -q
--p no:cacheprovider -o pythonpath=src tests/ticketcheck_contract_test.py`
-from each tree root; driver mutate.py):
+Calibration (RE-executed 2026-10-20 after the src->launcher relocation — a
+test-body edit invalidates the previous calibration; lab /tmp/oracle-lab-tc-
+move, driver mutate.py; runner: `python -m pytest -q -p no:cacheprovider
+launcher/tests_harness/ticketcheck_contract_test.py` from each tree root;
+the 2026-10-19 calibration after the B1 fixture change is superseded):
   REFERENCE tree: 10 passed (rc=0); no files created outside pytest tmp.
   Every mutant = a copy of the ref tree with ONE line changed in
-  src/ticketcheck.py only; every mutant reddened EXACTLY its target test,
+  launcher/ticketcheck.py only; every mutant reddened EXACTLY its target test,
   no collateral (full logs: logs/<mutant>.log):
   m1  RED test_c1_... (assert exact signed NAME line not in stdout)
   m2  RED test_c2_... (assert exact signed PATH line not in stdout)
@@ -94,7 +98,7 @@ import sys
 
 import pytest
 
-LIVE_ROOT = pathlib.Path(__file__).resolve().parents[1]
+LIVE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 _ENV = {"PYTHONDONTWRITEBYTECODE": "1", "LANG": "C"}
 
@@ -105,13 +109,15 @@ def tree(tmp_path_factory):
 
     Copies (not symlinks — a symlink would let a write land in the live
     tree) of exactly what the CLI under test resolves from its cwd:
-    src (the module under test), launcher (imported by ticketcheck for
-    parse_ticket_header), scripts/stacks (the registry), tests/fixtures
-    (the signed ticket samples). The containing tree is never written.
-    An empty docs/ is created: parse_ticket_header requires a NEW top-level
+    launcher/ (the module under test, launcher/ticketcheck.py, with the
+    signed samples under launcher/tests_harness/fixtures_tickets),
+    scripts/stacks (the registry), and the top-level directories the real
+    tree ships — src/, tests/, docs/ (docs/ is empty here, src/ is empty
+    in the real tree too): parse_ticket_header requires a NEW top-level
     declared path to lie under an existing directory (a new top-level dir
-    "has no safe rw carve-out") — the real stanok tree ships a docs/
-    directory, so the mini-tree mirrors that topology.
+    "has no safe rw carve-out"), so drill headers like "test: src/..."
+    only parse when those dirs exist. The containing tree is never
+    written.
     """
     root = tmp_path_factory.mktemp("tc-tree")
     ignore = shutil.ignore_patterns("__pycache__")
@@ -120,29 +126,28 @@ def tree(tmp_path_factory):
     (root / "scripts").mkdir()
     shutil.copytree(LIVE_ROOT / "scripts" / "stacks", root / "scripts" / "stacks")
     (root / "tests").mkdir()
-    shutil.copytree(LIVE_ROOT / "tests" / "fixtures", root / "tests" / "fixtures")
     (root / "docs").mkdir()
     return root
 
 
-# signed literals, transcribed from tests/fixtures/tickets/README.md (host-authored)
+# signed literals, transcribed from launcher/tests_harness/fixtures_tickets/README.md (host-authored)
 NAME_901 = (
-    "VIOLATION UNCLAIMED-TEST-NAME: tests/fixtures/tickets/TASK-STANOK-CC-901.md:"
+    "VIOLATION UNCLAIMED-TEST-NAME: launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-901.md:"
     " test path 'tests/test_preflight.py': basename 'test_preflight.py'"
     " matches no stack test_glob"
 )
 PATH_902 = (
-    "VIOLATION UNCLAIMED-TEST-PATH: tests/fixtures/tickets/TASK-STANOK-CC-902.md:"
+    "VIOLATION UNCLAIMED-TEST-PATH: launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-902.md:"
     " test path 'src/preflight_mod_test.py': must live under tests/"
 )
 PARSE_904_PREFIX = (
-    "PARSE: tests/fixtures/tickets/TASK-STANOK-CC-904.md: invalid header:"
+    "PARSE: launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-904.md: invalid header:"
 )
 
 
 def _run(tree, *args):
     proc = subprocess.run(
-        [sys.executable, "-B", "-m", "src.ticketcheck", *args],
+        [sys.executable, "-B", "-m", "launcher.ticketcheck", *args],
         cwd=str(tree), capture_output=True, text=True, env=_ENV)
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -158,7 +163,7 @@ def _ticket(tree, rel, lines):
 # ---------------------------------------------------------------------------
 
 def test_c1_name_violation_line_is_the_exact_signed_string(tree):
-    rc, out, err = _run(tree, "tests/fixtures/tickets/TASK-STANOK-CC-901.md")
+    rc, out, err = _run(tree, "launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-901.md")
     lines = out.splitlines()
     assert NAME_901 in lines          # exact signed line, not a substring check
     assert rc == 1
@@ -170,7 +175,7 @@ def test_c1_name_violation_line_is_the_exact_signed_string(tree):
 # ---------------------------------------------------------------------------
 
 def test_c2_location_violation_line_is_the_exact_signed_string(tree):
-    rc, out, err = _run(tree, "tests/fixtures/tickets/TASK-STANOK-CC-902.md")
+    rc, out, err = _run(tree, "launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-902.md")
     lines = out.splitlines()
     assert PATH_902 in lines
     assert rc == 1
@@ -315,19 +320,19 @@ def test_c7_exit_code_contract_and_parse_priority(tree):
     assert rc == 0 and out == "" and err == ""
 
     # violations only -> 1, VIOLATION lines on stdout, nothing on stderr
-    rc, out, err = _run(tree, "tests/fixtures/tickets/TASK-STANOK-CC-901.md")
+    rc, out, err = _run(tree, "launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-901.md")
     assert rc == 1 and out != "" and err == ""
     assert any(l.startswith("VIOLATION ") for l in out.splitlines())
 
     # PARSE only -> 2, PARSE on stderr, stdout empty
-    rc, out, err = _run(tree, "tests/fixtures/tickets/TASK-STANOK-CC-904.md")
+    rc, out, err = _run(tree, "launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-904.md")
     assert rc == 2 and out == ""
     assert any(l.startswith("PARSE: ") for l in err.splitlines())
 
     # mixed: a PARSE-failed file AND a violation file -> rc 2 priority,
     # the non-parsed file's violation is still produced
-    rc, out, err = _run(tree, "tests/fixtures/tickets/TASK-STANOK-CC-901.md",
-                        "tests/fixtures/tickets/TASK-STANOK-CC-904.md")
+    rc, out, err = _run(tree, "launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-901.md",
+                        "launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-904.md")
     assert rc == 2
     assert any(l.startswith("VIOLATION ") for l in out.splitlines())
     assert any(l.startswith("PARSE: ") for l in err.splitlines())
@@ -339,7 +344,7 @@ def test_c7_exit_code_contract_and_parse_priority(tree):
 # ---------------------------------------------------------------------------
 
 def test_c8_parse_line_shape_invalid_header_and_unreadable(tree):
-    rc, out, err = _run(tree, "tests/fixtures/tickets/TASK-STANOK-CC-904.md")
+    rc, out, err = _run(tree, "launcher/tests_harness/fixtures_tickets/TASK-STANOK-CC-904.md")
     assert rc == 2 and out == ""
     assert any(l.startswith(PARSE_904_PREFIX) for l in err.splitlines())
 
