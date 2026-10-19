@@ -102,6 +102,11 @@ Tests:
 17b unit: _git_unquote named-escape set      -> byte-exact decode of
                                               \\a \\b \\t \\n \\v \\f \\r
                                               \\" \\\\ (measured rendering)
+18a/b/c parser-ENVIRONMENT failure             -> PATCH-PARSE, never an
+    (variant 2, prepared for operator          exception out of the gate;
+    decision 2026-10-19, NOT part of the       18c also proves the temp dir
+    core candidate)                            created before the failure is
+                                               removed
 
 Run: <stanok venv>/bin/python -m pytest launcher/tests_harness/test_k8s_patch_zone.py -q
 """
@@ -453,3 +458,58 @@ def test_git_unquote_named_control_escapes():
     quoted = '"A\\aB\\bC\\tD\\nE\\vF\\fG\\rH\\"I\\\\J"'
     expected = "A\x07B\x08C\tD\nE\x0bF\x0cG\rH\"I\\J"
     assert k8s._git_unquote(quoted) == expected
+
+
+# --- 18: parser-environment failures — variant 2 (prepared, operator) -------
+# Addendum prepared for the operator's decision 2026-10-19 ("Вариант 2
+# принят к подготовке", решение — за оператором). Claim: the numstat
+# parser's OWN environment can fail — mkdtemp (disk/quota) or the git
+# subprocess (missing/broken binary) — and the core code lets those
+# exceptions escape the gate (mkdtemp runs outside the try; the except
+# catches only TimeoutExpired). A gate call must answer with a verdict,
+# never raise. Honest framing (same as test 13): these monkeypatch the
+# gate's own failure branches, not git behavior. RED-first against the
+# core candidate: each of the three raises out of _gate.
+
+_ONE_FILE = (b"diff --git a/src/x.py b/src/x.py\n--- /dev/null\n"
+             b"+++ b/src/x.py\n@@ -0,0 +1 @@\n+x\n")
+
+
+def test_numstat_mkdtemp_failure_is_parse_violation(monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError("mkdtemp: no space left on device")
+
+    monkeypatch.setattr(k8s.tempfile, "mkdtemp", boom)
+    v = _gate(_ONE_FILE)
+    assert any("PATCH-PARSE" in x for x in v), v
+
+
+def test_numstat_subprocess_oserror_is_parse_violation(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("git binary not found")
+
+    monkeypatch.setattr(k8s.subprocess, "run", fake_run)
+    v = _gate(_ONE_FILE)
+    assert any("PATCH-PARSE" in x for x in v), v
+
+
+def test_numstat_oserror_after_mkdtemp_removes_temp_dir(monkeypatch):
+    # Cleanup contract: the temp dir created BEFORE the failure must not
+    # survive the call. Real mkdtemp, real directory lifecycle.
+    created = []
+    real_mkdtemp = k8s.tempfile.mkdtemp
+
+    def spy(*args, **kwargs):
+        d = real_mkdtemp(*args, **kwargs)
+        created.append(d)
+        return d
+
+    def fake_run(*args, **kwargs):
+        raise OSError("git died")
+
+    monkeypatch.setattr(k8s.tempfile, "mkdtemp", spy)
+    monkeypatch.setattr(k8s.subprocess, "run", fake_run)
+    v = _gate(_ONE_FILE)
+    assert any("PATCH-PARSE" in x for x in v), v
+    assert created, "mkdtemp spy never ran"
+    assert all(not os.path.isdir(d) for d in created), created

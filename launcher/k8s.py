@@ -242,19 +242,31 @@ def _numstat_paths(patch_text: str):
     never represent them), and one entry is produced per file section in
     patch order (rename/copy: the DESTINATION only — sources live in the
     headers). rc != 0 (corrupt patch, invalid mode) -> None: the caller
-    reports PATCH-PARSE, fail closed."""
-    work = tempfile.mkdtemp(prefix="stanok-numstat-")
+    reports PATCH-PARSE, fail closed.
+
+    Variant 2 (prepared for operator decision 2026-10-19; "Вариант 2
+    принят к"): the parser's OWN environment can fail — mkdtemp (disk,
+    quota) or the git subprocess (missing/broken binary) — and a gate
+    call must answer with a verdict, never raise. mkdtemp runs INSIDE
+    the try; any OSError there is a parser-environment failure -> None.
+    The `work = None` sentinel and the `if work is not None` guard are
+    load-bearing on the measured runtimes: python 3.13.13 (host venv)
+    raises TypeError on rmtree(None) while 3.11.2/3.12.3 do not
+    (measured 2026-10-19) — without the guard a mkdtemp failure would
+    replace the verdict with a different exception in the finally."""
+    work = None
     try:
-        try:
-            p = subprocess.run(
-                ["git", "apply", "--numstat", "-z", "--unidiff-zero",
-                 "--allow-empty"],
-                cwd=work, input=patch_text.encode("utf-8"),
-                capture_output=True, timeout=60)
-        except subprocess.TimeoutExpired:
-            return None
+        work = tempfile.mkdtemp(prefix="stanok-numstat-")
+        p = subprocess.run(
+            ["git", "apply", "--numstat", "-z", "--unidiff-zero",
+             "--allow-empty"],
+            cwd=work, input=patch_text.encode("utf-8"),
+            capture_output=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
     if p.returncode != 0:
         return None
     paths = []
