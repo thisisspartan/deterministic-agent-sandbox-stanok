@@ -20,7 +20,8 @@ the exact bytes, re-verified before every apply. Tests:
   6  a '.git' component (source or destination) -> GITDIR violation
   7  absolute/.git paths in rename/copy headers -> rejected
   8  gitlink 160000 (new file / mode change / Subproject commit) -> GITLINK
-  9  safe rename/copy and .gitignore patches pass
+  9  safe rename/copy pass; a .gitignore patch is REJECTED as a root file
+     (wave C allow-list, TASK-NEXT 2026-10-20 §7) — never as a '.git' dir
  10  patch_sha256/patch_identity_ok: the on-disk file must match the hash
  11  strict_patch_text: invalid UTF-8 bytes RAISE (no U+FFFD substitution —
      the gate/scratch must see exactly the text whose bytes are hashed)
@@ -228,10 +229,16 @@ def test_safe_copy_passes():
     assert k8s.patch_gate(SAFE_COPY) == []
 
 
-def test_gitignore_is_not_gitdir():
-    # '.git' as an exact path component is the boundary; '.gitignore' is a
-    # normal file and must pass.
-    assert k8s.patch_gate(GITIGNORE_OK) == []
+def test_gitignore_is_zone_rejected_not_gitdir():
+    # Wave C (TASK-NEXT-AFTER-REBOOT-2026-10-20 §7): '.gitignore' is a
+    # normal file — the GITDIR invariant still must not fire on it — but it
+    # is a ROOT file, outside zones.WRITABLE_ZONES: the allow-list rejects
+    # it before apply. Policy change authorized by the wave C spec
+    # ("корневые файлы … REJECT"); legitimate machine patches never touch
+    # root files (the container writes only src/tests/docs).
+    v = k8s.patch_gate(GITIGNORE_OK)
+    assert any("ZONE" in x and ".gitignore" in x for x in v), v
+    assert not any("GITDIR" in x for x in v), v
 
 
 # --- Encoding gap (operator review 2026-10-10): strict decoding ----------

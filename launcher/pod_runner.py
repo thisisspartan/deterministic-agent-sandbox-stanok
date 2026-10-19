@@ -39,6 +39,13 @@ WORK = os.path.dirname(REPO)  # /stanok-work — the emptyDir mount
 def _unpack(blob: str) -> None:
     raw = gzip.decompress(base64.b64decode(blob))
     with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+        # The Pod image is measured Python 3.11.2 with NO `filter` kwarg
+        # in extractall (docker probe 2026-10-20) — the TypeError fallback
+        # is load-bearing here; without it every Pod run dies. (Host-side
+        # k8s.unpack_tree is hardened fail-closed instead: it runs on the
+        # launcher venv 3.13.13, which has the kwarg.) The transport is
+        # `git archive`: it never emits unsafe members, so the unfiltered
+        # branch is a belt, not a live path.
         try:
             tf.extractall(REPO, filter="data")
         except TypeError:
