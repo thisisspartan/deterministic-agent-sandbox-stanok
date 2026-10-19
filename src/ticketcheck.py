@@ -1,6 +1,6 @@
 """ticketcheck — pre-flight validator for ticket headers (CC-296).
 
-Checks a ticket file for EXACTLY the three error classes the existing gates
+Checks a ticket file for EXACTLY the four error classes the existing gates
 do not catch before a launch:
 
   1. UNCLAIMED-TEST-NAME — a test:/accept: basename no stack test_glob
@@ -11,6 +11,12 @@ do not catch before a launch:
      but the harness only discovers tests under tests/, so it is never run.
   3. DUPLICATE-TICKET-NUMBER — two .md files in one directory claiming the
      same (series, int(num)). Today it surfaces only when both launch.
+  4. EDIT-PATH-MISSING (CC-298) — a declared edit: path that is not an
+     existing regular file. assert_create_paths_are_new only checks the
+     create direction ("edit: on a path that does NOT exist is not checked
+     here"), so this surfaces only when the agent burns the run discovering
+     there is nothing to edit. Sole exception: scripts/run.sh — the parser
+     legalizes its absence as the bootstrap case.
 
 Everything else (malformed headers, undeclarable paths, accept contradictions,
 create-vs-edit, protected edits) is already caught by parse_ticket_header /
@@ -30,7 +36,8 @@ Output / exit codes:
      convention run.sh uses for an empty suite)
   1  >=1 violation — stdout: VIOLATION lines (files in argv order; within a
      file: declared test:/accept: paths in header order, location check then
-     name check, then the duplicate line)
+     name check, then the duplicate line, then the EDIT-PATH-MISSING lines
+     in edit: declaration order)
   2  >=1 PARSE error — stderr: PARSE lines; a PARSE-failed file's rules are
      skipped, the other files are still processed; rc 2 takes priority over 1
 """
@@ -88,15 +95,21 @@ def load_registry(repo_root: str) -> list[str]:
     return globs
 
 
-def _checked_declarations(text: str) -> list[tuple[str, str]]:
-    """Recover the kinds of the checked declarations (test:/accept:).
+def _checked_declarations(
+        text: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Recover the kinds of the checked declarations (test:/accept:) and the
+    declared edit: paths.
 
     parse_ticket_header returns declared paths as a kind-less union, so the
     kinds are recovered with the SAME regex tokens (_FILE_LINE_RE,
     _ACCEPT_NONE_RE, _RESET_NONE_RE) and the SAME loop structure as the
     parser — no second grammar. Call this only after parse_ticket_header has
-    validated the header, so a non-matching line simply ends the header."""
+    validated the header, so a non-matching line simply ends the header.
+    edit: paths are collected in declaration order with the same dedup as
+    the parser's accept lines (repeated identical declarations flag once);
+    they never enter the test:/accept: entries."""
     entries: list[tuple[str, str]] = []
+    edit_rels: list[str] = []
     seen_accept: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -111,13 +124,16 @@ def _checked_declarations(text: str) -> list[tuple[str, str]]:
                 if rel not in seen_accept:  # same dedup as the parser
                     seen_accept.append(rel)
                     entries.append((kind, rel))
+            elif kind == "edit":
+                if rel not in edit_rels:  # same dedup as the accept lines
+                    edit_rels.append(rel)
             elif kind in _CHECKED_KINDS:
                 entries.append((kind, rel))
             continue
         if _RESET_NONE_RE.match(stripped):
             continue
         break
-    return entries
+    return entries, edit_rels
 
 
 def _ticket_id(path: str) -> tuple[str, int] | None:
@@ -151,6 +167,28 @@ def _duplicate_lines(ticket_file: str, repo_root: str) -> list[str]:
     return []
 
 
+def _edit_path_lines(ticket_file: str, repo_root: str,
+                     edit_rels: list[str]) -> list[str]:
+    """EDIT-PATH-MISSING (CC-298): a declared edit: path that is not an
+    existing regular file. `edit:` means MODIFY IN PLACE — the launch gate
+    only checks the create direction (assert_create_paths_are_new refuses an
+    existing CREATE path; a missing EDIT path passes it), so today the agent
+    burns the run discovering there is nothing to edit. Applied by main
+    (CLI layer) only — check_ticket's unit contract does not include it.
+
+    Sole exception: scripts/run.sh — parse_ticket_header legalizes its
+    absence as the bootstrap case (the ticket that creates the entrypoint),
+    so it is never flagged, absent or present."""
+    lines: list[str] = []
+    for rel in edit_rels:
+        if rel == "scripts/run.sh":
+            continue
+        if not os.path.isfile(os.path.join(repo_root, rel)):
+            lines.append(f"VIOLATION EDIT-PATH-MISSING: {ticket_file}: "
+                         f"edit path '{rel}' does not exist")
+    return lines
+
+
 def check_ticket(ticket_file: str, repo_root: str,
                  registry: list[str]) -> tuple[list[str], list[str]]:
     """Check one ticket file. Returns (violation_lines, parse_lines).
@@ -158,8 +196,9 @@ def check_ticket(ticket_file: str, repo_root: str,
     parse_lines is non-empty exactly when the file cannot be read or its
     header is rejected by parse_ticket_header — then the rules are skipped
     for that file. Messages echo ticket_file exactly as given. Existence of
-    declared paths is NOT checked (assert_create_paths_are_new is the launch
-    gate's business)."""
+    declared paths is NOT checked here (assert_create_paths_are_new is the
+    launch gate's business; the EDIT-PATH-MISSING rule is a CLI-layer rule
+    applied by main after this function's violations — see _edit_path_lines)."""
     try:
         with open(os.path.join(repo_root, ticket_file),
                   encoding="utf-8") as f:
@@ -173,7 +212,8 @@ def check_ticket(ticket_file: str, repo_root: str,
         return [], [f"PARSE: {ticket_file}: invalid header: {exc}"]
 
     violations: list[str] = []
-    for kind, rel in _checked_declarations(text):
+    entries, _edit_rels = _checked_declarations(text)
+    for kind, rel in entries:
         if rel.split("/")[0] != "tests":
             violations.append(
                 f"VIOLATION UNCLAIMED-TEST-PATH: {ticket_file}: {kind} path "
@@ -190,7 +230,13 @@ def check_ticket(ticket_file: str, repo_root: str,
 def main(argv: list[str] | None = None) -> int:
     """CLI entry: check every ticket file given. repo_root = os.getcwd()
     (the tool is run from the repo root). Exit: 0 clean, 1 violations,
-    2 PARSE (priority over 1)."""
+    2 PARSE (priority over 1).
+
+    EDIT-PATH-MISSING (CC-298) is applied here, at the CLI assembly layer:
+    after each file's check_ticket violations, in edit: declaration order
+    (a PARSE-failed file skips ALL rules, including this one). The
+    check_ticket unit contract is unchanged — tests/ticketcheck_test.py
+    pins it: a missing edit: path is not a check_ticket violation."""
     files = list(sys.argv[1:] if argv is None else argv)
     # Zero input files: nothing to check — no violation, no PARSE -> 0
     # (same convention as run.sh: an empty suite passes, no output).
@@ -207,6 +253,18 @@ def main(argv: list[str] | None = None) -> int:
             print(line, file=sys.stderr)
         if parse_lines:
             parse_failed = True
+        else:
+            # The header parsed — recover the edit: declarations with the
+            # same tokens/loop (_checked_declarations) and apply the rule.
+            try:
+                with open(os.path.join(repo_root, ticket_file),
+                          encoding="utf-8") as f:
+                    text = f.read()
+            except (OSError, UnicodeDecodeError):
+                text = ""
+            _, edit_rels = _checked_declarations(text)
+            file_violations.extend(
+                _edit_path_lines(ticket_file, repo_root, edit_rels))
         violations.extend(file_violations)
     for line in violations:
         print(line)
