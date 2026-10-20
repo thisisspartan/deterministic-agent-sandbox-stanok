@@ -45,3 +45,26 @@ def test_two_blocks_rejected():
 def test_unclosed_block_rejected():
     blob = k8s.build_payload({"a": b"1"})
     assert k8s.extract_payload(k8s.begin_marker("N1") + blob, "N1") is None
+
+
+def test_member_names_are_flat_bare_filenames():
+    # Operator guard 2026-10-20 (external-review finding: the Pod is an
+    # external boundary and extract_payload returns its member names verbatim;
+    # k8s.py writes os.path.join(live_dir, name) — a directory component or a
+    # leading '/' would escape live_dir). Guard: a name must satisfy
+    # os.path.basename(name) == name and not start with '/' or '..';
+    # a violating block fails closed (None), like any malformed block.
+    # pod_runner.py:154-161 emits only flat names — this guard never rejects
+    # a real payload.
+    for bad in ("../escape.txt", "sub/summary.json", "/abs/summary.json",
+                "..leadingdot"):
+        blob = k8s.build_payload({"summary.json": b"{}", bad: b"1"})
+        text = (k8s.begin_marker("N1") + "\n" + blob + "\n"
+                + k8s.end_marker("N1"))
+        assert k8s.extract_payload(text, "N1") is None, bad
+    # companion positive: flat names (the real producer's set) still pass
+    good = {"summary.json": b"{}", "changes.patch": b"d", "internal_rc.txt": b"0\n",
+            "launcher.stdout.log": b"", "failures.log": b""}
+    text = (k8s.begin_marker("N1") + "\n" + k8s.build_payload(good) + "\n"
+            + k8s.end_marker("N1"))
+    assert k8s.extract_payload(text, "N1") == good

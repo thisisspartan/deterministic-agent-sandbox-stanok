@@ -145,7 +145,17 @@ def build_payload(files: dict) -> str:
 
 def extract_payload(text: str, nonce: str):
     """The exactly-one rule: one and only one nonce-matching block, else
-    None (the run is treated as aborted, never a verdict)."""
+    None (the run is treated as aborted, never a verdict).
+
+    Member-name guard (operator spec 2026-10-20, external-review finding):
+    the Pod is an external boundary and its member names reach
+    `os.path.join(live_dir, name)` at the write site — a directory component
+    or a leading '/' would write outside live_dir. A name must be a bare
+    flat filename: `os.path.basename(name) != name or
+    name.startswith(("/", ".."))` fails closed like a malformed block
+    (None, the run is aborted). pod_runner.py:154-161 emits only flat
+    names (changes.patch, internal_rc.txt, summary.json,
+    launcher.stdout.log, failures.log), so a real payload never trips this."""
     pattern = (re.escape(begin_marker(nonce)) + r"\s*(.*?)\s*"
                + re.escape(end_marker(nonce)))
     blocks = re.findall(pattern, text, re.DOTALL)
@@ -156,7 +166,10 @@ def extract_payload(text: str, nonce: str):
     with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
         for m in tf.getmembers():
             if m.isfile():
-                files[m.name] = tf.extractfile(m).read()
+                name = m.name
+                if os.path.basename(name) != name or name.startswith(("/", "..")):
+                    return None
+                files[name] = tf.extractfile(m).read()
     return files
 
 
