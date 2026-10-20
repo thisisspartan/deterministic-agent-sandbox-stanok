@@ -16,10 +16,13 @@ IPs, no home paths (this dir is published with the repo).
 Limitation: frozen samples prove behavior on past garbage only; a new error
 class gets a new signed sample per incident.
 
-Files here live under `launcher/` — write-protected for the machine (the
-container mounts everything outside src/, tests/, docs/, scripts/ read-only),
-so a ticket may not create, modify or delete them. Before the 2026-10-20
-relocation they were `tests/**` — protected the same way. Run all ticketcheck calls with
+Files here live under `launcher/` — outside the machine's writable zones:
+the zone rule (launcher/zones.py, rc=13 at header parse) refuses a ticket
+declaring them, the tool deny-list in `.claude/settings.stanok.json` denies
+Read/Edit/Write under `launcher/**` inside the Pod, and only
+`src/ tests/ docs/ scripts/run.sh` ever reach the host's patch gate — so a
+ticket may not create, modify or delete them. Before the 2026-10-20
+relocation they were `tests/**` — protected the same way (contract lock). Run all ticketcheck calls with
 `cwd = repo root` and the relative paths exactly as listed (the tool echoes
 the input path into its messages).
 

@@ -29,7 +29,8 @@ def test_stack_manifests_are_protected(repo):
     protected = set(verify._protected_files(cfg))
     for name in STACKS:
         assert f"scripts/stacks/{name}" in protected
-    # The manifest and the :ro list are the same rule, not two policy lists.
+    # The manifest and the protected list are the same rule, not two policy
+    # lists.
     assert set(verify._tests_manifest(cfg)) == protected
 
 

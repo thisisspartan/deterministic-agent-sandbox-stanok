@@ -55,8 +55,10 @@ from conftest import write
 
 def _build_plan(cfg, ticket_text):
     """Mirror cmd_run's T1 construction: parse the header, then build the
-    plan (the plan carries no mount/protected lists — T4/CC-135 derives the
-    rw mounts, T4b/CC-136 the :ro binds)."""
+    plan (the plan carries no mount/protected lists — the Pod's volumes are
+    fixed in k8s/worker-job.yaml.tmpl: ro ConfigMap transport + emptyDir
+    scratch; the per-path :ro binds were retired with the Docker path —
+    protection is the host-side contract recomputation)."""
     declared, edit_paths, _, accept_paths, accept_mode = \
         ticket.parse_ticket_header(cfg, ticket_text)
     return plan_mod.SessionPlan(
@@ -85,12 +87,13 @@ def test_plan_fields_from_ticket_header():
     # accept_paths=() / accept_mode="undeclared" — behavior unchanged, the
     # absence is recorded, never treated as presence.
     assert plan.accept_paths == () and plan.accept_mode == "undeclared"
-    # T5/CC-137: the mount/protected lists are derived (rw_zones gone with
-    # CC-135, protected_paths gone with the hook it fed, bootstrap_paths gone
-    # with the bootstrap kind itself — CC-154, mutable_paths collapsed into
-    # declared_paths — it was always equal).
-    # git_mode dropped as dead (PLAN-HYGIENE 2026-10-08): .git RO is enforced
-    # at the mount layer; no consumer ever read the field.
+    # T5/CC-137: the plan carries no mount/protected lists (rw_zones gone
+    # with CC-135, protected_paths gone with the hook it fed, bootstrap_paths
+    # gone with the bootstrap kind itself — CC-154, mutable_paths collapsed
+    # into declared_paths — it was always equal).
+    # git_mode dropped as dead (PLAN-HYGIENE 2026-10-08): .git is denied to
+    # the machine by the tool deny-list (.claude/settings.stanok.json) and
+    # never reaches the patch gate; no consumer ever read the field.
     # G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): accept_paths/accept_mode
     # added — the acceptance contract is part of the single policy source
     # (I1): verify_gate reads accept_paths, summary records accept_mode.
@@ -167,9 +170,9 @@ def test_edit_path_parsed_and_still_declared():
 def test_zones_have_one_source():
     # The zone list is one literal in launcher/zones.py and one NAME
     # (CC-132's DEFAULT_RW_ZONES alias is gone — CC-134). It is the
-    # *declaration* allow-list, not the mount set: T4/CC-135 derives the
-    # mounts per ticket (declared_carveout), so the plan carries no zone
-    # field at all.
+    # *declaration* allow-list, not the mount set: the Pod's volumes are
+    # fixed in the Job template (the per-ticket mount derivation died with
+    # the Docker path), so the plan carries no zone field at all.
     assert not hasattr(zones, "DEFAULT_RW_ZONES")
     assert zones.WRITABLE_ZONES == ("src", "tests", "docs", "scripts")
     fields = {f.name for f in dataclasses.fields(plan_mod.SessionPlan)}
@@ -297,10 +300,11 @@ def test_edit_path_that_is_absent_is_not_a_defect(repo):
 
 # --- CC-206: `edit:` on a protected file is a ticket defect (rc=13) -----------
 #
-# The CC-204-retry3 root cause: the ticket declared `edit: tests/...`, the
-# launcher dropped it from the :ro bind, the machine edited a reference test,
-# the isolation probe failed, the model deadlocked on the contradiction. The
-# gate refuses that ticket BEFORE any container start.
+# The CC-204-retry3 root cause (docker-era mechanism): the ticket declared
+# `edit: tests/...`, the launcher dropped it from the :ro bind, the machine
+# edited a reference test, the isolation probe failed, the model deadlocked
+# on the contradiction. Today the same defect is caught by the parse-time
+# gate: the gate refuses that ticket BEFORE any container start.
 
 def test_edit_on_existing_test_is_a_defect(repo):
     write(repo / "tests" / "old_test.py", "def test_x():\n    assert 1\n")

@@ -40,7 +40,8 @@ def test_protected_files_are_tests_runsh_and_stacks(repo):
                               "scripts/run.sh",
                               "scripts/stacks/jq.toml", "scripts/stacks/js.toml",
                               "scripts/stacks/py.toml"}
-    # The manifest and the :ro list are the same rule, not two policy lists.
+    # The manifest and the protected list are the same rule, not two policy
+    # lists.
     assert set(verify._tests_manifest(cfg)) == set(protected)
 
 

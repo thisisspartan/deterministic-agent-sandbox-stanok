@@ -5,8 +5,11 @@ in-container Runner shared a writable verdict dir with the host. Now:
 
   - `zones.WRITABLE_ZONES` = the 4 project zones (no "evidence"), the single
     list lives in launcher/zones.py;
-    evidence/ is visible read-only through the repo :ro mount, so a write
-    from inside the container is an EROFS denial, not a missing path.
+    evidence/ never reaches the Pod: the tree is transported as
+    `git archive HEAD` (tracked only; evidence/ is gitignored) into the
+    emptyDir scratch copy, and the tool deny-list in
+    .claude/settings.stanok.json denies Read/Edit/Write under `evidence/**`
+    on top of that.
   - `Config.label_paths()` resolves BOTH dirs into the rw log_dir/<label> when
     STANOK_IN_CONTAINER=1, so every in-container writer (summary.json,
     launcher.stdout.log, the .running marker) lands somewhere writable.
@@ -54,9 +57,9 @@ def test_label_paths_container_writes_into_log_dir(tmp_path, monkeypatch):
 
 
 def test_summary_dir_routing(tmp_path, monkeypatch):
-    # the worker's summary target is the rw LOG_DIR mount in the container,
-    # the host's publish target is the evidence dir — the same rule in both
-    # runtimes.
+    # the worker's summary target is the rw log dir in the Pod (under the
+    # emptyDir work volume), the host's publish target is the evidence dir —
+    # the same rule in both runtimes.
     cfg = Config(repo_root=str(tmp_path / "repo"), log_dir=str(tmp_path / "logs"))
     monkeypatch.setenv("STANOK_IN_CONTAINER", "1")
     assert cfg.summary_dir("lbl") == os.path.join(str(tmp_path / "logs"), "lbl")

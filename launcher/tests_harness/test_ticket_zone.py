@@ -4,9 +4,11 @@ declared paths must lie in a writable zone — the cc217-impl incident.
 The incident: ticket TASK-STANOK-CC-217 declared `edit: launcher` +
 `impl: launcher/tests_harness/...`. declared_carveout accepted them (existing
 path -> itself; absent path -> nearest existing ancestor `launcher/`), the
-container started, and the machine spent ~141 s discovering that launcher/ is
-physically unwritable: the repo is mounted :ro, write zones are
-src/tests/docs/scripts only, settings.stanok.json denies Edit(launcher/**).
+container started, and the machine spent ~141 s discovering that launcher/ was
+physically unwritable THEN (docker-era: the repo was mounted :ro; today the
+Pod works on an emptyDir scratch copy and the tool deny-list in
+.claude/settings.stanok.json denies Read/Edit/Write under `launcher/**`).
+Write zones are src/tests/docs/scripts only in both runtimes.
 
 The rule: a path is declarable only when its FIRST component is one of
 zones.WRITABLE_ZONES (CC-258: the list lives in launcher/zones.py) — for every
@@ -155,8 +157,10 @@ def test_refusal_before_any_workspace_mutation(repo):
 
 def test_symlink_in_zone_to_out_of_zone_dir_is_refused(repo):
     # The operator's case: `src/link -> ../launcher` (an existing out-of-zone
-    # dir). The string rule accepted `src/link` as a carve-out; Docker resolves
-    # the bind source's realpath, so the rw mount lands on launcher/.
+    # dir). The string rule accepted `src/link` as a carve-out; Docker resolved
+    # the bind source's realpath, so the rw mount landed on launcher/
+    # (docker-era mechanism — the rule itself is runtime-independent: the
+    # RESOLVED location must stay inside a zone whatever the runtime).
     (repo / "launcher").mkdir()
     (repo / "src" / "link").symlink_to("../launcher")
     cfg = _cfg(repo)
@@ -170,7 +174,7 @@ def test_symlink_in_zone_to_out_of_zone_dir_is_refused(repo):
 def test_symlink_component_inside_zone_is_refused(repo):
     # SEC-01 alignment (run.sh): NO component of a declared path may be a
     # symlink — even a zone -> zone link. A symlinked component makes the
-    # mount location depend on the link target, not on the declaration.
+    # resolved location depend on the link target, not on the declaration.
     (repo / "src" / "real").mkdir()
     (repo / "src" / "link").symlink_to("real")
     with pytest.raises(ValueError):
