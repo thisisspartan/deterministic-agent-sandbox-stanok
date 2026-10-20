@@ -174,7 +174,10 @@ def extract_payload(text: str, nonce: str):
                         or os.path.basename(name) != name
                         or name.startswith(("/", ".."))):
                     return None
-                files[name] = tf.extractfile(m).read()
+                member_file = tf.extractfile(m)
+                if member_file is None:  # fail-closed like the name checks above
+                    return None
+                files[name] = member_file.read()
     return files
 
 
@@ -569,7 +572,7 @@ def _cluster_env() -> dict:
     return env
 
 
-def _kubectl(*argv, timeout: int = 60, input_text: str = None):
+def _kubectl(*argv, timeout: int = 60, input_text: str | None = None):
     return subprocess.run([_kubectl_bin(), *argv], capture_output=True,
                           text=True, timeout=timeout, input=input_text,
                           env=_cluster_env())
@@ -886,7 +889,7 @@ class _ResourceSampler(threading.Thread):
         self._stop_event = threading.Event()
         self.samples = 0
         self.errors = 0
-        self._peak = None
+        self._peak: dict | None = None
 
     def _default_fetch(self):
         node = _node_of_pod(self.pod, self.ns)
@@ -922,7 +925,7 @@ class _ResourceSampler(threading.Thread):
         self.join(timeout=2 * self.interval_s + 5)
         if self.samples == 0:
             return None
-        out = dict(self._peak)
+        out = dict(self._peak or {})  # samples > 0 means _peak was set by _merge
         out["samples"] = self.samples
         out["errors"] = self.errors
         return out
@@ -935,7 +938,7 @@ class _ResourceSampler(threading.Thread):
 # ==================================================================================
 def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
                patch_file: str, deadline: int, created: list,
-               image_ref: str, peaks_out: dict = None) -> tuple:
+               image_ref: str, peaks_out: dict | None = None) -> tuple:
     try:
         # BL-4 (b): the patch transport guard — symmetry with the tree guard
         # (host_launch_k8s, TRANSPORT_MAX_B64): fail closed BEFORE the
@@ -973,7 +976,7 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
             sampler.start()
     completed = _wait_job_terminal(fresh_name, ns,
                                   deadline + _TERMINAL_GRACE_S) == "complete"
-    if sampler is not None:
+    if sampler is not None and peaks_out is not None:  # sampler is only built when a holder was provided — the second test is type-honesty, not behavior
         peaks_out["peaks"] = sampler.stop_and_peaks()
     if completed:
         return (0, "")
@@ -1612,7 +1615,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         fresh_infra_error = None
         fresh_peaks = None
         if not contract_violations:
-            peaks_holder = {}
+            peaks_holder: dict = {}  # annotated: empty literal infers nothing usable
             fresh_rc, fresh_tail = _fresh_job(cfg, ns, fresh_name, cm_tree,
                                               cm_patch, patch_file, deadline,
                                               created, image_ref, peaks_holder)

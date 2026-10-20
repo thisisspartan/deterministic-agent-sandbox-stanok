@@ -94,9 +94,8 @@ def max_live_context(summary: dict) -> int | None:
     telemetry = summary.get("inference_telemetry")
     if not isinstance(telemetry, dict):
         return None
-    values = [t.get("live_context_tokens")
-              for t in telemetry.get("per_turn", [])
-              if isinstance(t, dict) and isinstance(t.get("live_context_tokens"), int)]
+    values = [tok for t in telemetry.get("per_turn", [])
+              if isinstance(t, dict) and isinstance(tok := t.get("live_context_tokens"), int)]
     return max(values) if values else None
 
 
@@ -289,14 +288,14 @@ def build_report(records: list[dict]) -> str:
     order = [f"{lo // 1000}k-{(str(hi // 1000) + 'k') if hi else 'inf'}"
              for lo, hi in CONTEXT_BUCKETS] + ["unmeasured"]
     for name in order:
-        group = buckets.get(name)
-        if not group:
+        bucket = buckets.get(name)
+        if not bucket:
             continue
         outcomes: dict[str, int] = {}
-        for r in group:
+        for r in bucket:
             outcomes[r["outcome"]] = outcomes.get(r["outcome"], 0) + 1
         joined = ", ".join(f"{o}={c}" for o, c in sorted(outcomes.items()))
-        lines.append(f"  {name}: n={len(group)} [{joined}]")
+        lines.append(f"  {name}: n={len(bucket)} [{joined}]")
 
     lines += ["", "diagnostic markers (launcher.stdout.log):"]
     totals = {m: 0 for m in MARKERS}

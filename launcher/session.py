@@ -156,7 +156,9 @@ def _extract_usage(msg) -> dict:
         usage = msg.data.get("usage")
     if not usage:
         return {}
-    if dataclasses.is_dataclass(usage):
+    if dataclasses.is_dataclass(usage) and not isinstance(usage, type):
+        # not isinstance(..., type): is_dataclass is true for the class too;
+        # asdict() takes only instances (mpy's documented narrowing)
         return dataclasses.asdict(usage)
     if hasattr(usage, "__dict__"):
         return {k: v for k, v in usage.__dict__.items() if not k.startswith("_")}
@@ -524,10 +526,12 @@ async def _run_hook_test(cfg, rel: str) -> tuple[int, bytes]:
         stderr=asyncio.subprocess.STDOUT,
     )
     chunks: list[bytes] = []
+    stdout = proc.stdout
+    assert stdout is not None  # created_subprocess_exec(stdout=PIPE) — narrowing for _drain
 
     async def _drain() -> None:
         while True:
-            c = await proc.stdout.read(65536)
+            c = await stdout.read(65536)
             if not c:
                 break
             chunks.append(c)
@@ -535,6 +539,7 @@ async def _run_hook_test(cfg, rel: str) -> tuple[int, bytes]:
     try:
         await asyncio.wait_for(_drain(), timeout=_HOOK_TEST_TIMEOUT_S)
         await proc.wait()  # pipe EOF can arrive before the exit status
+        assert proc.returncode is not None  # set once wait() has returned
         rc = proc.returncode
     except asyncio.TimeoutError:
         proc.kill()
@@ -806,13 +811,14 @@ async def _turn_timeout_verdict(client, turn_task, job: dict, turn: int,
 
 
 def _record_turn_telemetry(job: dict, total_tokens: dict, result: TurnResult,
-                          turn: int, elapsed_turn: float) -> int:
+                          turn: int, elapsed_turn: float) -> tuple[int, int]:
     """Cumulative token & cache telemetry for one finished turn (guarantee 4).
 
     Updates total_tokens in place, recomputes job["tokens"]/job["cache_hit_rate"],
-    appends the turn_telemetry entry, logs the turn line. Returns live_context:
-    the prompt size on the LAST API call (not the turn's cumulative usage) —
-    the real context the model had to attend to (CONTEXT-ROT input).
+    appends the turn_telemetry entry, logs the turn line. Returns
+    (inp, live_context): the turn's input tokens and live_context — the prompt
+    size on the LAST API call (not the turn's cumulative usage) — the real
+    context the model had to attend to (CONTEXT-ROT input).
     """
     inp = result.usage.get("input_tokens", 0)
     out = result.usage.get("output_tokens", 0)

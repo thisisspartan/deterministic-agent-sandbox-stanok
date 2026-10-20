@@ -7,8 +7,10 @@ to this module global — deliberately a module global (a per-run handle, not
 configuration; config lives in config.Config/RunState).
 """
 
+import io
+
 # The logging sink: the handle cmd_run opens for evidence/launcher.stdout.log.
-_stdout_log_f = None
+_stdout_log_f: io.TextIOWrapper | None = None
 
 
 def log(msg: str = "") -> None:

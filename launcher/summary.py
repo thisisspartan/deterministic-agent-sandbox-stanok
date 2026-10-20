@@ -36,12 +36,13 @@ passed-in RunState (C).
 import json
 import os
 import shutil
+from collections.abc import Sequence  # read-only parameter type: callers pass a list, the default is () — the function only unpacks/logs it
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
 
 
 def _publish_evidence(cfg, label: str, container_rc: int,
-                      contract_violations: list[str] = (),
+                      contract_violations: Sequence[str] = (),
                       fresh_check: tuple | None = None) -> None:
     """Copy the container-written verdict from the rw LOG_DIR/<label> into the
     host-owned evidence/<label> (CC-134).

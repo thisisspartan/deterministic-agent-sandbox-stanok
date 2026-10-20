@@ -157,8 +157,8 @@ def main() -> int:
     for name in ("summary.json", "launcher.stdout.log", "failures.log"):
         p = os.path.join(run_dir, name)
         if os.path.isfile(p):
-            with open(p, "rb") as f:
-                files[name] = f.read()
+            with open(p, "rb") as fh:  # "fh", not "f": "f" is a TextIOWrapper from the settings rewrite above
+                files[name] = fh.read()
     sys.stdout.write(k8s.begin_marker(nonce) + "\n" + k8s.build_payload(files)
                      + "\n" + k8s.end_marker(nonce) + "\n")
     sys.stdout.flush()
