@@ -735,7 +735,7 @@ def main() -> int:
                             "ERROR: lock key unavailable (STANOK_LOCK_KEY unset — "
                             "git rev-parse --git-common-dir failed): refusing to run "
                             "without a shared lock (D2, fail closed)")
-            lock_path = os.path.join(cfg.log_dir, f"stanok-{hashlib.md5(key.encode()).hexdigest()[:12]}.lock")
+            lock_path = os.path.join(cfg.log_dir, f"stanok-{hashlib.sha256(key.encode()).hexdigest()[:12]}.lock")
             lf = open(lock_path, "w")
             try:
                 fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)

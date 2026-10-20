@@ -99,7 +99,7 @@ def test_lock_shared_across_worktrees(tmp_path):
     repo = _make_repo(tmp_path)
     wt = _add_worktree(repo, tmp_path)
     key = _common_dir(repo)
-    lock_path = LOG_DIR / f"stanok-{hashlib.md5(key.encode()).hexdigest()[:12]}.lock"
+    lock_path = LOG_DIR / f"stanok-{hashlib.sha256(key.encode()).hexdigest()[:12]}.lock"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     lf = open(lock_path, "w")
     fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
