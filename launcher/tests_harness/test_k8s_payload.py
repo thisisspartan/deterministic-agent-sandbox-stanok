@@ -56,8 +56,11 @@ def test_member_names_are_flat_bare_filenames():
     # a violating block fails closed (None), like any malformed block.
     # pod_runner.py:154-161 emits only flat names — this guard never rejects
     # a real payload.
+    # "" and "." also collapse os.path.join(live_dir, name) to live_dir
+    # itself (B1a review 2026-10-20 finding: IsADirectoryError crash at the
+    # write site instead of the clean abort) — closed in the same guard.
     for bad in ("../escape.txt", "sub/summary.json", "/abs/summary.json",
-                "..leadingdot"):
+                "..leadingdot", "", "."):
         blob = k8s.build_payload({"summary.json": b"{}", bad: b"1"})
         text = (k8s.begin_marker("N1") + "\n" + blob + "\n"
                 + k8s.end_marker("N1"))

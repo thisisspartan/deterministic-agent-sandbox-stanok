@@ -153,9 +153,12 @@ def extract_payload(text: str, nonce: str):
     or a leading '/' would write outside live_dir. A name must be a bare
     flat filename: `os.path.basename(name) != name or
     name.startswith(("/", ".."))` fails closed like a malformed block
-    (None, the run is aborted). pod_runner.py:154-161 emits only flat
-    names (changes.patch, internal_rc.txt, summary.json,
-    launcher.stdout.log, failures.log), so a real payload never trips this."""
+    (None, the run is aborted). `''` and `'.'` collapse os.path.join to
+    live_dir itself — IsADirectoryError at the write site, not a clean
+    abort (B1a review 2026-10-20) — rejected by the same guard.
+    pod_runner.py:154-161 emits only flat names (changes.patch,
+    internal_rc.txt, summary.json, launcher.stdout.log, failures.log), so
+    a real payload never trips this."""
     pattern = (re.escape(begin_marker(nonce)) + r"\s*(.*?)\s*"
                + re.escape(end_marker(nonce)))
     blocks = re.findall(pattern, text, re.DOTALL)
@@ -167,7 +170,9 @@ def extract_payload(text: str, nonce: str):
         for m in tf.getmembers():
             if m.isfile():
                 name = m.name
-                if os.path.basename(name) != name or name.startswith(("/", "..")):
+                if (not name or name == "."
+                        or os.path.basename(name) != name
+                        or name.startswith(("/", ".."))):
                     return None
                 files[name] = tf.extractfile(m).read()
     return files
