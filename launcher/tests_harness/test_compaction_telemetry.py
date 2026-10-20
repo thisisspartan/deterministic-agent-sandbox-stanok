@@ -19,7 +19,13 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_compaction_telemetr
 import asyncio
 import json
 
-from claude_agent_sdk import ResultMessage, SystemMessage
+import pytest
+
+# Bare environments without the SDK: skip the module, never break collection
+# (operator decision 2026-10-20; the CI installs the SDK from the pinned lock,
+# so the published skip-set contract is unchanged by this guard).
+pytest.importorskip("claude_agent_sdk")
+from claude_agent_sdk import ResultMessage, SystemMessage  # noqa: E402
 
 from launcher import session, summary
 from launcher.config import Config
