@@ -50,7 +50,7 @@ import pytest
 from launcher import gates, plan as plan_mod, ticket, verify, zones
 from launcher.config import Config
 
-from conftest import repo, write
+from conftest import write
 
 
 def _build_plan(cfg, ticket_text):

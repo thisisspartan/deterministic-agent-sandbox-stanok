@@ -60,7 +60,6 @@ import re
 import select
 import signal
 import struct
-import sys
 import termios
 import time
 from typing import List, NamedTuple, Optional

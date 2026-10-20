@@ -17,7 +17,7 @@ Run: .venv/bin/python -m pytest launcher/tests_harness/test_runsh_pins.py -q
 
 import shutil
 
-from conftest import PY_PASS, repo, run, write
+from conftest import PY_PASS, run, write
 
 
 # --- M1: smoke strictly from src/ ------------------------------------------

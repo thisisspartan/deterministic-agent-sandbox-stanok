@@ -18,10 +18,15 @@ import signal
 import subprocess
 import time
 import uuid
+from typing import TYPE_CHECKING
+
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.gates import context_rot_threshold
 from launcher.verify import _check_contract_lock, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
+
+if TYPE_CHECKING:
+    from launcher.plan import SessionPlan  # annotation-only use (T1/F821 fix)
 
 
 def _safe_json_default(obj):

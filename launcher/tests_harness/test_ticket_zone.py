@@ -33,7 +33,7 @@ import pytest
 from launcher import gates, ticket, zones
 from launcher.config import Config
 
-from conftest import repo, write
+from conftest import write
 
 
 def _cfg(r):

@@ -45,7 +45,7 @@ from launcher import ticket, verify
 from launcher.config import Config
 from launcher.plan import SessionPlan
 
-from conftest import PY_PASS, repo, write
+from conftest import PY_PASS, write
 
 
 def _cfg(r):

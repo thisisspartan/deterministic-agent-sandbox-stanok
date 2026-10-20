@@ -24,7 +24,10 @@ fail-open (exit 0): отказ важнее маркера.
 (darkcast/.claude/hooks/loop-guard.py) намеренно НЕ синхронизируется
 (решение оператора 2026-10-08): supervisor-гард остаётся предупреждающим
 порога 10."""
-import sys, json, hashlib, os
+import sys
+import json
+import hashlib
+import os
 from datetime import datetime
 
 THRESHOLD = 5

@@ -113,7 +113,6 @@ Run: <stanok venv>/bin/python -m pytest launcher/tests_harness/test_k8s_patch_zo
 import os
 import subprocess
 
-import pytest
 
 from launcher import k8s
 

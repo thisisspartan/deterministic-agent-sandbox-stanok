@@ -8,7 +8,12 @@ repo root come from the passed-in Config (C).
 import hashlib
 import os
 import subprocess
+from typing import TYPE_CHECKING
+
 from launcher.logs import log
+
+if TYPE_CHECKING:
+    from launcher.plan import SessionPlan  # annotation-only use (T1/F821 fix)
 
 
 # ==================================================================================

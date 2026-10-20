@@ -133,7 +133,6 @@ def test_write_kind_no_path_is_none(repo_cfg):
 def _drive(tmp_path, messages, job=None):
     """Drive one real _execute_turn over a scripted message stream
     (the test_loop_trap fake-client pattern)."""
-    from claude_agent_sdk import AssistantMessage, ToolResultBlock, ToolUseBlock, UserMessage
 
     repo = tmp_path / "repo"
     (repo / "tests").mkdir(parents=True, exist_ok=True)

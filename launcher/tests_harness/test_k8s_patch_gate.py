@@ -29,7 +29,6 @@ the exact bytes, re-verified before every apply. Tests:
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_patch_gate.py -q
 """
 import hashlib
-import os
 
 import pytest
 

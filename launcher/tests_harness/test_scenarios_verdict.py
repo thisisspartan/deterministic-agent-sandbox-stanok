@@ -70,7 +70,6 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_scenarios_verdict.p
 import argparse
 import hashlib
 import json
-import os
 import subprocess
 
 import pytest

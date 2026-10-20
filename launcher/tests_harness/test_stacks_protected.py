@@ -11,7 +11,6 @@ repo (CC-168), so these tests drive the real manifests. House style per
 test_ro_protected_files.py: module-level import of verify + an explicit
 Config(repo_root=...) (C: no hub facade, no monkeypatched globals).
 """
-import pytest
 
 from launcher import verify
 from launcher.config import Config

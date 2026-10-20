@@ -12,7 +12,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_fix_prompt_rules.py
 from launcher import verify
 from launcher.config import Config
 
-from conftest import repo, write
+from conftest import write
 
 STUB_HUNG = "#!/usr/bin/env bash\necho stub-hung\nexit 124\n"
 

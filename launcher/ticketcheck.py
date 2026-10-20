@@ -58,7 +58,7 @@ _REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_DIR not in sys.path:
     sys.path.insert(0, _REPO_DIR)
 
-from launcher.ticket import (
+from launcher.ticket import (  # noqa: E402 — deliberately after the sys.path setup above (direct smoke form)
     _ACCEPT_NONE_RE,
     _FILE_LINE_RE,
     _RESET_NONE_RE,

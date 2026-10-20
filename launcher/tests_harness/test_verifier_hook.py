@@ -24,7 +24,7 @@ import asyncio
 from launcher import session
 from launcher.config import Config
 
-from conftest import repo, write
+from conftest import write
 
 MARKER = "PARTIAL-OUTPUT-MARKER"
 HANG_JS = (

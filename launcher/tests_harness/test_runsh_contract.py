@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from conftest import JS_FAIL, JS_PASS, PY_FAIL, PY_PASS, repo, run, write
+from conftest import JS_FAIL, JS_PASS, PY_FAIL, PY_PASS, run, write
 
 # CI bare-environment skip guard (SPEC-CI-MINIMAL, 2026-10-13): the jq stack
 # needs the jq binary; without it on PATH the two jq contract probes are a

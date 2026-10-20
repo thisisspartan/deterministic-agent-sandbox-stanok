@@ -11,7 +11,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_runsh_py_stack.py -
 """
 import pytest
 
-from conftest import repo as _base_repo, run
+from conftest import repo as _base_repo, run  # noqa: F401 — _base_repo is NOT dead: pytest resolves the local `repo` fixture's parameter through this alias (ruff cannot see the implicit use)
 
 
 @pytest.fixture()

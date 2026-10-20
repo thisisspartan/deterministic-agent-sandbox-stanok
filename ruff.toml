@@ -1,0 +1,16 @@
+# ruff gate (T1, 2026-10-20 — operator-ordered ruff/mypy wave).
+# Scope: the whole stanok tree; production code (launcher/, .claude/hooks/,
+# tests/fixtures/) must stay clean. The version is pinned by the CI lint job
+# (.github CI) and must match the local tool so both agree on behaviour.
+target-version = "py311" # the Pod image / CI runtime floor (image-requirements.lock)
+
+[lint]
+# Default rule selection (E4, E7, E9, F): correctness only, no style wave.
+
+[lint.per-file-ignores]
+# tests_harness carries three documented classes, all test-local:
+#   F811 — conftest helpers imported at module top are re-bound as pytest
+#          test parameters (fixture shadowing; a known false positive class),
+#   E741 — single-character loop names (`l`) inside test bodies,
+#   E731 — lambda-assigned local helpers inside test functions.
+"launcher/tests_harness/*.py" = ["F811", "E741", "E731"]

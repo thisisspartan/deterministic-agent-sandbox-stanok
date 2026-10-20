@@ -340,7 +340,7 @@ def preflight_server(cfg) -> bool:
 
     n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
     if not isinstance(n_ctx, int) or n_ctx <= 0:
-        log(f"PREFLIGHT: unparseable n_ctx in /props (fail-closed) (rc=20)")
+        log("PREFLIGHT: unparseable n_ctx in /props (fail-closed) (rc=20)")
         return False
 
     # CC-266: the server must say which model it serves, and it must be the
