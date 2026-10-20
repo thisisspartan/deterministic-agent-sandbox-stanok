@@ -118,6 +118,76 @@ def test_lock_shared_across_worktrees(tmp_path):
         _cleanup(label)
 
 
+def _stale_lock_path(key):
+    """R1 pair helper: the PRE-08cd49b lock-file name for the same key.
+    The md5(key)[:12] formula is verbatim from the code removed by 08cd49b
+    (the md5->sha256 migration; CONTEXT 2026-10-20 r14, review finding F2).
+    The new-format name formula is the one already pinned above
+    (test_lock_shared_across_worktrees:102)."""
+    return LOG_DIR / f"stanok-{hashlib.md5(key.encode()).hexdigest()[:12]}.lock"
+
+
+def test_stale_md5_lock_migrated_when_free(tmp_path):
+    """R1 pair (1): a stale old-format (md5) lock file that nobody holds is
+    removed by the next launch — the migration window is closed. The cleanup
+    runs BEFORE the new lock is taken, so it happens even when the launch
+    itself is refused: the new lock is held by this process, the launch
+    must still return rc=21 AND the stale file must be gone."""
+    repo = _make_repo(tmp_path)
+    key = _common_dir(repo)
+    stale = _stale_lock_path(key)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stale.write_text("")
+    lock_path = LOG_DIR / f"stanok-{hashlib.sha256(key.encode()).hexdigest()[:12]}.lock"
+    lf = open(lock_path, "w")
+    fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    label = f"r1mig-{uuid.uuid4().hex[:8]}"
+    t = _ticket(tmp_path, "# wt\n\ntest: tests/wt_test.py\nimpl: src/wt.py\n\nrun.sh: exists\n")
+    try:
+        rc = _launch(["run", str(t), label], {
+            "STANOK_REPO": str(repo),
+            "STANOK_SERVER_URL": DEAD_SERVER,
+            "STANOK_NO_SANDBOX": "1",
+        })
+        assert rc == 21, f"expected lock refusal rc=21, got {rc}"
+        assert not stale.exists(), "stale md5-format lock was not migrated"
+    finally:
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
+        stale.unlink(missing_ok=True)
+        _cleanup(label)
+
+
+def test_stale_md5_lock_survives_when_held(tmp_path):
+    """R1 pair (2): a stale md5-format lock held by a live old-format run
+    is NOT removed, and the new launch does not collide with it: the new
+    lock name is sha256-keyed, so the launch passes the lock gate and
+    fails only at the dead server (rc=20 — the documented post-lock path
+    of the D2 red test above), never rc=21, never a crash on the held
+    file. This pins "occupied -> the new run does not fall over"."""
+    repo = _make_repo(tmp_path)
+    key = _common_dir(repo)
+    stale = _stale_lock_path(key)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    sf = open(stale, "w")
+    fcntl.flock(sf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    label = f"r1held-{uuid.uuid4().hex[:8]}"
+    t = _ticket(tmp_path, "# wt\n\ntest: tests/wt_test.py\nimpl: src/wt.py\n\nrun.sh: exists\n")
+    try:
+        rc = _launch(["run", str(t), label], {
+            "STANOK_REPO": str(repo),
+            "STANOK_SERVER_URL": DEAD_SERVER,
+            "STANOK_NO_SANDBOX": "1",
+        })
+        assert rc == 20, f"expected the post-lock dead-server rc=20, got {rc}"
+        assert stale.exists(), "held stale md5-format lock was removed while locked"
+    finally:
+        fcntl.flock(sf, fcntl.LOCK_UN)
+        sf.close()
+        stale.unlink(missing_ok=True)
+        _cleanup(label)
+
+
 def test_resolve_ticket_from_worktree(tmp_path):
     """D1 pin: a worktree placed next to stanok/ inside the project root
     resolves tickets via dirname(repo_root) — same behavior as the main

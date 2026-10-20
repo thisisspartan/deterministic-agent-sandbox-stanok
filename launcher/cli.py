@@ -649,7 +649,9 @@ def _lock_key(cfg) -> "str | None":
     DIR, not the repo path — a worktree has a different path but the same
     git directory, so two runs from two worktrees of one repo serialize
     (second gets rc=21). Returns None when git cannot answer: the lock
-    branch then aborts (fail closed — no silent md5(repo_root) fallback)."""
+    branch then aborts (fail closed — no silent sha256(repo_root) fallback;
+    the key above is hashed with sha256 into the lock file name, R2 fix
+    2026-10-21 after the md5->sha256 migration 08cd49b)."""
     try:
         out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
                              cwd=cfg.repo_root, capture_output=True,
@@ -736,6 +738,25 @@ def main() -> int:
                             "git rev-parse --git-common-dir failed): refusing to run "
                             "without a shared lock (D2, fail closed)")
             lock_path = os.path.join(cfg.log_dir, f"stanok-{hashlib.sha256(key.encode()).hexdigest()[:12]}.lock")
+            # R1 (Z.ai external review 2026-10-20, operator order 2026-10-21):
+            # close the md5->sha256 migration window (08cd49b). A pre-upgrade
+            # run may still hold the OLD lock name; before taking the new lock,
+            # drop the stale file ONLY if nobody holds it (non-blocking flock).
+            # A held file is left untouched — that old-format run keeps its
+            # serialization. Opening "w" can truncate a held file: inert —
+            # flock is inode-based and the lock file carries no content.
+            # Pair tests: tests_harness/test_worktree.py (R1 pair).
+            stale = os.path.join(cfg.log_dir, f"stanok-{hashlib.md5(key.encode()).hexdigest()[:12]}.lock")
+            if os.path.exists(stale):
+                try:
+                    sf = open(stale, "w")
+                    try:
+                        fcntl.flock(sf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        os.remove(stale)
+                    finally:
+                        sf.close()
+                except OSError:
+                    pass  # held by a live old-format run — leave it alone
             lf = open(lock_path, "w")
             try:
                 fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
