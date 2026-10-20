@@ -5,7 +5,8 @@ CC-237 (schema v2, operator decision 2026-10-11): summary.json is TYPED —
 scalars and structured fields only, no free text. The allowlist:
   label, ticket, rc, verifier, probe_result, turns, elapsed_s, session_id,
   commit_sha, tokens, cache_hit_rate, inference_telemetry, tool_activity,
-  loop_trap, test_fit, acceptance, opik_traces  (+ patch_sha256, image_digest,
+  loop_trap, test_fit, acceptance, compactions, opik_traces  (+ patch_sha256,
+  image_digest,
   host-stamped in k8s mode — k8s.py: the Pod's containerStatuses imageID,
   None when unavailable).
   test_fit = {"edits_after_green": int>=0, "new_tests_after_green": int>=0}
@@ -194,6 +195,33 @@ def _test_fit_field(job: dict) -> dict:
     return out
 
 
+def _compactions_field(job: dict) -> list:
+    """P1 telemetry (Opik analysis CC-302/CC-304, 2026-10-20): the typed
+    compact_boundary record — [{"turn": int>=1, "trigger": str,
+    "pre_tokens": int>=0}]. The token totals deliberately exclude
+    compaction API calls; without this field an autocompact was invisible
+    in the verdict (cc304: ~83 s of summarisation, zero trace in
+    summary.json). Metric only: no gate, no text. Missing/not-a-list
+    publishes [] ("no signal"); an individually malformed entry is
+    dropped, valid entries survive."""
+    raw = job.get("compactions")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for e in raw:
+        if not isinstance(e, dict):
+            continue
+        turn, pre, trigger = e.get("turn"), e.get("pre_tokens"), e.get("trigger")
+        bad = (
+            not isinstance(turn, int) or isinstance(turn, bool) or turn < 1
+            or not isinstance(pre, int) or isinstance(pre, bool) or pre < 0
+            or not isinstance(trigger, str)
+        )
+        if not bad:
+            out.append({"turn": turn, "trigger": trigger, "pre_tokens": pre})
+    return out
+
+
 def _failure_lines(job: dict) -> list[str]:
     """CC-237 (schema v2): every free-text failure of a run as plain lines —
     the error string, verify_gate failures (verify.py entries are
@@ -345,6 +373,10 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
         # G4: the acceptance-contract state (typed, no gate) — whether the
         # final PASS was backed by trusted pre-existing acceptance checks.
         "acceptance": _acceptance_field(job),
+        # P1 telemetry (Opik analysis CC-302/CC-304, 2026-10-20): the typed
+        # compact_boundary record (no gate) — makes autocompact visible in
+        # the verdict; token totals stay untouched (they already exclude it).
+        "compactions": _compactions_field(job),
         "opik_traces": job.get("opik_traces"),
     }
 

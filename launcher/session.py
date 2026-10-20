@@ -272,6 +272,9 @@ class TurnResult:
                   under tests/ after the first observed green / new test
                   files created after it; the green flag lives in
                   job["_green_seen"], session-scoped).
+    compactions   — P1 telemetry (Opik analysis CC-302/CC-304, 2026-10-20):
+                  the native compact_boundary events observed in this turn
+                  (see _compaction_entry); [{"trigger": str, "pre_tokens": int}].
     """
 
     usage: dict
@@ -283,6 +286,36 @@ class TurnResult:
     bash_ok: int = 0
     test_edits_after_green: int = 0
     test_new_tests_after_green: int = 0
+    compactions: list = dataclasses.field(default_factory=list)
+
+
+def _compaction_entry(msg) -> dict | None:
+    """P1 telemetry (Opik analysis CC-302/CC-304, 2026-10-20): the pinned CLI
+    (cli.js 2.1.88) emits a native stream event on every autocompact —
+    {"type":"system","subtype":"compact_boundary","compact_metadata":
+    {"trigger": ..., "pre_tokens": ...}}; the Agent SDK passes unknown system
+    subtypes through as a generic SystemMessage carrying the raw dict in
+    .data. Before this field a compaction was invisible in summary.json: the
+    token totals EXCLUDE compaction calls exactly (cc304: 80,837-6,200 =
+    the published 74,637) but nothing recorded that 83 s of summarisation
+    happened. This records the event; it changes no totals.
+
+    Returns the typed pair {"trigger": str, "pre_tokens": int} for a
+    well-formed compact_boundary, None for any other message or a malformed
+    payload (never a fabricated 0: no event, no entry)."""
+    if getattr(msg, "subtype", None) != "compact_boundary":
+        return None
+    data = getattr(msg, "data", None)
+    cm = data.get("compact_metadata") if isinstance(data, dict) else None
+    if not isinstance(cm, dict):
+        return None
+    trigger = cm.get("trigger")
+    pre_tokens = cm.get("pre_tokens")
+    if not isinstance(trigger, str):
+        trigger = ""
+    if not isinstance(pre_tokens, int) or isinstance(pre_tokens, bool):
+        return None
+    return {"trigger": trigger, "pre_tokens": pre_tokens}
 
 
 async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
@@ -299,6 +332,7 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
     bash_total = 0
     bash_ok = 0
     bash_ids = set()
+    compactions = []
     # CC-247: run.sh-test Bash calls awaiting their tool_result (id -> command)
     test_bash_cmds = {}
     test_edits_after_green = 0
@@ -310,6 +344,10 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
             sid = msg.data.get("session_id")
         if sid and not job.get("session_id"):
             job["session_id"] = str(sid)
+
+        compaction = _compaction_entry(msg)
+        if compaction is not None:
+            compactions.append(compaction)
 
         u = _extract_usage(msg)
         if u:
@@ -399,6 +437,7 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
         bash_ok=bash_ok,
         test_edits_after_green=test_edits_after_green,
         test_new_tests_after_green=test_new_tests_after_green,
+        compactions=compactions,
     )
 
 
@@ -821,6 +860,15 @@ def _record_turn_telemetry(job: dict, total_tokens: dict, result: TurnResult,
         "bash_total": result.bash_total,
         "bash_ok": result.bash_ok,
     })
+
+    # P1 telemetry (Opik analysis CC-302/CC-304, 2026-10-20): tag the
+    # native compact_boundary events seen in this turn with its turn number
+    # (the summary field is built by summary._compactions_field from this
+    # job entry). Token totals above already EXCLUDE compaction calls;
+    # this records that a compaction happened and at what window size.
+    for c in result.compactions:
+        job.setdefault("compactions", []).append({"turn": turn, **c})
+
     return inp, live_context
 
 

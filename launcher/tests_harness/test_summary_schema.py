@@ -35,7 +35,7 @@ ALLOWLIST = {
     "label", "ticket", "rc", "verifier", "probe_result", "turns", "elapsed_s",
     "session_id", "commit_sha", "tokens", "cache_hit_rate",
     "inference_telemetry", "tool_activity", "loop_trap", "test_fit",
-    "acceptance", "opik_traces",
+    "acceptance", "compactions", "opik_traces",
 }
 
 FULL_JOB = {
@@ -93,6 +93,9 @@ def test_build_summary_emits_exactly_the_allowlist(monkeypatch):
     # G4: a job without acceptance publishes the typed default — the protocol
     # reads "undeclared" as "no independent evidence declared", never presence.
     assert s["acceptance"] == {"mode": "undeclared", "paths": []}
+    # P1 (2026-10-20): a job without compactions publishes the typed default []
+    # ("no signal") — the field exists on every run, absence is never implicit.
+    assert s["compactions"] == []
     assert s["opik_traces"] == ["trace-1"]
 
 
