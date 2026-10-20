@@ -183,7 +183,7 @@ def test_open_number_reveals_only_itself():
 def test_open_zero_floods_region_with_numeric_border():
     # 6x6/4 mines: first row-major zero cell whose flood is partial (some safe
     # cells stay closed). Expected opened set re-derived independently.
-    seed, layout_adj = None, None
+    seed = None
     for sd in range(1, 5000):
         m = ref_mines(sd, 6, 6, 4)
         a = ref_adj(m, 6, 6)
@@ -192,7 +192,7 @@ def test_open_zero_floods_region_with_numeric_border():
         safe = {(x, y) for x in range(1, 7) for y in range(1, 7)} - m
         exp = ref_reveal(m, a, (1, 1))
         if exp < safe and any(a[y - 1][x - 1] > 0 for (x, y) in exp):
-            seed, layout_adj = sd, a
+            seed = sd
             break
     assert seed is not None
     s = eng.new_game(seed, 6, 6, 4)
