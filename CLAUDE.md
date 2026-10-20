@@ -14,17 +14,23 @@ The ticket is self-contained — everything needed is described in the first mes
    - `docs/` — brief documentation;
    - `scripts/run.sh` — this project's OWN test entrypoint (see "Project entrypoint" below).
    All other directories and files are write-protected.
-   The filesystem outside `src/`, `tests/`, `docs/`, `scripts/` is mounted read-only
-   at the OS level (container): any write attempt there fails with a
-   `Read-only file system` error.
+   The container does not physically block writes there — the Pod works on a
+   writable copy of the tree. Protection is a check, not a mount: a changed or
+   deleted protected file, or an undeclared new file under `tests/`/`src/`,
+   fails the run (see "Verification by the external runner"). Only `src/`,
+   `tests/`, `docs/` and `scripts/run.sh` reach the patch anyway — anything
+   you write elsewhere never leaves the Pod.
 2. Available tools: **Read, Write, Edit, Grep, Glob, Bash**. Bash is UNRESTRICTED inside
    this container — run any build tool, use whatever language and
    framework this project's existing code already uses. There is no per-command allowlist;
    the boundary is the container, not the command. The network, however, is closed except
    for the model server: packages from the internet are NOT installable — work with what
    the image already provides.
-3. Do NOT commit and do not touch the `.git` directory (mounted read-only; `git log`/
-   `git blame`/`git diff` work for context, writes fail at the filesystem level).
+3. Do NOT commit and do not touch the `.git` directory. The runner initializes a
+   fresh repository for the run and commits your work itself — `git log`/
+   `git blame`/`git diff` work for context against the base commit; your own
+   commits are noise (the patch is computed by the runner from the four zones,
+   and a patch touching `.git` or stray paths is rejected at the host's patch gate).
 4. Create only what the ticket explicitly requires (no extra files, no unrequested
    dependencies).
 5. Match the project's EXISTING stack. Look at what's already in `src/`, `tests/`, and
@@ -121,10 +127,13 @@ If the verifier returns an error (`<verification_result status="FAIL">`):
 - The tests in `tests/` are the reference contract of the ticket.
 - **It is categorically forbidden to weaken or change test assertions to fit broken code,**
   and equally forbidden to edit `scripts/run.sh` to make a failure disappear.
-  This is enforced at two points: pre-existing `tests/` files and
-  `scripts/run.sh` are mounted read-only (a write attempt fails with
-  "Read-only file system"), and a post-turn manifest diff fails the run
-  (an independent second check that also catches deletion).
+  This is enforced at two points: after every turn the launcher recomputes a
+  SHA256 manifest of the protected files (pre-existing `tests/**`,
+  `scripts/run.sh`, `scripts/stacks/*.toml`) inside the container and compares
+  it with the snapshot taken before the session, and after the container exits
+  the host recomputes the same manifest over the transported tree plus your
+  patch — the same comparison in two independent contexts (it catches
+  modification, deletion, and undeclared new files under `tests/`/`src/`).
 - Localize the problem and fix exclusively the implementation in `src/`.
 
 ## Final report (STRICTLY ≤ 5 lines)

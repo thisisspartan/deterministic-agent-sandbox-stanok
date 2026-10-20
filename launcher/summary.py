@@ -52,13 +52,20 @@ def _publish_evidence(cfg, label: str, container_rc: int,
     publishes nothing rather than a fake verdict.
 
     S2 (PLAN-SIMPLIFY-2026-10-09): the I5 rc cross-check, the worker_*
-    fields and the INTEGRITY-FAIL value are REMOVED. The host's authority is
-    its two independent checks only — the contract recompute and the fresh
-    check; the worker's summary passes through untouched when neither fires.
-    The verdict is a statement about the TREE (suite green + tree = declared),
-    not about the worker's self-report: a pure forgery (claims PASS while the
-    container exited non-zero) over a clean contract with a green fresh check
-    is no longer caught — sanctioned gap.
+    fields and the INTEGRITY-FAIL value are REMOVED from THIS function. The
+    host's authority is its two independent checks only — the contract
+    recompute and the fresh check; the worker's summary passes through
+    untouched when neither fires. The verdict is a statement about the TREE
+    (suite green + tree = declared), not about the worker's self-report.
+    The S2 "sanctioned gap" (a pure forgery — claims PASS while the session
+    exited non-zero) is CLOSED in the k8s mode by the internal_rc contract
+    (external review 2026-10-16): pod_runner ships the in-Pod session's own
+    exit code in internal_rc.txt and the host compares it against
+    summary.json's "rc" before ever publishing — a contradiction is
+    verdict-substitution, an infrastructure defect (k8s.host_launch_k8s,
+    "Verdict cross-check", rc=16). An image predating the contract ships no
+    internal_rc.txt: no check (doc-pass 2026-10-20; the old "no longer
+    caught" text predated the cross-check).
 
     Stage 3 (T3-2) `contract_violations`: the host's own recompute of the
     protected-files manifest (verify.host_contract_check against the pre-run

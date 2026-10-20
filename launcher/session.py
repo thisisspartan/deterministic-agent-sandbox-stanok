@@ -442,17 +442,26 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
 
 
 # contract_lock (T5, CC-137): the PreToolUse deny hook is GONE. Its job — a
-# pre-existing protected file cannot be rewritten — is now done by the MOUNT
-# (T4b/CC-136: the protected files are bound :ro over the rw carve-out, so the
-# write is an EROFS refusal from the kernel, not a Python decision), with the
-# post-turn SHA256 manifest diff (_check_contract_lock) as the independent
-# second echelon that catches anything the filesystem cannot (a DELETED test
-# file is a write to its directory) and fails the run closed.
+# pre-existing protected file cannot be rewritten — is done by the post-turn
+# SHA256 manifest diff at BOTH echelons, in the runtime-agnostic core
+# (verify._check_contract_lock, called after every turn in the session loop)
+# and on the host after the Pod exits (k8s.scratch_contract_violations, over
+# `transported tree + changes.patch`). Both run the ONE comparison
+# verify._compare_manifests — the two cannot drift — and the whole thing
+# fails the run closed (a DELETED test file is caught by the same manifest
+# diff: its digest is missing from the after-snapshot).
 #
-# The hook was deleted only after that e2e existed: a declared ABSENT path is
-# carved out through its parent dir, so before CC-136 the mount layer alone
-# left the pre-existing tests writable (see tickets/TASK-STANOK-CC-135.md
-# §Non-goals and CC-136).
+# HISTORY (superseded wording, doc-pass 2026-10-20): until 2026-10-10 the
+# first echelon was the MOUNT (T4b/CC-136: protected files bound :ro over the
+# rw carve-out — an EROFS refusal from the kernel). The operator abolished
+# that echelon with the move to the k8s ConfigMap transport: the Pod works on
+# a writable copy of the tree on a rw mount (pod_runner._unpack), so the
+# manifest diff is the ONLY mechanism (the mount mechanics went away with the
+# Docker path, CC-258 — test_ro_protected_files.py docstring records the same
+# split). The hook was deleted only after the mount + manifest e2e existed:
+# a declared ABSENT path is carved out through its parent dir, so before
+# CC-136 the mount layer alone left the pre-existing tests writable (see
+# tickets/TASK-STANOK-CC-135.md §Non-goals and CC-136).
 
 
 # R1 (Phase 2): in-process replacement for hooks/verifier.sh.
@@ -1003,8 +1012,12 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
 
     # contract_lock (W2.5): snapshot the protected files before the session; a
     # pre-existing test file modified/deleted during the run is a violation in
-    # summary.json (the :ro bind makes the modification impossible; the diff
-    # still catches a deletion, i.e. a write to the parent dir).
+    # summary.json. Enforcement is the manifest diff at both echelons — the
+    # in-Pod _check_contract_lock after each turn consumes this snapshot; the
+    # host recomputes it over the transported tree + patch
+    # (k8s.scratch_contract_violations). Not the filesystem: the Pod's copy of
+    # the tree is writable (doc-pass 2026-10-20; the old ":ro bind" wording
+    # described the removed Docker-era mount layer).
     tests_manifest_before = _tests_manifest(cfg)
 
     with open(stream_out_path, "a", encoding="utf-8") as stream_f:
