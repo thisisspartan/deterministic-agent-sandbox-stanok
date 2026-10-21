@@ -30,8 +30,9 @@ the I5 rc cross-check, the worker_* fields and INTEGRITY-FAIL are removed),
 _rotate_stale_summary,
 the status-field table,
 the host identity/resource stamps (stamp_opik_traces, _stamp_summary_identity,
-_stamp_resource_peaks — moved verbatim from k8s.py, #316, 2026-10-22; k8s
-calls them as summary._X; guard: tests_harness/test_payload_facade.py).
+_stamp_resource_peaks — moved verbatim from k8s.py, #316, 2026-10-22;
+host_launch_k8s calls the identity/peaks pair as summary._X, stamp_opik_traces
+is internal to this module; guard: tests_harness/test_payload_facade.py).
 Cycles checked before import: launcher.lifecycle -> kube/logs (kube is
 stdlib-only), launcher.opik -> config leaf — neither imports summary. Static
 config arrives as the passed-in Config; the per-run evidence dir as the
@@ -436,8 +437,9 @@ def write_env_fail_summary(cfg: "Config", label: str, error: str) -> None:
 # #316 (2026-10-22, host-side — precedent CC-266): the host evidence-stamp
 # cluster (stamp_opik_traces, _stamp_summary_identity, _stamp_resource_peaks)
 # moved verbatim from launcher/k8s.py (they were k8s strict-class debt).
-# Single home: k8s holds no def and no re-export; host_launch_k8s calls them
-# as summary._X (guard: tests_harness/test_payload_facade.py). They belong
+# Single home: k8s holds no def and no re-export; host_launch_k8s calls
+# _stamp_summary_identity/_stamp_resource_peaks as summary._X
+# (stamp_opik_traces stays internal to this module). They belong
 # here with the fields they write: the summary.json schema is this module's
 # contract (allowlist above; test_summary_schema.py pins it).
 # ==================================================================================

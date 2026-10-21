@@ -100,7 +100,9 @@ FRESH_APPLY_FAIL_RC = 20
 # (stamp_opik_traces, _stamp_summary_identity, _stamp_resource_peaks) moved
 # to launcher/summary.py — the evidence-schema module whose docstring already
 # declares patch_sha256/image_digest/opik_traces/resource_peaks as
-# host-stamped fields; k8s calls them as summary._X.
+# host-stamped fields. host_launch_k8s calls _stamp_summary_identity/
+# _stamp_resource_peaks as summary._X; stamp_opik_traces stays internal to
+# summary (called only from _stamp_summary_identity).
 # ==================================================================================
 
 
@@ -533,8 +535,9 @@ def _stage_patch(payload_files: dict[str, bytes],
 # launcher/summary.py (its docstring already declares patch_sha256/
 # image_digest/opik_traces/resource_peaks as host-stamped fields; the
 # stamps belong with the schema they stamp). Single home: k8s holds no def
-# and no re-export; host_launch_k8s calls them as summary._X. Guard:
-# tests_harness/test_payload_facade.py.
+# and no re-export; host_launch_k8s calls _stamp_summary_identity/
+# _stamp_resource_peaks as summary._X (stamp_opik_traces stays internal to
+# summary). Guard: tests_harness/test_payload_facade.py.
 
 
 def _check_internal_rc(cfg: "Config", label: str, payload_files: dict[str, bytes],
