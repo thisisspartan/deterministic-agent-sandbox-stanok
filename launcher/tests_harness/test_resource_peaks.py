@@ -35,7 +35,7 @@ import time
 
 import pytest
 
-from launcher import k8s, kube
+from launcher import k8s, kube, peaks
 from launcher.config import Config
 
 FAKE_IMAGE = "192.168.122.156:5000/stanok-machine@sha256:fake"
@@ -63,20 +63,20 @@ def test_extraction_typed_record():
         {"podRef": {"name": POD, "namespace": NS},
          "cpu": {"usageNanoCores": 123456},
          "memory": {"usageBytes": 111, "workingSetBytes": 222}}]}
-    assert k8s._peak_from_stats(stats, POD, NS) == {
+    assert peaks._peak_from_stats(stats, POD, NS) == {
         "cpu_peak_nanocores": 123456, "mem_peak_usage_bytes": 111,
         "mem_peak_working_set_bytes": 222}
 
 
 def test_extraction_wrong_namespace_or_absent_is_none():
     stats = _stats(1, 2, 3, ns="other-ns")
-    assert k8s._peak_from_stats(stats, POD, NS) is None
-    assert k8s._peak_from_stats({"pods": []}, POD, NS) is None
-    assert k8s._peak_from_stats({}, POD, NS) is None
+    assert peaks._peak_from_stats(stats, POD, NS) is None
+    assert peaks._peak_from_stats({"pods": []}, POD, NS) is None
+    assert peaks._peak_from_stats({}, POD, NS) is None
 
 
 def test_extraction_missing_sections_are_none_fields_not_zero():
-    peak = k8s._peak_from_stats({"pods": [{"podRef": {"name": POD,
+    peak = peaks._peak_from_stats({"pods": [{"podRef": {"name": POD,
                                                        "namespace": NS}}]},
                                 POD, NS)
     assert peak == {"cpu_peak_nanocores": None, "mem_peak_usage_bytes": None,
@@ -92,7 +92,7 @@ def test_sampler_tracks_max_over_monotonic_samples():
         n["i"] += 1
         return _stats(100 * n["i"], 1000 * n["i"], 900 * n["i"])
 
-    s = k8s._ResourceSampler(POD, NS, interval_s=0.02, fetch=fetch)
+    s = peaks._ResourceSampler(POD, NS, interval_s=0.02, fetch=fetch)
     s.start()
     time.sleep(0.12)
     out = s.stop_and_peaks()
@@ -108,7 +108,7 @@ def test_sampler_all_errors_publishes_none():
     def fetch():
         raise RuntimeError("kubelet unreachable")
 
-    s = k8s._ResourceSampler(POD, NS, interval_s=0.02, fetch=fetch)
+    s = peaks._ResourceSampler(POD, NS, interval_s=0.02, fetch=fetch)
     s.start()
     time.sleep(0.06)
     out = s.stop_and_peaks()
@@ -117,7 +117,7 @@ def test_sampler_all_errors_publishes_none():
 
 
 def test_sampler_pod_never_in_stats_publishes_none():
-    s = k8s._ResourceSampler(POD, NS, interval_s=0.02,
+    s = peaks._ResourceSampler(POD, NS, interval_s=0.02,
                              fetch=lambda: _stats(1, 2, 3, name="other-pod"))
     s.start()
     time.sleep(0.06)
@@ -138,7 +138,7 @@ def test_sampler_merge_max_ignores_none_and_fills_later():
         i["n"] += 1
         return stats
 
-    s = k8s._ResourceSampler(POD, NS, interval_s=0.02, fetch=fetch)
+    s = peaks._ResourceSampler(POD, NS, interval_s=0.02, fetch=fetch)
     s.start()
     time.sleep(0.10)
     out = s.stop_and_peaks()
@@ -150,8 +150,8 @@ def test_sampler_merge_max_ignores_none_and_fills_later():
 _PY311_SCRIPT = """
 import sys, time
 sys.path.insert(0, sys.argv[1])
-from launcher import k8s
-s = k8s._ResourceSampler("p", "default", interval_s=0.02, fetch=lambda: {
+from launcher import peaks
+s = peaks._ResourceSampler("p", "default", interval_s=0.02, fetch=lambda: {
     "pods": [{"podRef": {"name": "p", "namespace": "default"},
               "cpu": {"usageNanoCores": 7},
               "memory": {"usageBytes": 8, "workingSetBytes": 9}}]})
@@ -187,17 +187,17 @@ def test_py311_join_contract():
 def test_node_of_pod_fail_soft(monkeypatch):
     monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, " node-a\n"))
-    assert k8s._node_of_pod(POD, NS) == "node-a"
+    assert peaks._node_of_pod(POD, NS) == "node-a"
     monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(1, ""))
-    assert k8s._node_of_pod(POD, NS) is None
+    assert peaks._node_of_pod(POD, NS) is None
     monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0, ""))
-    assert k8s._node_of_pod(POD, NS) is None
+    assert peaks._node_of_pod(POD, NS) is None
 
 
 def test_kubelet_stats_parses_json(monkeypatch):
     monkeypatch.setattr(kube, "_kubectl_checked",
                         lambda *a, **k: _FakeCompleted(0, '{"pods": []}'))
-    assert k8s._kubelet_stats("node-a") == {"pods": []}
+    assert peaks._kubelet_stats("node-a") == {"pods": []}
 
 
 # --- 4: _fresh_job wiring — holder filled, no-holder flow unchanged ---------------
@@ -238,7 +238,7 @@ def test_fresh_job_fills_holder_on_success(tmp_path, monkeypatch):
                                  pod_json={})
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
     made = []
-    monkeypatch.setattr(k8s, "_ResourceSampler",
+    monkeypatch.setattr(peaks, "_ResourceSampler",
                         lambda *a, **k: made.append(1) or _FakeSampler(*a, **k))
     holder = {}
     rc, tail = k8s._fresh_job(cfg, NS, "stanok-fresh-lbl", "cm-tree",
@@ -255,7 +255,7 @@ def test_fresh_job_fills_holder_on_failure_path(tmp_path, monkeypatch):
     cfg, patch_file = _fresh_env(tmp_path, monkeypatch, wait_result="failed",
                                  pod_json=OOM_POD)
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
-    monkeypatch.setattr(k8s, "_ResourceSampler", _FakeSampler)
+    monkeypatch.setattr(peaks, "_ResourceSampler", _FakeSampler)
     holder = {}
     rc, tail = k8s._fresh_job(cfg, NS, "stanok-fresh-lbl", "cm-tree",
                               "cm-patch", str(patch_file), 60, [], FAKE_IMAGE,
@@ -272,7 +272,7 @@ def test_fresh_job_without_holder_is_unchanged(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(k8s, "_pod_of_job",
                         lambda *a, **k: calls.append("pod") or "pod-x")
-    monkeypatch.setattr(k8s, "_ResourceSampler",
+    monkeypatch.setattr(peaks, "_ResourceSampler",
                         lambda *a, **k: calls.append("sampler") or _FakeSampler(*a, **k))
     rc, tail = k8s._fresh_job(cfg, NS, "stanok-fresh-lbl", "cm-tree",
                               "cm-patch", str(patch_file), 60, [], FAKE_IMAGE)

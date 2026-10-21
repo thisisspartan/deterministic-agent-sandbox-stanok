@@ -50,12 +50,11 @@ import re
 import shutil
 import subprocess
 import tarfile
-import threading
 import tempfile
 import time
 import uuid
 
-from launcher import gates, kube, opik, patchgate, preflight, verify
+from launcher import gates, kube, opik, peaks, patchgate, preflight, verify
 from launcher.abort import _early_abort  # wave A step 1: was a lazy import from cli (the cli->k8s cycle was its only reason; abort imports neither)
 from launcher.config import RunState
 from launcher.exitcodes import ExitCode
@@ -602,108 +601,15 @@ def job_deadline(cfg) -> int:
 
 
 # ==================================================================================
-# Resource sampling (operator decision 2026-10-16): the G1 requests/limits
-# (bb5eed6) were committed as "pending measured peaks" — this closes the
-# measurement half. Read-only polling of the kubelet stats API (`kubectl get
-# --raw /api/v1/nodes/<node>/proxy/stats/summary` — the native kubelet
-# primitive, no new mechanism) while a Job runs; observed peaks are
-# host-stamped into summary.json as resource_peaks, like patch_sha256.
-# gVisor caveat (BL-4 finding): under runsc the Pod's host cgroup IS the
-# sandbox process (guest memory = host anonymous memory), so pod-level numbers
-# are host-real; per-container accounting under runsc can drift. Peaks are
-# published as OBSERVED kubelet numbers, never as truth claims; None when no
-# sample succeeded (never a 0 masquerade).
+# Wave A portion 5 (2026-10-21): the resource-sampling cluster
+# (SAMPLE_INTERVAL_S, _node_of_pod, _kubelet_stats, _peak_from_stats,
+# _ResourceSampler) moved verbatim to launcher/peaks.py (strict from birth).
+# Single home: k8s holds no def, no constant and no re-export; the
+# construction sites here call peaks._ResourceSampler. _pod_of_job,
+# _wait_job_terminal and _stream_pod_logs stay here: Pod lifecycle
+# observation machinery of a later portion. Guard:
+# tests_harness/test_peaks_facade.py.
 # ==================================================================================
-SAMPLE_INTERVAL_S = 10.0
-
-
-def _node_of_pod(pod: str, ns: str):
-    r = kube._kubectl("get", "pod", pod, "-n", ns, "-o", "jsonpath={.spec.nodeName}")
-    node = (r.stdout or "").strip()
-    return node or None
-
-
-def _kubelet_stats(node: str) -> dict:
-    r = kube._kubectl_checked("get", "--raw",
-                        f"/api/v1/nodes/{node}/proxy/stats/summary")
-    return json.loads(r.stdout)
-
-
-def _peak_from_stats(stats: dict, pod: str, ns: str):
-    """Pure extraction: the Pod's typed peak record from one kubelet summary,
-    or None when the Pod is not in it."""
-    for p in stats.get("pods", []):
-        ref = p.get("podRef") or {}
-        if ref.get("name") != pod or ref.get("namespace") != ns:
-            continue
-        mem = p.get("memory") or {}
-        cpu = p.get("cpu") or {}
-        return {
-            "cpu_peak_nanocores": cpu.get("usageNanoCores"),
-            "mem_peak_usage_bytes": mem.get("usageBytes"),
-            "mem_peak_working_set_bytes": mem.get("workingSetBytes"),
-        }
-    return None
-
-
-class _ResourceSampler(threading.Thread):
-    """Samples kubelet stats for one Pod every interval until stopped, keeping
-    the observed maxima. A fetch error is counted, never fatal — the sampler
-    must never affect the run it observes."""
-
-    def __init__(self, pod: str, ns: str, interval_s: float = SAMPLE_INTERVAL_S,
-                 fetch=None):
-        super().__init__(daemon=True)
-        self.pod, self.ns, self.interval_s = pod, ns, interval_s
-        self._fetch = fetch or self._default_fetch
-        # NOT "_stop": CPython 3.11 Thread._wait_for_tstate_lock calls
-        # self._stop() at join() — an Event attribute there shadows the
-        # internal and join() raises TypeError (external review 2026-10-16,
-        # reproduced on 3.11.15; the host venv is 3.13, so only a 3.11
-        # launcher hits it — pinned by test_py311_join_contract).
-        self._stop_event = threading.Event()
-        self.samples = 0
-        self.errors = 0
-        self._peak: dict | None = None
-
-    def _default_fetch(self):
-        node = _node_of_pod(self.pod, self.ns)
-        if node is None:
-            raise RuntimeError(f"pod {self.pod}: nodeName unavailable")
-        return _kubelet_stats(node)
-
-    def run(self):
-        while not self._stop_event.is_set():
-            try:
-                peak = _peak_from_stats(self._fetch(), self.pod, self.ns)
-                if peak is not None:
-                    self.samples += 1
-                    self._merge(peak)
-            except Exception:
-                self.errors += 1
-            self._stop_event.wait(self.interval_s)
-
-    def _merge(self, peak: dict) -> None:
-        if self._peak is None:
-            self._peak = dict(peak)
-            return
-        for key in ("cpu_peak_nanocores", "mem_peak_usage_bytes",
-                    "mem_peak_working_set_bytes"):
-            cur, new = self._peak.get(key), peak.get(key)
-            if new is not None:
-                self._peak[key] = new if cur is None else max(cur, new)
-
-    def stop_and_peaks(self):
-        """Stop sampling, return the typed record (peaks + samples/errors), or
-        None when nothing was ever observed (never a 0 masquerade)."""
-        self._stop_event.set()
-        self.join(timeout=2 * self.interval_s + 5)
-        if self.samples == 0:
-            return None
-        out = dict(self._peak or {})  # samples > 0 means _peak was set by _merge
-        out["samples"] = self.samples
-        out["errors"] = self.errors
-        return out
 
 
 # ==================================================================================
@@ -747,7 +653,7 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
     if peaks_out is not None:
         fresh_pod = _pod_of_job(fresh_name, ns, timeout_s=30)
         if fresh_pod is not None:
-            sampler = _ResourceSampler(fresh_pod, ns)
+            sampler = peaks._ResourceSampler(fresh_pod, ns)
             sampler.start()
     completed = _wait_job_terminal(fresh_name, ns,
                                   deadline + _TERMINAL_GRACE_S) == "complete"
@@ -974,7 +880,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 # kubelet sampling while the Job runs — it never changes the
                 # Job's behavior; a sampler failure never affects the run it
                 # observes (the sampler counts errors, never raises).
-                sampler = _ResourceSampler(pod, ns)
+                sampler = peaks._ResourceSampler(pod, ns)
                 sampler.start()
                 stream_failed = not _stream_pod_logs(
                     pod, ns, os.path.join(live_dir, "pod-stdout.log"),

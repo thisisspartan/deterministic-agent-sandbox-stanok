@@ -25,7 +25,7 @@ import signal
 import subprocess
 import time
 
-from launcher import cli, k8s, kube, preflight
+from launcher import cli, k8s, kube, peaks, preflight
 from launcher.config import Config, RunState
 
 
@@ -283,7 +283,7 @@ def _missing_payload_run(tmp_path, monkeypatch, stream_ok):
     monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
     monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0))
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
-    monkeypatch.setattr(k8s, "_ResourceSampler", _SamplerStub)
+    monkeypatch.setattr(peaks, "_ResourceSampler", _SamplerStub)
     monkeypatch.setattr(k8s, "_stream_pod_logs",
                         lambda *a, **k: stream_ok)  # writes nothing
     monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "failed")

@@ -35,7 +35,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_observation_wir
 import argparse
 import os
 
-from launcher import k8s, kube, preflight
+from launcher import k8s, kube, peaks, preflight
 from launcher.config import Config
 
 CLOCK_START = 1000.0  # arbitrary monotonic origin for the stubbed clock
@@ -103,7 +103,7 @@ def _drive(tmp_path, monkeypatch, *, advance_at_pod=None, advance_at_stream=None
 
         def stop_and_peaks(self):
             return None
-    monkeypatch.setattr(k8s, "_ResourceSampler", _DummySampler)
+    monkeypatch.setattr(peaks, "_ResourceSampler", _DummySampler)
 
     calls = []
 
