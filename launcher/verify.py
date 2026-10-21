@@ -8,18 +8,26 @@ repo root come from the passed-in Config (C).
 import hashlib
 import os
 import subprocess
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from launcher.logs import log
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from launcher.config import Config  # annotation-only use (Q14)
     from launcher.plan import SessionPlan  # annotation-only use (T1/F821 fix)
+    # Q14 (2026-10-21): the manifest/contract functions read ONLY cfg.repo_root;
+    # they take the minimal structural TicketConfig (ticket.py) so ticket.py's
+    # strict callers — which pass their own TicketConfig, not the concrete
+    # Config — type-check. Config satisfies it structurally.
+    from launcher.ticket import TicketConfig
 
 
 # ==================================================================================
 # Compression of verifier errors (_tail_output: raw last-N tail)
 # ==================================================================================
-def _tail_output(cfg, raw_text: str) -> str:
+def _tail_output(cfg: "Config", raw_text: str) -> str:
     """Compress verifier output for the fix prompt: keep the LAST lines (a test
     failure is reported at the tail).
 
@@ -45,7 +53,7 @@ def _tail_output(cfg, raw_text: str) -> str:
     return res
 
 
-def _run_suite(cfg, failures: list[tuple[str, str]], tests: list[str]) -> None:
+def _run_suite(cfg: "Config", failures: list[tuple[str, str]], tests: list[str]) -> None:
     """D4 (CC-149): run the whole suite in ONE `test --all` call. The suite
     runs every list-discovered file sequentially with per-file timeouts and
     `=== <file> ===` headers; rc maps:
@@ -91,7 +99,7 @@ def _run_suite(cfg, failures: list[tuple[str, str]], tests: list[str]) -> None:
     failures.append(("(suite)", _tail_output(cfg, raw)))
 
 
-def verify_gate(cfg, plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]:
+def verify_gate(cfg: "Config", plan: "SessionPlan") -> tuple[bool, list[tuple[str, str]], bool]:
     """Verdict = positive contract on the ticket's declared paths (W2.3)
     + every test the project's runner declares (D3).
 
@@ -218,7 +226,7 @@ def _fix_prompt_rules(failures: list[tuple[str, str]]) -> str:
     )
 
 
-def _protected_files(cfg) -> list[str]:
+def _protected_files(cfg: "TicketConfig") -> list[str]:
     """The pre-existing contract files — the ONE source for "protected"
     (CC-136): tests/**, scripts/run.sh and scripts/stacks/*.toml. The
     contract_lock manifest and the host-side protected-file checks
@@ -253,7 +261,7 @@ def _protected_files(cfg) -> list[str]:
     return protected
 
 
-def _src_files(cfg) -> list[str]:
+def _src_files(cfg: "TicketConfig") -> list[str]:
     """T3-10 (operator 2026-10-09): the src/ file listing for the after-only
     half of the structural rule. NOT protected files: existing src/ files are
     the machine's normal implementation surface (MODIFIED/DELETED stays scoped
@@ -276,7 +284,7 @@ def _src_files(cfg) -> list[str]:
     return listing
 
 
-def contract_snapshot(cfg) -> dict[str, str]:
+def contract_snapshot(cfg: "TicketConfig") -> dict[str, str]:
     """Stage 3 (T3-1): the HOST-side entry point for the pre-run contract
     snapshot — the same manifest as _tests_manifest (the one protected-files
     source, CC-136), exposed publicly so k8s.host_launch_k8s can take it
@@ -287,7 +295,7 @@ def contract_snapshot(cfg) -> dict[str, str]:
     return _tests_manifest(cfg)
 
 
-def _tests_manifest(cfg) -> dict[str, str]:
+def _tests_manifest(cfg: "TicketConfig") -> dict[str, str]:
     """Snapshot {rel_path: sha256} of the protected files (contract_lock,
     W2.5 + P2) — see _protected_files for which files and why — plus the
     src/ listing (T3-10): src/ entries exist in the snapshot ONLY for the
@@ -305,7 +313,7 @@ def _tests_manifest(cfg) -> dict[str, str]:
 
 
 def _compare_manifests(before: dict[str, str], after: dict[str, str],
-                       declared) -> list[str]:
+                       declared: "Sequence[str]") -> list[str]:
     """The ONE comparison of two protected-file manifests (T3-2): a
     pre-existing protected file that is DELETED or MODIFIED is a violation.
     T3-9 (structural tests/ rule, operator 2026-10-09): after the run the
@@ -344,7 +352,8 @@ def _compare_manifests(before: dict[str, str], after: dict[str, str],
     return violations
 
 
-def host_contract_check(cfg, before: dict[str, str], declared) -> list[str]:
+def host_contract_check(cfg: "TicketConfig", before: dict[str, str],
+                       declared: "Sequence[str]") -> list[str]:
     """Stage 3 (T3-2): the host recomputes the protected-files manifest AFTER
     the container exits and compares it with the pre-run snapshot (T3-1).
     Any violation means the tree the verdict was computed against was
@@ -358,7 +367,8 @@ def host_contract_check(cfg, before: dict[str, str], declared) -> list[str]:
     return _compare_manifests(before, _tests_manifest(cfg), declared)
 
 
-def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
+def _check_contract_lock(cfg: "TicketConfig", before: dict[str, str],
+                         job: dict[str, Any], turn: int,
                          plan: "SessionPlan") -> None:
     """After each turn: a pre-existing protected file (tests/, scripts/run.sh)
     that was MODIFIED or DELETED is a contract_lock violation (replaces the
@@ -380,7 +390,7 @@ def _check_contract_lock(cfg, before: dict[str, str], job: dict, turn: int,
         log(f"  [CONTRACT-LOCK] turn {turn}: {violations}")
 
 
-def _contract_lock_forced_fail(job: dict, turn: int) -> int | None:
+def _contract_lock_forced_fail(job: dict[str, Any], turn: int) -> int | None:
     """Fail-closed on contract_lock violations (W2.5 + P2): a non-empty
     cumulative violations list means the machine MODIFIED/DELETED a
     pre-existing protected file (tests/, scripts/run.sh) after the manifest

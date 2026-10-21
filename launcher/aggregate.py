@@ -32,6 +32,7 @@ import re
 import statistics
 import sys
 from pathlib import Path
+from typing import Any
 
 # Context-size buckets for the observation summary (token ranges, half-open).
 # Fixed presentation ranges, NOT thresholds: crossing a bucket boundary is an
@@ -64,7 +65,7 @@ REQUIRED_KEYS = ("rc", "verifier")
 _RETRY_RE = re.compile(r"^(?P<base>.+)-retry(?P<n>\d+)$")
 
 
-def classify(summary: dict) -> tuple[str, str]:
+def classify(summary: dict[str, Any]) -> tuple[str, str]:
     """Return (outcome, subtype) for a parsed summary.json.
 
     Outcomes: PASS | NO-OP | DEFECT | TIMEOUT | INFRA.
@@ -85,7 +86,7 @@ def classify(summary: dict) -> tuple[str, str]:
     return "DEFECT", probe or f"rc={rc} verifier={verifier}"
 
 
-def max_live_context(summary: dict) -> int | None:
+def max_live_context(summary: dict[str, Any]) -> int | None:
     """Max live_context_tokens across inference_telemetry.per_turn, else None.
 
     None means the run carries no per-turn context telemetry (unmeasured),
@@ -99,7 +100,7 @@ def max_live_context(summary: dict) -> int | None:
     return max(values) if values else None
 
 
-def context_time_seconds(summary: dict) -> float | None:
+def context_time_seconds(summary: dict[str, Any]) -> float | None:
     """Σ live_context_tokens × elapsed_s over inference_telemetry.per_turn.
 
     A load approximation in token-seconds, NOT a GPU measurement. Sums the
@@ -128,13 +129,17 @@ def context_time_seconds(summary: dict) -> float | None:
     return total
 
 
-def acceptance_mode(summary: dict):
-    """acceptance.mode as recorded (None when the block is absent)."""
+def acceptance_mode(summary: dict[str, Any]) -> Any:
+    """acceptance.mode as recorded (None when the block is absent).
+
+    Any-typed by design: the value is read from untrusted summary.json and
+    may be any JSON type; exclusion_reason reports an invalid mode verbatim
+    rather than coercing it (absence is never coerced to a value)."""
     acceptance = summary.get("acceptance")
     return acceptance.get("mode") if isinstance(acceptance, dict) else None
 
 
-def exclusion_reason(summary: dict, outcome: str) -> str | None:
+def exclusion_reason(summary: dict[str, Any], outcome: str) -> str | None:
     """None → eligible for machine-quality views; else the stated reason.
 
     Two independent exclusions, both reported verbatim when both apply:
@@ -169,7 +174,7 @@ def count_markers(log_path: Path) -> dict[str, int]:
     return counts
 
 
-def load_record(label_dir: Path) -> dict:
+def load_record(label_dir: Path) -> dict[str, Any]:
     """Build one observation record for an evidence/<label>/ directory.
 
     outcome: PASS | NO-OP | DEFECT | TIMEOUT | INFRA | MISSING | CORRUPT.
@@ -177,7 +182,7 @@ def load_record(label_dir: Path) -> dict:
     """
     label = label_dir.name
     base, retry_n = retry_of(label)
-    record: dict = {
+    record: dict[str, Any] = {
         "label": label,
         "retry_of": base,
         "retry_n": retry_n,
@@ -247,7 +252,7 @@ def load_record(label_dir: Path) -> dict:
     return record
 
 
-def scan(evidence_dir: Path) -> list[dict]:
+def scan(evidence_dir: Path) -> list[dict[str, Any]]:
     """Scan evidence_dir (read-only) and return one record per label directory."""
     records = []
     for label_dir in sorted(p for p in evidence_dir.iterdir() if p.is_dir()):
@@ -265,10 +270,10 @@ def bucket_of(tokens: int | None) -> str:
     return "unmeasured"
 
 
-def build_report(records: list[dict]) -> str:
+def build_report(records: list[dict[str, Any]]) -> str:
     """Render the observation summary. No thresholds, no causation claims."""
     lines = [f"runs observed: {len(records)}", "", "outcomes:"]
-    by_outcome: dict[str, list[dict]] = {}
+    by_outcome: dict[str, list[dict[str, Any]]] = {}
     for r in records:
         by_outcome.setdefault(r["outcome"], []).append(r)
     for outcome in sorted(by_outcome):
@@ -282,7 +287,7 @@ def build_report(records: list[dict]) -> str:
             lines.append(f"    subtype {subtype}: {n}")
 
     lines += ["", "context-size buckets (max live_context_tokens per run):"]
-    buckets: dict[str, list[dict]] = {}
+    buckets: dict[str, list[dict[str, Any]]] = {}
     for r in records:
         buckets.setdefault(bucket_of(r["max_live_context"]), []).append(r)
     order = [f"{lo // 1000}k-{(str(hi // 1000) + 'k') if hi else 'inf'}"

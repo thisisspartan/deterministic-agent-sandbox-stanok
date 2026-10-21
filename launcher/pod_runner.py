@@ -92,7 +92,7 @@ def main() -> int:
             f.write(rewritten)
 
     # 3. The base commit: the patch is computed against it.
-    def git(*a, check=True):
+    def git(*a: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *a], cwd=REPO, check=check,
                               capture_output=True, text=True)
 
