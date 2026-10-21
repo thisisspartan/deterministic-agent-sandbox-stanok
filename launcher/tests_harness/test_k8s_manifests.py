@@ -434,13 +434,13 @@ def test_runtime_class_default_and_knob(monkeypatch):
     # {{RUNTIME_CLASS}} line renders empty == RuntimeDefault, pre-gVisor);
     # any other value renders `runtimeClassName: <value>`.
     monkeypatch.delenv("STANOK_K8S_RUNTIME_CLASS", raising=False)
-    assert k8s._runtime_class() == "runtimeClassName: gvisor"
+    assert kube._runtime_class() == "runtimeClassName: gvisor"
     monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "")
-    assert k8s._runtime_class() == "runtimeClassName: gvisor"
+    assert kube._runtime_class() == "runtimeClassName: gvisor"
     monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "runc")
-    assert k8s._runtime_class() == ""
+    assert kube._runtime_class() == ""
     monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "gvisor")
-    assert k8s._runtime_class() == "runtimeClassName: gvisor"
+    assert kube._runtime_class() == "runtimeClassName: gvisor"
 
 
 def test_job_templates_carry_runtime_class_placeholder():
@@ -452,10 +452,11 @@ def test_job_templates_carry_runtime_class_placeholder():
 
 
 def test_k8s_renders_runtime_class_in_both_jobs():
-    # Wiring: both render dicts (worker + fresh) pass RUNTIME_CLASS.
+    # Wiring: both render dicts (worker + fresh) pass RUNTIME_CLASS, reached
+    # through the kube module (wave A portion 3 — single patch home).
     src = (Path(__file__).resolve().parents[1] / "k8s.py").read_text(
         encoding="utf-8")
-    assert src.count('"RUNTIME_CLASS": _runtime_class(),') == 2
+    assert src.count('"RUNTIME_CLASS": kube._runtime_class(),') == 2
 
 
 # --- PSA (SPEC-PSA-2026-10-14): namespace labels ---------------------------

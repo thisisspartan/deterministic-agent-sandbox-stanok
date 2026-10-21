@@ -25,7 +25,7 @@ import signal
 import subprocess
 import time
 
-from launcher import cli, k8s, kube
+from launcher import cli, k8s, kube, preflight
 from launcher.config import Config, RunState
 
 
@@ -276,7 +276,7 @@ def _missing_payload_run(tmp_path, monkeypatch, stream_ok):
     args = _run_args(tmp_path)
     logs = _capture(monkeypatch, k8s)
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
+    monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref",
                         lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")

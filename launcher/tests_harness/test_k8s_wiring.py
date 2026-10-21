@@ -29,8 +29,9 @@ Tests:
  Image delivery (operator 2026-10-12): the two gate-passing wiring tests mock
      _image_ref (the docker inspect point is not a cluster call) — the
      delivery logic itself lives in test_k8s_image_delivery.py
- Unified launch preflight (operator spec 2026-10-12): the gate is now the
-     unified k8s._preflight (disk/image/Opik/cluster/RuntimeClass/dangling) —
+ Unified launch preflight (operator spec 2026-10-12; wave A portion 3): the
+     gate is now the unified preflight._preflight (disk/image/Opik/cluster/
+     RuntimeClass/dangling) —
      the wiring tests mock it; the check logic itself lives in
      test_k8s_preflight.py, the _preflight_cluster branches stay tested here
  Verdict cross-check (external review 2026-10-16): the payload carries
@@ -47,7 +48,7 @@ import argparse
 import json
 import os
 
-from launcher import cli, k8s, kube
+from launcher import cli, k8s, kube, preflight
 from launcher.config import Config
 
 
@@ -166,28 +167,28 @@ def _fake_cluster(monkeypatch, *, nodes_rc=0,
 def test_preflight_cluster_ok_is_none(tmp_path, monkeypatch):
     seen = _fake_cluster(monkeypatch)
     cfg = Config(repo_root=str(tmp_path), log_dir=str(tmp_path / "logs"))
-    assert k8s._preflight_cluster(cfg) is None
+    assert preflight._preflight_cluster(cfg) is None
     assert seen == ["nodes", "pytest"]  # both checks ran
 
 
 def test_preflight_cluster_unreachable_is_reason(monkeypatch):
     _fake_cluster(monkeypatch, nodes_rc=1)
     cfg = Config(repo_root="/tmp", log_dir="/tmp")
-    reason = k8s._preflight_cluster(cfg)
+    reason = preflight._preflight_cluster(cfg)
     assert reason and "cluster unreachable" in reason
 
 
 def test_preflight_cluster_not_ready_node_is_reason(monkeypatch):
     _fake_cluster(monkeypatch, nodes_out="hermes   NotReady   control-plane\n")
     cfg = Config(repo_root="/tmp", log_dir="/tmp")
-    reason = k8s._preflight_cluster(cfg)
+    reason = preflight._preflight_cluster(cfg)
     assert reason and "not Ready" in reason
 
 
 def test_preflight_cluster_manifest_drift_is_reason(monkeypatch):
     _fake_cluster(monkeypatch, pytest_rc=1)
     cfg = Config(repo_root="/tmp", log_dir="/tmp")
-    reason = k8s._preflight_cluster(cfg)
+    reason = preflight._preflight_cluster(cfg)
     assert reason and "manifest contract tests failed" in reason
 
 
@@ -211,8 +212,8 @@ def _k8s_args(tmp_path):
 
 def _no_real_cluster_calls(monkeypatch):
     """P0 (operator 2026-10-11): a test must never reach a real cluster.
-    The two direct subprocess.run points (_preflight_cluster,
-    _stream_pod_logs) are a tripwire: if any code path bypasses the mocked
+    The two direct subprocess.run points (preflight._preflight_cluster,
+    k8s._stream_pod_logs) are a tripwire: if any code path bypasses the mocked
     _kubectl choke point, the test fails loudly instead of touching the
     cluster."""
     def guard(*a, **k):
@@ -225,7 +226,7 @@ def test_gate_aborts_before_any_cluster_call(tmp_path, monkeypatch):
     args = _k8s_args(tmp_path)
     calls = []
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight",
+    monkeypatch.setattr(preflight, "_preflight",
                         lambda cfg: "cluster unreachable: mock")
     _no_real_cluster_calls(monkeypatch)
     monkeypatch.setattr(kube, "_kubectl",
@@ -242,7 +243,7 @@ def test_gate_runs_before_cluster_calls(tmp_path, monkeypatch):
     args = _k8s_args(tmp_path)
     order = []
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight",
+    monkeypatch.setattr(preflight, "_preflight",
                         lambda cfg: order.append("gate") or None)
     # image delivery: the digest resolution is a docker call, not a cluster
     # call — mocked here (the delivery logic itself: test_k8s_image_delivery.py)
@@ -272,7 +273,7 @@ def test_cleanup_deletes_only_created_resources(tmp_path, monkeypatch):
     repo, cfg = _k8s_repo(tmp_path)
     args = _k8s_args(tmp_path)
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
+    monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref",
                         lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
@@ -350,7 +351,7 @@ def _payload_host_run(tmp_path, monkeypatch, payload, real_apply=False):
     repo, cfg = _k8s_repo(tmp_path)
     args = _k8s_args(tmp_path)
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
+    monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref",
                         lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")

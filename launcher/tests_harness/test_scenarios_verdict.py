@@ -74,7 +74,7 @@ import subprocess
 
 import pytest
 
-from launcher import k8s, kube
+from launcher import k8s, kube, preflight
 from launcher.config import Config
 
 # CC-237 (schema v2): the worker summary is TYPED — no errors/failures/
@@ -192,7 +192,7 @@ def _k8s_scenario(tmp_path, monkeypatch, *, worker_summary=CLEAN_WORKER,
     calls = []
 
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
+    monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref", lambda cfg: (FAKE_IMAGE, None))
     monkeypatch.setattr(k8s, "new_nonce", lambda: FIXED_NONCE)
     monkeypatch.setattr(k8s, "_install_signal_handlers", lambda rs: None)

@@ -121,3 +121,26 @@ def _create_manifest(text: str) -> None:
     if r.returncode != 0:
         raise RuntimeError(f"kubectl create failed (rc={r.returncode}): "
                            f"{r.stderr.strip()}")
+
+
+# ==================================================================================
+# runtime-class knob (CC-256) — moved with the wave A portion 3 split: the
+# manifest line and the preflight check share it, so it lives in the
+# cluster-facing module (both consumers reach it as kube._X).
+# ==================================================================================
+def _runtime_class_name() -> str:
+    """CC-256 (operator 2026-10-12): the DEFAULT runtime class is "gvisor" —
+    two clean wave-runs under gVisor (cc254, cc255: rc=0 PASS CLEAN-FIRST,
+    worker+fresh Pods gvisor by API read-back, clean hooks, comparable time).
+    STANOK_K8S_RUNTIME_CLASS=runc opts out to "" (no runtimeClassName field
+    == RuntimeDefault, the pre-gVisor behavior); any other value is used as-is.
+    An unknown class fails at preflight (preflight._preflight_runtime_class)."""
+    rc = os.environ.get("STANOK_K8S_RUNTIME_CLASS", "").strip() or "gvisor"
+    return "" if rc == "runc" else rc
+
+
+def _runtime_class() -> str:
+    """Rendered manifest line for the effective class: "" -> the
+    {{RUNTIME_CLASS}} line renders empty == RuntimeDefault."""
+    rc = _runtime_class_name()
+    return f"runtimeClassName: {rc}" if rc else ""

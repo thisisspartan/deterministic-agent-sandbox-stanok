@@ -40,7 +40,7 @@ import subprocess
 
 import pytest
 
-from launcher import k8s, kube
+from launcher import k8s, kube, preflight
 from launcher.config import Config
 
 CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
@@ -125,7 +125,7 @@ def _scenario(tmp_path, monkeypatch, fresh_hook=None, export_start_commit=True):
     calls = []
 
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
+    monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref", lambda cfg: (FAKE_IMAGE, None))
     monkeypatch.setattr(k8s, "new_nonce", lambda: FIXED_NONCE)
     monkeypatch.setattr(k8s, "_install_signal_handlers", lambda rs: None)

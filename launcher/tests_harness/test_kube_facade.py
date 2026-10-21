@@ -1,4 +1,4 @@
-"""Wave A portion 2 (2026-10-21): guards for the launcher.kube extraction.
+"""Wave A portions 2-3 (2026-10-21): guards for the launcher.kube extraction.
 
 The agreed sequence (specs/ARCHIVE/CONTEXT-2026-10-21c.md, T3) requires for
 every moved name a guard that it lives ONLY in the new module: k8s.py holds
@@ -23,10 +23,12 @@ TESTS_DIR = Path(__file__).resolve().parent
 LAUNCHER = TESTS_DIR.parent
 SELF = Path(__file__).resolve().name
 
-# The names wave A portion 2 moved verbatim into launcher.kube.
+# The names wave A moved verbatim into launcher.kube (portion 2: the
+# kubectl/render layer; portion 3: the runtime-class knob — both consumers,
+# k8s render dicts and preflight, reach them as kube._X).
 MOVED = ["render_template", "_read_manifest", "_kubectl", "_kubectl_checked",
          "_create_manifest", "_kubectl_bin", "_namespace", "_k8s_name",
-         "_cluster_env"]
+         "_cluster_env", "_runtime_class_name", "_runtime_class"]
 
 
 def _defs(source: str) -> set[str]:

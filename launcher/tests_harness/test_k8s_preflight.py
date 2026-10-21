@@ -19,7 +19,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_preflight.py -q
 """
 import urllib.error
 
-from launcher import k8s, kube
+from launcher import k8s, kube, preflight
 from launcher.config import Config
 
 
@@ -43,19 +43,19 @@ def _fake_df(monkeypatch, *, rc=0, out):
 
 def test_disk_below_limit_is_none(tmp_path, monkeypatch):
     _fake_df(monkeypatch, out="Use%\n 79%\n")
-    assert k8s._preflight_disk(_cfg(tmp_path)) is None
+    assert preflight._preflight_disk(_cfg(tmp_path)) is None
 
 
 def test_disk_at_limit_is_reason_naming_the_fix(tmp_path, monkeypatch):
     _fake_df(monkeypatch, out="Use%\n 85%\n")
-    reason = k8s._preflight_disk(_cfg(tmp_path))
+    reason = preflight._preflight_disk(_cfg(tmp_path))
     assert reason and "85%" in reason and "80%" in reason
     assert "images prune" in reason  # the named fix
 
 
 def test_disk_unmeasurable_is_infra_reason(tmp_path, monkeypatch):
     _fake_df(monkeypatch, rc=1, out="")
-    reason = k8s._preflight_disk(_cfg(tmp_path))
+    reason = preflight._preflight_disk(_cfg(tmp_path))
     assert reason and "cannot measure disk" in reason
 
 
@@ -75,18 +75,18 @@ def _fake_image_inspect(monkeypatch, *, rc=0, label=""):
 
 def test_image_label_match_is_none(tmp_path, monkeypatch):
     _fake_image_inspect(monkeypatch, label="want-digest\n")
-    assert k8s._preflight_image_label(_cfg(tmp_path)) is None
+    assert preflight._preflight_image_label(_cfg(tmp_path)) is None
 
 
 def test_image_label_mismatch_names_rebuild(tmp_path, monkeypatch):
     _fake_image_inspect(monkeypatch, label="old-digest")
-    reason = k8s._preflight_image_label(_cfg(tmp_path))
+    reason = preflight._preflight_image_label(_cfg(tmp_path))
     assert reason and "stale" in reason and "./setup.sh" in reason
 
 
 def test_image_absent_names_build(tmp_path, monkeypatch):
     _fake_image_inspect(monkeypatch, rc=1)
-    reason = k8s._preflight_image_label(_cfg(tmp_path))
+    reason = preflight._preflight_image_label(_cfg(tmp_path))
     assert reason and "not found locally" in reason and "setup.sh" in reason
 
 
@@ -106,19 +106,19 @@ class _FakeOpener:
 
 def _fake_opik(monkeypatch, exc):
     opener = _FakeOpener(exc)
-    monkeypatch.setattr(k8s.urllib.request, "build_opener", lambda *a: opener)
+    monkeypatch.setattr(preflight.urllib.request, "build_opener", lambda *a: opener)
     return opener
 
 
 def test_opik_empty_url_skips_the_check(tmp_path, monkeypatch):
     opener = _fake_opik(monkeypatch, urllib.error.URLError("boom"))
-    assert k8s._preflight_opik(_cfg(tmp_path, opik_trace_url="")) is None
+    assert preflight._preflight_opik(_cfg(tmp_path, opik_trace_url="")) is None
     assert opener.urls == []  # tracing explicitly off -> no probe
 
 
 def test_opik_unreachable_is_reason_naming_the_fix(tmp_path, monkeypatch):
     _fake_opik(monkeypatch, urllib.error.URLError("connection refused"))
-    reason = k8s._preflight_opik(
+    reason = preflight._preflight_opik(
         _cfg(tmp_path, opik_trace_url="http://192.168.122.156:8080/v1/private/otel"))
     assert reason and "Opik unreachable" in reason
     assert "STANOK_OPIK_TRACE_URL" in reason  # the named escape hatch
@@ -127,7 +127,7 @@ def test_opik_unreachable_is_reason_naming_the_fix(tmp_path, monkeypatch):
 def test_opik_http_answer_even_error_is_reachable(tmp_path, monkeypatch):
     # any HTTP answer (405 on HEAD) proves the endpoint is up — OTLP will connect
     _fake_opik(monkeypatch, urllib.error.HTTPError("u", 405, "Method Not Allowed", {}, None))
-    assert k8s._preflight_opik(
+    assert preflight._preflight_opik(
         _cfg(tmp_path, opik_trace_url="http://192.168.122.156:8080/v1/private/otel")) is None
 
 
@@ -139,7 +139,7 @@ def test_runtimeclass_default_gvisor_is_checked(monkeypatch):
     calls = []
     monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: calls.append(a) or _FakeCompleted(0, "gvisor"))
-    assert k8s._preflight_runtime_class(None) is None
+    assert preflight._preflight_runtime_class(None) is None
     assert calls and calls[0][:2] == ("get", "runtimeclass") and calls[0][2] == "gvisor"
 
 
@@ -147,7 +147,7 @@ def test_runtimeclass_runc_optout_skips_the_check(monkeypatch):
     monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "runc")
     calls = []
     monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: calls.append(a) or _FakeCompleted(0))
-    assert k8s._preflight_runtime_class(None) is None
+    assert preflight._preflight_runtime_class(None) is None
     assert calls == []
 
 
@@ -159,7 +159,7 @@ def test_runtimeclass_missing_is_reason(monkeypatch):
         seen.append(a)
         return _FakeCompleted(1, "", "not found")
     monkeypatch.setattr(kube, "_kubectl", fake)
-    reason = k8s._preflight_runtime_class(None)
+    reason = preflight._preflight_runtime_class(None)
     assert reason and "runtimeclass 'gvisor' not in the cluster" in reason
     assert seen and seen[0][:2] == ("get", "runtimeclass")
 
@@ -167,7 +167,7 @@ def test_runtimeclass_missing_is_reason(monkeypatch):
 def test_runtimeclass_present_is_none(monkeypatch):
     monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "gvisor")
     monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0, "gvisor"))
-    assert k8s._preflight_runtime_class(None) is None
+    assert preflight._preflight_runtime_class(None) is None
 
 
 # --- NetworkPolicy boundary (namespace-scoped, coverage by name prefix) -----------
@@ -188,7 +188,7 @@ def test_netpol_present_any_revision_is_none(monkeypatch):
     # of the boundary is the contract, never revision match.
     _fake_netpol(monkeypatch, out="stanok-worker-egress-d662f083ea71 "
                                   "stanok-fresh-deny-all-000000000000")
-    assert k8s._preflight_netpol(None) is None
+    assert preflight._preflight_netpol(None) is None
 
 
 def test_netpol_check_is_namespace_scoped(monkeypatch):
@@ -196,7 +196,7 @@ def test_netpol_check_is_namespace_scoped(monkeypatch):
     # lists the namespace the Jobs render into (STANOK_K8S_NAMESPACE).
     monkeypatch.setenv("STANOK_K8S_NAMESPACE", "stanok-jobs")
     seen = _fake_netpol(monkeypatch, out="")
-    reason = k8s._preflight_netpol(None)
+    reason = preflight._preflight_netpol(None)
     assert reason and "stanok-jobs" in reason and "netpol-smoke.sh" in reason
     assert seen and seen[0][:2] == ("get", "networkpolicy")
     assert seen[0][2:4] == ("-n", "stanok-jobs")
@@ -205,7 +205,7 @@ def test_netpol_check_is_namespace_scoped(monkeypatch):
 def test_netpol_missing_is_reason_naming_the_fix(monkeypatch):
     monkeypatch.delenv("STANOK_K8S_NAMESPACE", raising=False)
     _fake_netpol(monkeypatch, out="foreign-policy")
-    reason = k8s._preflight_netpol(None)
+    reason = preflight._preflight_netpol(None)
     assert reason and "stanok-worker-egress-" in reason \
         and "stanok-fresh-deny-all-" in reason
     assert "default" in reason and "netpol-smoke.sh" in reason  # named fix
@@ -215,14 +215,14 @@ def test_netpol_partial_coverage_names_only_the_missing(monkeypatch):
     # worker boundary present, fresh deny-all absent -> still a defect, and
     # the reason names only what is missing
     _fake_netpol(monkeypatch, out="stanok-worker-egress-abc123def456")
-    reason = k8s._preflight_netpol(None)
+    reason = preflight._preflight_netpol(None)
     assert reason and "stanok-fresh-deny-all-" in reason
     assert "stanok-worker-egress-" not in reason
 
 
 def test_netpol_list_failure_is_infra_reason(monkeypatch):
     _fake_netpol(monkeypatch, rc=1)
-    reason = k8s._preflight_netpol(None)
+    reason = preflight._preflight_netpol(None)
     assert reason and "cannot list NetworkPolicies" in reason
 
 
@@ -242,7 +242,7 @@ def _fake_kubectl(monkeypatch, *, jobs_out="", pods_out="", rc=0):
 
 def test_dangling_none_is_none(monkeypatch):
     _fake_kubectl(monkeypatch)
-    assert k8s._preflight_dangling(None) is None
+    assert preflight._preflight_dangling(None) is None
 
 
 def test_finished_resources_are_not_dangling(monkeypatch):
@@ -250,14 +250,14 @@ def test_finished_resources_are_not_dangling(monkeypatch):
     _fake_kubectl(monkeypatch,
                   jobs_out="stanok-job-old 0\n",
                   pods_out="stanok-pod-old Succeeded\n")
-    assert k8s._preflight_dangling(None) is None
+    assert preflight._preflight_dangling(None) is None
 
 
 def test_active_job_and_running_pod_are_dangling(monkeypatch):
     _fake_kubectl(monkeypatch,
                   jobs_out="stanok-job-crash 1\nstanok-job-old 0\n",
                   pods_out="stanok-pod-crash Running\nstanok-pod-old Succeeded\n")
-    reason = k8s._preflight_dangling(None)
+    reason = preflight._preflight_dangling(None)
     assert reason and "job/stanok-job-crash" in reason and "pod/stanok-pod-crash" in reason
     assert "stanok-job-old" not in reason and "stanok-pod-old" not in reason
     assert "launch.sh stop" in reason  # the named fix
@@ -265,7 +265,7 @@ def test_active_job_and_running_pod_are_dangling(monkeypatch):
 
 def test_dangling_list_failure_is_infra_reason(monkeypatch):
     _fake_kubectl(monkeypatch, rc=1)
-    reason = k8s._preflight_dangling(None)
+    reason = preflight._preflight_dangling(None)
     assert reason and "cannot list stanok Jobs" in reason
 
 
@@ -282,13 +282,13 @@ def _mock_checks(monkeypatch, results):
     for name in ("_preflight_disk", "_preflight_image_label", "_preflight_opik",
                  "_preflight_cluster", "_preflight_runtime_class",
                  "_preflight_netpol", "_preflight_dangling"):
-        monkeypatch.setattr(k8s, name, make(name.lstrip("_")))
+        monkeypatch.setattr(preflight, name, make(name.lstrip("_")))
     return order
 
 
 def test_preflight_all_clean_is_none(monkeypatch):
     order = _mock_checks(monkeypatch, {})
-    assert k8s._preflight(None) is None
+    assert preflight._preflight(None) is None
     # the documented order: cheap host-side checks before the cluster checks
     assert order == ["preflight_disk", "preflight_image_label", "preflight_opik",
                      "preflight_cluster", "preflight_runtime_class",
@@ -298,6 +298,6 @@ def test_preflight_all_clean_is_none(monkeypatch):
 def test_preflight_first_reason_wins_and_stops(monkeypatch):
     order = _mock_checks(monkeypatch, {"preflight_image_label": "image stale",
                                        "preflight_dangling": "dangling"})
-    assert k8s._preflight(None) == "image stale"
+    assert preflight._preflight(None) == "image stale"
     # the cluster checks never ran — the abort is already decided
     assert order == ["preflight_disk", "preflight_image_label"]

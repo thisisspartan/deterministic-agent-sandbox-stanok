@@ -26,7 +26,7 @@ import argparse
 import hashlib
 import os
 
-from launcher import k8s, kube, verify
+from launcher import k8s, kube, preflight, verify
 from launcher.config import Config
 
 
@@ -66,7 +66,7 @@ def test_snapshot_computed_before_cluster_calls(tmp_path, monkeypatch):
 
     monkeypatch.setattr(verify, "contract_snapshot", spy_snapshot)
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
-    monkeypatch.setattr(k8s, "_preflight", lambda cfg: None)
+    monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref", lambda cfg: (
         "192.168.122.156:5000/stanok-machine@sha256:fake", None))
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
