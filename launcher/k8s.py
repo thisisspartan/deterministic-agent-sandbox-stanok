@@ -53,6 +53,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from typing import TYPE_CHECKING, Any
 
 from launcher import gates, kube, lifecycle, opik, peaks, patchgate, preflight, verify
 from launcher.abort import _early_abort  # wave A step 1: was a lazy import from cli (the cli->k8s cycle was its only reason; abort imports neither)
@@ -65,6 +66,9 @@ from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
     parse_ticket_header,
 )
+
+if TYPE_CHECKING:  # the gates.py house style — annotation-only, no runtime import
+    from launcher.config import Config
 
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 # Wave A portion 2 (2026-10-21): K8S_DIR moved with _read_manifest to
@@ -551,6 +555,352 @@ def _image_ref(cfg):
 
 
 # ==================================================================================
+# Wave A portion 7 (2026-10-21): slimmed host_launch_k8s (agreed T3
+# sequence, "slimmed host_launch"; the Ok|Abort result conveyor remains
+# deferred). The self-contained stages of the host supervision are extracted
+# as PRIVATE helpers in this module — no new module, host_launch_k8s stays
+# the only public entry ("тесты обращаются именно к host_launch_k8s").
+# Behavior-preserving by construction: bodies, log strings, rc values and
+# the call order are moved verbatim; only names moved (the helpers resolve
+# module globals — log, patchgate._X, lifecycle._X, kube._X — at call time
+# exactly as the in-line code did, so existing tests' stubs on those names
+# intercept them identically). strict-class from birth: fully annotated
+# signatures; zero test files touched — the unmodified suite is the
+# behavior proof.
+# ==================================================================================
+def _run_worker(cfg: "Config", live_dir: str, ns: str, label: str,
+                job_name: str, cm_ticket: str, cm_tree: str, cm_runner: str,
+                tree_file: str, ticket_path: str, nonce: str, image_ref: str,
+                deadline: int,
+                created: list[tuple[str, str]]) -> tuple[str | None, dict[str, Any] | None, bool]:
+    """Worker orchestration (moved verbatim from host_launch_k8s): create the
+    run's ConfigMaps + Job, observe the Pod (sampler + log stream), wait for
+    the Job terminal state. Returns (pod, worker_peaks, stream_failed);
+    `created` is appended per proven creation (P0 ownership). A kubectl
+    RuntimeError / KeyboardInterrupt propagates — the call site keeps its
+    identical rc=16 / interrupt handling."""
+    kube._kubectl_checked("create", "configmap", cm_ticket, "-n", ns,
+                         f"--from-file=ticket.md={ticket_path}")
+    created.append(("configmap", cm_ticket))
+    kube._kubectl_checked("create", "configmap", cm_tree, "-n", ns,
+                         f"--from-file=tree.tar.gz.b64={tree_file}")
+    created.append(("configmap", cm_tree))
+    kube._kubectl_checked("create", "configmap", cm_runner, "-n", ns,
+                         "--from-file=pod_runner.py=" +
+                         os.path.join(LAUNCHER_DIR, "pod_runner.py"))
+    created.append(("configmap", cm_runner))
+    kube._create_manifest(kube.render_template(
+        kube._read_manifest("worker-job.yaml.tmpl"), {
+            "JOB_NAME": job_name, "LABEL": label, "NONCE": nonce,
+            "IMAGE": image_ref, "NAMESPACE": ns,
+            "SERVER_URL": cfg.server_url, "MODEL": cfg.model,
+            "OPIK_TRACE_URL": cfg.opik_trace_url,
+            "START_COMMIT": os.environ.get("STANOK_START_COMMIT", ""),
+            "DEADLINE": str(deadline),
+            "CM_TICKET": cm_ticket, "CM_TREE": cm_tree,
+            "CM_RUNNER": cm_runner,
+            "RUNTIME_CLASS": kube._runtime_class(),
+        }))
+    created.append(("job", job_name))
+    obs_start = time.monotonic()  # A3: anchor of the observation chain
+    pod = lifecycle._pod_of_job(job_name, ns)
+    worker_peaks: dict[str, Any] | None = None
+    sampler: peaks._ResourceSampler | None = None
+    stream_failed = False
+    if pod is not None:
+        # Resource measurement (operator decision 2026-10-16): read-only
+        # kubelet sampling while the Job runs — it never changes the
+        # Job's behavior; a sampler failure never affects the run it
+        # observes (the sampler counts errors, never raises).
+        sampler = peaks._ResourceSampler(pod, ns)
+        sampler.start()
+        stream_failed = not lifecycle._stream_pod_logs(
+            pod, ns, os.path.join(live_dir, "pod-stdout.log"),
+            lifecycle._observation_timeout(obs_start, deadline,
+                                          lifecycle._STREAM_GRACE_S))
+    lifecycle._wait_job_terminal(job_name, ns, lifecycle._observation_timeout(
+        obs_start, deadline,
+        lifecycle._STREAM_GRACE_S + lifecycle._TERMINAL_GRACE_S))
+    if sampler is not None:
+        worker_peaks = sampler.stop_and_peaks()
+    return pod, worker_peaks, stream_failed
+
+
+def _classify_missing_payload(cfg: "Config", label: str,
+                             payload: dict[str, bytes] | None, pod: str | None,
+                             ns: str, job_name: str,
+                             stream_failed: bool) -> int:
+    """The missing-payload classification (moved verbatim from
+    host_launch_k8s): a Pod infrastructure cause -> rc=16 ENV-FAIL; the
+    in-Pod internal rc named in the abort text; a Job DeadlineExceeded ->
+    rc=16; else the generic 'missing' abort (CHILD_DIED). Same log strings,
+    same rc values, same order."""
+    cause = lifecycle._pod_infra_cause(pod, ns)
+    if cause:
+        # BL-4 (a1): the Pod died of an infrastructure cause (cgroup
+        # OOM / kubelet eviction) — rc=16 ENV-FAIL, not the generic
+        # 'missing' abort: the 3 ticket retries are not burned on it.
+        log(f"K8S: worker Pod {cause} — infrastructure defect (rc=16)")
+        write_env_fail_summary(cfg, label,
+                              f"worker Pod {cause} — infrastructure defect")
+        return int(ExitCode.ENV_FAIL)
+    # The in-Pod exit code, when the payload carried it but not a
+    # summary: name it in the abort log — the session ran and died,
+    # the evidence transport did not deliver a verdict.
+    internal = ""
+    if payload is not None:
+        internal = payload.get("internal_rc.txt", b"").strip().decode(
+            "ascii", "replace")
+    # Deadline contract (external review 2026-10-16): the Job's own
+    # condition says DeadlineExceeded — the session outlived the Job
+    # deadline. Infrastructure defect (rc=16), not a 'missing' abort:
+    # the 3 ticket retries are not burned on it.
+    if lifecycle._job_infra_cause(job_name, ns) == "DeadlineExceeded":
+        log("K8S: Job hit activeDeadlineSeconds (DeadlineExceeded) — "
+            "infrastructure defect (rc=16); fix: raise "
+            "STANOK_K8S_JOB_DEADLINE_S or lower STANOK_TURN_TIMEOUT_S")
+        write_env_fail_summary(
+            cfg, label,
+            "Job DeadlineExceeded — the session outlived the Job "
+            "activeDeadlineSeconds (infrastructure defect)")
+        return int(ExitCode.ENV_FAIL)
+    log("K8S: no evidence payload block — run treated as aborted "
+        "(status 'missing'), no verdict published"
+        + (" (kubectl logs -f failed — pod-stdout.log incomplete)"
+           if stream_failed else "")
+        + (f" (in-Pod session exit code was {internal})"
+           if internal else ""))
+    return int(ExitCode.CHILD_DIED)
+
+
+def _stage_patch(payload: dict[str, bytes],
+                 live_dir: str) -> tuple[str, str, str, str | None]:
+    """Patch identity staging (moved verbatim from host_launch_k8s). The hash
+    of the EXACT payload bytes is computed ONCE here; the on-disk patch file
+    is the payload bytes verbatim (binary write — never a text re-encode),
+    and every later use (scratch apply, fresh Job, live apply) is
+    re-verified against this hash. The strict decode (encoding-gap
+    micro-patch): a patch that is not valid UTF-8 is a fail-closed contract
+    violation BEFORE any gate/scratch/fresh/apply operation — no U+FFFD
+    substitution. Returns (patch_file, patch_sha, patch_text,
+    decode_violation)."""
+    patch_bytes = payload.get("changes.patch", b"")
+    patch_sha = patchgate.patch_sha256(patch_bytes)
+    try:
+        patch_text = patchgate.strict_patch_text(patch_bytes)
+        decode_violation = None
+    except UnicodeDecodeError as e:
+        patch_text = ""
+        decode_violation = (
+            f"PATCH-UTF8: changes.patch is not valid UTF-8 ({e}) — "
+            "fail closed, nothing is applied")
+    patch_file = os.path.join(live_dir, "changes.patch")
+    with open(patch_file, "wb") as f:
+        f.write(patch_bytes)
+    return patch_file, patch_sha, patch_text, decode_violation
+
+
+def _stamp_summary_identity(live_dir: str, patch_sha: str, accept_mode: str,
+                           accept_paths: list[str], pod: str | None, ns: str,
+                           run_start_iso: str) -> None:
+    """Host identity stamping into the evidence summary (moved verbatim from
+    host_launch_k8s): patch_sha256; the acceptance contract (G4 — host-stamped
+    from the HOST's own ticket parse, the Pod is not its own judge); image
+    provenance (the Pod's own containerStatuses record; None is explicit,
+    with a WARN, same as commit_sha); opik_traces (CC-225 — only the host
+    reaches the Opik backend, None never masquerades as 0). Fail-soft on an
+    unreadable summary (except -> pass), exactly as before."""
+    sum_path = os.path.join(live_dir, "summary.json")
+    try:
+        with open(sum_path, encoding="utf-8") as f:
+            summary = json.load(f)
+        summary["patch_sha256"] = patch_sha
+        summary["acceptance"] = {"mode": accept_mode,
+                                 "paths": list(accept_paths)}
+        image_digest = lifecycle._pod_image_id(pod, ns)
+        summary["image_digest"] = image_digest
+        if image_digest is None:
+            log("WARN: image provenance: Pod imageID unavailable — "
+                "publishing image_digest=None")
+        sid = summary.get("session_id")
+        if sid:
+            stamp_opik_traces(
+                summary, opik.session_trace_count(sid, run_start_iso))
+        with open(sum_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def _check_internal_rc(cfg: "Config", label: str, payload: dict[str, bytes],
+                      worker_rc: int) -> int | None:
+    """Verdict cross-check (moved verbatim from host_launch_k8s, external
+    review 2026-10-16): pod_runner ships the session subprocess's own exit
+    code in internal_rc.txt. cli.py writes summary.json's "rc" and returns
+    the same value, so a healthy run has internal_rc == summary rc. A
+    contradiction means one of the two channels substituted its own verdict —
+    an infrastructure defect (rc=16), not a ticket defect: the 3 ticket
+    retries are not burned on it. Absent (an image predating the contract)
+    -> no check. Returns the ENV-FAIL rc (log + env-fail summary written)
+    or None."""
+    internal_rc = None
+    try:
+        internal_rc = int(payload["internal_rc.txt"].strip())
+    except (KeyError, ValueError):
+        pass
+    if internal_rc is not None and internal_rc != worker_rc:
+        log(f"K8S INTERNAL-RC: in-Pod session exited {internal_rc} but "
+            f"summary.json claims rc={worker_rc} — verdict-substitution, "
+            "infrastructure defect (rc=16)")
+        write_env_fail_summary(
+            cfg, label,
+            f"in-Pod session exit {internal_rc} contradicts summary.json "
+            f"rc={worker_rc} — verdict-substitution, infrastructure defect")
+        return int(ExitCode.ENV_FAIL)
+    return None
+
+
+def _contract_chain(cfg: "Config", tree_blob: str,
+                    before_manifest: dict[str, str], declared: list[str],
+                    patch_text: str, patch_file: str, patch_sha: str,
+                    decode_violation: str | None) -> list[str]:
+    """Strict UTF-8 decode first (a non-UTF-8 patch never reaches the
+    gate), then the patch gate (a symlink/traversal/absolute/.git/gitlink
+    patch is rejected before anything is applied), then the identity
+    re-verification (the on-disk patch must be the hashed bytes), then the
+    scratch contract recompute — all feed the SAME contract_violations
+    channel _publish_evidence forces to CONTRACT-FAIL (moved verbatim from
+    host_launch_k8s)."""
+    if decode_violation:
+        contract_violations = [decode_violation]
+        log(f"K8S PATCH-UTF8: {decode_violation}")
+    else:
+        contract_violations = patchgate.patch_gate(patch_text)
+        if contract_violations:
+            log(f"K8S PATCH-GATE: {contract_violations}")
+    if not contract_violations:
+        if not patchgate.patch_identity_ok(patch_file, patch_sha):
+            contract_violations = [
+                f"PATCH-SHA: {patch_file} does not match the hashed patch "
+                f"bytes ({patch_sha}) — fail closed, nothing is applied"]
+            log(f"K8S PATCH-SHA: {contract_violations}")
+        else:
+            try:
+                scratch = apply_patch_scratch(tree_blob, patch_text)
+            except RuntimeError as e:
+                contract_violations = [f"PATCH-APPLY: {e}"]
+            else:
+                try:
+                    contract_violations = scratch_contract_violations(
+                        cfg, before_manifest, scratch, declared)
+                finally:
+                    shutil.rmtree(scratch, ignore_errors=True)
+    return contract_violations
+
+
+def _run_fresh_check(cfg: "Config", contract_violations: list[str], ns: str,
+                     fresh_name: str, cm_tree: str, cm_patch: str,
+                     patch_file: str, deadline: int,
+                     created: list[tuple[str, str]],
+                     image_ref: str) -> tuple[tuple[int, str] | None, str | None, dict[str, Any] | None]:
+    """The fresh check runs ONLY when the contract is intact (a fresh run
+    over a tampered tree is uninformative — spec §1.6); it is NOT gated on
+    the worker's claims (moved verbatim from host_launch_k8s). Returns
+    (fresh_check, fresh_infra_error, fresh_peaks)."""
+    if contract_violations:
+        return None, None, None
+    peaks_holder: dict[str, Any] = {}
+    fresh_rc, fresh_tail = _fresh_job(cfg, ns, fresh_name, cm_tree,
+                                      cm_patch, patch_file, deadline,
+                                      created, image_ref, peaks_holder)
+    fresh_peaks = peaks_holder.get("peaks")
+    if fresh_tail.startswith("EXEC_ERROR:"):
+        return None, fresh_tail, fresh_peaks
+    return (fresh_rc, fresh_tail), None, fresh_peaks
+
+
+def _stamp_resource_peaks(summary_path: str, worker_peaks: dict[str, Any] | None,
+                          fresh_peaks: dict[str, Any] | None) -> None:
+    """Resource measurement stamp (moved verbatim from host_launch_k8s;
+    operator decision 2026-10-16): host-stamped like patch_sha256 — the
+    OBSERVED kubelet peaks of this run, closing the "pending measured peaks"
+    gap of bb5eed6. None = no sample ever succeeded (never a 0 masquerade).
+    These are kubelet numbers, not truth claims (gVisor caveat, BL-4)."""
+    try:
+        with open(summary_path, encoding="utf-8") as f:
+            summary = json.load(f)
+        summary["resource_peaks"] = {"worker": worker_peaks,
+                                     "fresh": fresh_peaks}
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+    except (OSError, json.JSONDecodeError):
+        log("WARN: resource_peaks: summary.json unreadable — field not "
+            "stamped")
+
+
+def _apply_final_pass(cfg: "Config", label: str, patch_file: str,
+                      patch_sha: str) -> int | None:
+    """The §6 live-apply body (moved verbatim from host_launch_k8s; reached
+    only from its guarded call site — the guard itself stayed at the call
+    site).
+
+    A5 (review 2026-10-17): both failure branches here were WARN —
+    the run still published rc=0/PASS with the patch UNAPPLIED. A
+    claimed PASS whose patch never landed is not a PASS: the verdict
+    is downgraded to rc=16 ENV-FAIL (the apply/identity machinery
+    failed, not the ticket — the 3 ticket retries are not burned),
+    the published summary is overwritten via write_env_fail_summary
+    (same pattern as the fresh_infra_error branch), and the live tree
+    stays exactly as the run started: git apply is atomic, and the
+    identity branch applied nothing. The B4 drift check and its rationale
+    are documented at its own call site below.
+
+    Returns the downgrade rc (ENV-FAIL) or None (applied)."""
+    if not patchgate.patch_identity_ok(patch_file, patch_sha):
+        log(f"ERROR: final PASS but patch identity mismatch before "
+            f"live apply (expected {patch_sha}) — apply SKIPPED")
+        write_env_fail_summary(
+            cfg, label,
+            f"final PASS but patch identity mismatch before live "
+            f"apply (expected {patch_sha}) — patch not applied")
+        return int(ExitCode.ENV_FAIL)
+    # B4 (external review 2026-10-17): the identity check above
+    # proves the BYTES; this proves the TARGET — the patch may
+    # only land on the tree the run started from (HEAD ==
+    # STANOK_START_COMMIT, porcelain clean). Drift means the
+    # apply target is not the tree the verdict was computed
+    # against: same downgrade as the identity branch (rc=16
+    # ENV-FAIL, summary overwritten via write_env_fail_summary).
+    # Nothing is copied or deleted (operator decision 2026-10-17,
+    # variant 1): changes.patch stays exactly where it was
+    # written — live_dir under LOG_DIR (/tmp/stanok-logs on the
+    # host, config.py:83) — temporary by design; the message
+    # names the path from the `patch_file` variable itself, so
+    # it cannot diverge from the real file.
+    drift = _live_tree_drift(cfg)
+    if drift is not None:
+        log(f"ERROR: final PASS but {drift} — apply SKIPPED")
+        write_env_fail_summary(
+            cfg, label,
+            f"final PASS but {drift} — patch NOT applied; "
+            f"changes.patch retained at {patch_file} "
+            "(temporary, lives under /tmp)")
+        return int(ExitCode.ENV_FAIL)
+    r = subprocess.run(["git", "apply", patch_file],
+                       cwd=cfg.repo_root,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        log(f"ERROR: final PASS but git apply on the live tree "
+            f"failed (rc={r.returncode}): {r.stderr.strip()}")
+        write_env_fail_summary(
+            cfg, label,
+            f"final PASS but git apply on the live tree failed "
+            f"(rc={r.returncode}): {r.stderr.strip()}")
+        return int(ExitCode.ENV_FAIL)
+    return None
+
+
+# ==================================================================================
 # host_launch_k8s — the ONLY host branch (CC-231; CC-258 removed the
 # Docker path)
 # ==================================================================================
@@ -670,53 +1020,13 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     # success, a Job created via `create` (not `apply`: create fails if the
     # object already exists, so success == ownership). A foreign object is
     # never deleted.
-    created = []
+    created: list[tuple[str, str]] = []
     try:
         try:
-            kube._kubectl_checked("create", "configmap", cm_ticket, "-n", ns,
-                             f"--from-file=ticket.md={args.ticket_path}")
-            created.append(("configmap", cm_ticket))
-            kube._kubectl_checked("create", "configmap", cm_tree, "-n", ns,
-                             f"--from-file=tree.tar.gz.b64={tree_file}")
-            created.append(("configmap", cm_tree))
-            kube._kubectl_checked("create", "configmap", cm_runner, "-n", ns,
-                             "--from-file=pod_runner.py=" +
-                             os.path.join(LAUNCHER_DIR, "pod_runner.py"))
-            created.append(("configmap", cm_runner))
-            kube._create_manifest(kube.render_template(
-                kube._read_manifest("worker-job.yaml.tmpl"), {
-                    "JOB_NAME": job_name, "LABEL": label, "NONCE": nonce,
-                    "IMAGE": image_ref, "NAMESPACE": ns,
-                    "SERVER_URL": cfg.server_url, "MODEL": cfg.model,
-                    "OPIK_TRACE_URL": cfg.opik_trace_url,
-                    "START_COMMIT": os.environ.get("STANOK_START_COMMIT", ""),
-                    "DEADLINE": str(deadline),
-                    "CM_TICKET": cm_ticket, "CM_TREE": cm_tree,
-                    "CM_RUNNER": cm_runner,
-                    "RUNTIME_CLASS": kube._runtime_class(),
-                }))
-            created.append(("job", job_name))
-            obs_start = time.monotonic()  # A3: anchor of the observation chain
-            pod = lifecycle._pod_of_job(job_name, ns)
-            worker_peaks = None
-            sampler = None
-            stream_failed = False
-            if pod is not None:
-                # Resource measurement (operator decision 2026-10-16): read-only
-                # kubelet sampling while the Job runs — it never changes the
-                # Job's behavior; a sampler failure never affects the run it
-                # observes (the sampler counts errors, never raises).
-                sampler = peaks._ResourceSampler(pod, ns)
-                sampler.start()
-                stream_failed = not lifecycle._stream_pod_logs(
-                    pod, ns, os.path.join(live_dir, "pod-stdout.log"),
-                    lifecycle._observation_timeout(obs_start, deadline,
-                                                  lifecycle._STREAM_GRACE_S))
-            lifecycle._wait_job_terminal(job_name, ns, lifecycle._observation_timeout(
-                obs_start, deadline,
-                lifecycle._STREAM_GRACE_S + lifecycle._TERMINAL_GRACE_S))
-            if sampler is not None:
-                worker_peaks = sampler.stop_and_peaks()
+            pod, worker_peaks, stream_failed = _run_worker(
+                cfg, live_dir, ns, label, job_name, cm_ticket, cm_tree,
+                cm_runner, tree_file, args.ticket_path, nonce, image_ref,
+                deadline, created)
         except RuntimeError as e:
             rc = int(ExitCode.ENV_FAIL)
             write_env_fail_summary(cfg, label, f"k8s orchestration error — {e}")
@@ -726,110 +1036,33 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             return rc
 
         # The payload: exactly one nonce-matching block, else aborted —
-        # nothing is published, `status` reports `missing`.
-        payload = None
+        # nothing is published, `status` reports `missing`. The
+        # classification itself moved to _classify_missing_payload (wave A
+        # portion 7, verbatim).
+        payload: dict[str, bytes] | None = None
         pod_log = os.path.join(live_dir, "pod-stdout.log")
         if os.path.isfile(pod_log):
             with open(pod_log, encoding="utf-8", errors="replace") as f:
                 payload = extract_payload(f.read(), nonce)
         if payload is None or "summary.json" not in payload:
-            cause = lifecycle._pod_infra_cause(pod, ns)
-            if cause:
-                # BL-4 (a1): the Pod died of an infrastructure cause (cgroup
-                # OOM / kubelet eviction) — rc=16 ENV-FAIL, not the generic
-                # 'missing' abort: the 3 ticket retries are not burned on it.
-                log(f"K8S: worker Pod {cause} — infrastructure defect (rc=16)")
-                rc = int(ExitCode.ENV_FAIL)
-                write_env_fail_summary(cfg, label,
-                                      f"worker Pod {cause} — infrastructure defect")
-                return rc
-            # The in-Pod exit code, when the payload carried it but not a
-            # summary: name it in the abort log — the session ran and died,
-            # the evidence transport did not deliver a verdict.
-            internal = ""
-            if payload is not None:
-                internal = payload.get("internal_rc.txt", b"").strip().decode(
-                    "ascii", "replace")
-            # Deadline contract (external review 2026-10-16): the Job's own
-            # condition says DeadlineExceeded — the session outlived the Job
-            # deadline. Infrastructure defect (rc=16), not a 'missing' abort:
-            # the 3 ticket retries are not burned on it.
-            if lifecycle._job_infra_cause(job_name, ns) == "DeadlineExceeded":
-                log("K8S: Job hit activeDeadlineSeconds (DeadlineExceeded) — "
-                    "infrastructure defect (rc=16); fix: raise "
-                    "STANOK_K8S_JOB_DEADLINE_S or lower STANOK_TURN_TIMEOUT_S")
-                rc = int(ExitCode.ENV_FAIL)
-                write_env_fail_summary(
-                    cfg, label,
-                    "Job DeadlineExceeded — the session outlived the Job "
-                    "activeDeadlineSeconds (infrastructure defect)")
-                return rc
-            log("K8S: no evidence payload block — run treated as aborted "
-                "(status 'missing'), no verdict published"
-                + (" (kubectl logs -f failed — pod-stdout.log incomplete)"
-                   if stream_failed else "")
-                + (f" (in-Pod session exit code was {internal})"
-                   if internal else ""))
-            return rc
+            return _classify_missing_payload(cfg, label, payload, pod, ns,
+                                            job_name, stream_failed)
         for name, data in payload.items():
             with open(os.path.join(live_dir, name), "wb") as f:
                 f.write(data)
 
-        # Patch identity (Package 1): the hash of the EXACT payload bytes is
-        # computed ONCE here; the on-disk patch file is the payload bytes
-        # verbatim (binary write — never a text re-encode), and every later
-        # use (scratch apply, fresh Job, live apply) is re-verified against
-        # this hash. The identity is recorded in the evidence.
-        patch_bytes = payload.get("changes.patch", b"")
-        patch_sha = patchgate.patch_sha256(patch_bytes)
-        # Strict decode (encoding-gap micro-patch): a patch that is not
-        # valid UTF-8 is a fail-closed contract violation BEFORE any
-        # gate/scratch/fresh/apply operation — no U+FFFD substitution.
-        try:
-            patch_text = patchgate.strict_patch_text(patch_bytes)
-            decode_violation = None
-        except UnicodeDecodeError as e:
-            patch_text = ""
-            decode_violation = (
-                f"PATCH-UTF8: changes.patch is not valid UTF-8 ({e}) — "
-                "fail closed, nothing is applied")
-        patch_file = os.path.join(live_dir, "changes.patch")
-        with open(patch_file, "wb") as f:
-            f.write(patch_bytes)
+        # Patch identity (Package 1): staging moved verbatim to _stage_patch
+        # (wave A portion 7) — the hash is computed once there, the on-disk
+        # file is the payload bytes verbatim, the strict decode decides the
+        # decode_violation channel before any gate/apply operation.
+        patch_file, patch_sha, patch_text, decode_violation = _stage_patch(
+            payload, live_dir)
 
-        # CC-225: the host stamps opik_traces — the in-Pod summary carries
-        # the literal "disabled" (STANOK_IN_CONTAINER=1); the host reaches
-        # the Opik backend and counts THIS session's traces, so the field
-        # is host-issued (the Pod is not its own judge). None (backend
-        # unreachable) leaves the field as written — never a 0 masquerade.
-        sum_path = os.path.join(live_dir, "summary.json")
-        try:
-            with open(sum_path, encoding="utf-8") as f:
-                summary = json.load(f)
-            summary["patch_sha256"] = patch_sha
-            # G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): the acceptance
-            # contract is host-stamped from the HOST's own ticket parse —
-            # host-issued like patch_sha256/image_digest (the Pod is not its
-            # own judge). The mode records whether independent acceptance
-            # checks were part of the contract: provided | none | undeclared.
-            summary["acceptance"] = {"mode": accept_mode,
-                                     "paths": list(accept_paths)}
-            # Image provenance (operator plan 2026-10-12): host-stamped like
-            # patch_sha256 — the Pod's own containerStatuses record. None is
-            # explicit (never a guess), with a WARN, same as commit_sha.
-            image_digest = lifecycle._pod_image_id(pod, ns)
-            summary["image_digest"] = image_digest
-            if image_digest is None:
-                log("WARN: image provenance: Pod imageID unavailable — "
-                    "publishing image_digest=None")
-            sid = summary.get("session_id")
-            if sid:
-                stamp_opik_traces(
-                    summary, opik.session_trace_count(sid, run_start_iso))
-            with open(sum_path, "w", encoding="utf-8") as f:
-                json.dump(summary, f, ensure_ascii=False, indent=2)
-        except (OSError, json.JSONDecodeError):
-            pass
+        # Host identity stamping (patch_sha256, acceptance, image provenance,
+        # opik_traces) moved verbatim to _stamp_summary_identity (wave A
+        # portion 7); fail-soft semantics unchanged.
+        _stamp_summary_identity(live_dir, patch_sha, accept_mode,
+                                accept_paths, pod, ns, run_start_iso)
 
         summary_path = os.path.join(live_dir, "summary.json")
         worker_rc = int(ExitCode.DEFECT)
@@ -839,93 +1072,34 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         except (OSError, ValueError, json.JSONDecodeError):
             pass
 
-        # Verdict cross-check (external review 2026-10-16): pod_runner ships
-        # the session subprocess's own exit code in internal_rc.txt. cli.py
-        # writes summary.json's "rc" and returns the same value, so a healthy
-        # run has internal_rc == summary rc. A contradiction means one of the
-        # two channels substituted its own verdict — an infrastructure defect
-        # (rc=16), not a ticket defect: the 3 ticket retries are not burned
-        # on it. Absent (an image predating the contract) -> no check.
-        internal_rc = None
-        try:
-            internal_rc = int(payload["internal_rc.txt"].strip())
-        except (KeyError, ValueError):
-            pass
-        if internal_rc is not None and internal_rc != worker_rc:
-            log(f"K8S INTERNAL-RC: in-Pod session exited {internal_rc} but "
-                f"summary.json claims rc={worker_rc} — verdict-substitution, "
-                "infrastructure defect (rc=16)")
-            rc = int(ExitCode.ENV_FAIL)
-            write_env_fail_summary(
-                cfg, label,
-                f"in-Pod session exit {internal_rc} contradicts summary.json "
-                f"rc={worker_rc} — verdict-substitution, infrastructure defect")
+        # Verdict cross-check moved verbatim to _check_internal_rc (wave A
+        # portion 7): an internal_rc/summary-rc contradiction is an
+        # infrastructure defect (rc=16), the same classification as before.
+        conflict_rc = _check_internal_rc(cfg, label, payload, worker_rc)
+        if conflict_rc is not None:
+            rc = conflict_rc
             return rc
 
-        # Strict UTF-8 decode first (a non-UTF-8 patch never reaches the
-        # gate), then the patch gate (a symlink/traversal/absolute/.git/
-        # gitlink patch is rejected before anything is applied), then the identity
-        # re-verification (the on-disk patch must be the hashed bytes), then
-        # the scratch contract recompute — all feed the SAME
-        # contract_violations channel _publish_evidence forces to
-        # CONTRACT-FAIL.
-        if decode_violation:
-            contract_violations = [decode_violation]
-            log(f"K8S PATCH-UTF8: {decode_violation}")
-        else:
-            contract_violations = patchgate.patch_gate(patch_text)
-            if contract_violations:
-                log(f"K8S PATCH-GATE: {contract_violations}")
-        if not contract_violations:
-            if not patchgate.patch_identity_ok(patch_file, patch_sha):
-                contract_violations = [
-                    f"PATCH-SHA: {patch_file} does not match the hashed patch "
-                    f"bytes ({patch_sha}) — fail closed, nothing is applied"]
-                log(f"K8S PATCH-SHA: {contract_violations}")
-            else:
-                try:
-                    scratch = apply_patch_scratch(tree_blob, patch_text)
-                except RuntimeError as e:
-                    contract_violations = [f"PATCH-APPLY: {e}"]
-                else:
-                    try:
-                        contract_violations = scratch_contract_violations(
-                            cfg, before_manifest, scratch, declared)
-                    finally:
-                        shutil.rmtree(scratch, ignore_errors=True)
+        # Strict decode -> patch gate -> identity re-verification -> scratch
+        # contract recompute (moved verbatim to _contract_chain, wave A
+        # portion 7): all feed the SAME contract_violations channel
+        # _publish_evidence forces to CONTRACT-FAIL.
+        contract_violations = _contract_chain(
+            cfg, tree_blob, before_manifest, declared, patch_text,
+            patch_file, patch_sha, decode_violation)
 
         # The fresh check runs ONLY when the contract is intact (a fresh run
         # over a tampered tree is uninformative — spec §1.6); it is NOT
-        # gated on the worker's claims.
-        fresh_check = None
-        fresh_infra_error = None
-        fresh_peaks = None
-        if not contract_violations:
-            peaks_holder: dict = {}  # annotated: empty literal infers nothing usable
-            fresh_rc, fresh_tail = _fresh_job(cfg, ns, fresh_name, cm_tree,
-                                              cm_patch, patch_file, deadline,
-                                              created, image_ref, peaks_holder)
-            fresh_peaks = peaks_holder.get("peaks")
-            if fresh_tail.startswith("EXEC_ERROR:"):
-                fresh_infra_error = fresh_tail
-            else:
-                fresh_check = (fresh_rc, fresh_tail)
+        # gated on the worker's claims (gate + check moved verbatim to
+        # _run_fresh_check, wave A portion 7).
+        fresh_check, fresh_infra_error, fresh_peaks = _run_fresh_check(
+            cfg, contract_violations, ns, fresh_name, cm_tree, cm_patch,
+            patch_file, deadline, created, image_ref)
 
-        # Resource measurement (operator decision 2026-10-16): host-stamped
-        # like patch_sha256 — the OBSERVED kubelet peaks of this run, closing
-        # the "pending measured peaks" gap of bb5eed6. None = no sample ever
-        # succeeded (never a 0 masquerade). These are kubelet numbers, not
-        # truth claims (gVisor caveat, BL-4).
-        try:
-            with open(summary_path, encoding="utf-8") as f:
-                summary = json.load(f)
-            summary["resource_peaks"] = {"worker": worker_peaks,
-                                         "fresh": fresh_peaks}
-            with open(summary_path, "w", encoding="utf-8") as f:
-                json.dump(summary, f, ensure_ascii=False, indent=2)
-        except (OSError, json.JSONDecodeError):
-            log("WARN: resource_peaks: summary.json unreadable — field not "
-                "stamped")
+        # Resource measurement stamp moved verbatim to _stamp_resource_peaks
+        # (wave A portion 7) — host-stamped like patch_sha256, kubelet
+        # numbers, never a 0 masquerade (gVisor caveat, BL-4).
+        _stamp_resource_peaks(summary_path, worker_peaks, fresh_peaks)
 
         _publish_evidence(cfg, label, worker_rc, contract_violations,
                           fresh_check)
@@ -950,59 +1124,13 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 and patch_text.strip()):
             # Identity re-verified a third time, immediately before the live
             # apply (Package 1): the bytes that land on the live tree must be
-            # the bytes the verdict was computed against — fail closed.
-            # A5 (review 2026-10-17): both failure branches here were WARN —
-            # the run still published rc=0/PASS with the patch UNAPPLIED. A
-            # claimed PASS whose patch never landed is not a PASS: the verdict
-            # is downgraded to rc=16 ENV-FAIL (the apply/identity machinery
-            # failed, not the ticket — the 3 ticket retries are not burned),
-            # the published summary is overwritten via write_env_fail_summary
-            # (same pattern as the fresh_infra_error branch above), and the
-            # live tree stays exactly as the run started: git apply is
-            # atomic, and the identity branch applied nothing.
-            if not patchgate.patch_identity_ok(patch_file, patch_sha):
-                log(f"ERROR: final PASS but patch identity mismatch before "
-                    f"live apply (expected {patch_sha}) — apply SKIPPED")
-                rc = int(ExitCode.ENV_FAIL)
-                write_env_fail_summary(
-                    cfg, label,
-                    f"final PASS but patch identity mismatch before live "
-                    f"apply (expected {patch_sha}) — patch not applied")
-            else:
-                # B4 (external review 2026-10-17): the identity check above
-                # proves the BYTES; this proves the TARGET — the patch may
-                # only land on the tree the run started from (HEAD ==
-                # STANOK_START_COMMIT, porcelain clean). Drift means the
-                # apply target is not the tree the verdict was computed
-                # against: same downgrade as the identity branch (rc=16
-                # ENV-FAIL, summary overwritten via write_env_fail_summary).
-                # Nothing is copied or deleted (operator decision 2026-10-17,
-                # variant 1): changes.patch stays exactly where it was
-                # written — live_dir under LOG_DIR (/tmp/stanok-logs on the
-                # host, config.py:83) — temporary by design; the message
-                # names the path from the `patch_file` variable itself, so
-                # it cannot diverge from the real file.
-                drift = _live_tree_drift(cfg)
-                if drift is not None:
-                    log(f"ERROR: final PASS but {drift} — apply SKIPPED")
-                    rc = int(ExitCode.ENV_FAIL)
-                    write_env_fail_summary(
-                        cfg, label,
-                        f"final PASS but {drift} — patch NOT applied; "
-                        f"changes.patch retained at {patch_file} "
-                        "(temporary, lives under /tmp)")
-                else:
-                    r = subprocess.run(["git", "apply", patch_file],
-                                       cwd=cfg.repo_root,
-                                       capture_output=True, text=True)
-                    if r.returncode != 0:
-                        log(f"ERROR: final PASS but git apply on the live tree "
-                            f"failed (rc={r.returncode}): {r.stderr.strip()}")
-                        rc = int(ExitCode.ENV_FAIL)
-                        write_env_fail_summary(
-                            cfg, label,
-                            f"final PASS but git apply on the live tree failed "
-                            f"(rc={r.returncode}): {r.stderr.strip()}")
+            # the bytes the verdict was computed against — fail closed. The
+            # A5 downgrade semantics (review 2026-10-17) and the B4 drift
+            # rationale (external review 2026-10-17) are documented in
+            # _apply_final_pass and at the code there.
+            downgrade = _apply_final_pass(cfg, label, patch_file, patch_sha)
+            if downgrade is not None:
+                rc = downgrade
         return rc
     except KeyboardInterrupt:
         return run_state.interrupted_rc or 130
