@@ -32,7 +32,7 @@ import hashlib
 
 import pytest
 
-from launcher import k8s
+from launcher import patchgate
 
 CLEAN = """diff --git a/src/m.py b/src/m.py
 new file mode 100644
@@ -62,20 +62,20 @@ new file mode 100644
 
 
 def test_clean_patch_passes():
-    assert k8s.patch_gate(CLEAN) == []
+    assert patchgate.patch_gate(CLEAN) == []
 
 
 def test_empty_patch_passes():
-    assert k8s.patch_gate("") == []
+    assert patchgate.patch_gate("") == []
 
 
 def test_symlink_rejected():
-    v = k8s.patch_gate(SYMLINK)
+    v = patchgate.patch_gate(SYMLINK)
     assert any("SYMLINK" in x and "src/link" in x for x in v)
 
 
 def test_traversal_rejected():
-    v = k8s.patch_gate(TRAVERSAL)
+    v = patchgate.patch_gate(TRAVERSAL)
     assert any("TRAVERSAL" in x for x in v)
 
 
@@ -166,42 +166,42 @@ GITIGNORE_OK = """diff --git a/.gitignore b/.gitignore
 
 
 def test_absolute_path_rejected():
-    v = k8s.patch_gate(ABSOLUTE)
+    v = patchgate.patch_gate(ABSOLUTE)
     assert any("ABSOLUTE" in x and "/etc/passwd" in x for x in v)
 
 
 def test_gitdir_source_rejected():
-    v = k8s.patch_gate(GITDIR_SRC)
+    v = patchgate.patch_gate(GITDIR_SRC)
     assert any("GITDIR" in x and ".git/config" in x for x in v)
 
 
 def test_gitdir_destination_rejected():
-    v = k8s.patch_gate(GITDIR_DEST)
+    v = patchgate.patch_gate(GITDIR_DEST)
     assert any("GITDIR" in x and ".git/hooks/pre-commit" in x for x in v)
 
 
 def test_rename_absolute_rejected():
-    v = k8s.patch_gate(RENAME_ABSOLUTE)
+    v = patchgate.patch_gate(RENAME_ABSOLUTE)
     assert any("ABSOLUTE" in x and "/etc/passwd" in x for x in v)
 
 
 def test_copy_gitdir_rejected():
-    v = k8s.patch_gate(COPY_GITDIR)
+    v = patchgate.patch_gate(COPY_GITDIR)
     assert any("GITDIR" in x and ".git/config" in x for x in v)
 
 
 def test_gitlink_new_file_rejected():
-    v = k8s.patch_gate(GITLINK_NEW)
+    v = patchgate.patch_gate(GITLINK_NEW)
     assert any("GITLINK" in x and "vendor/lib" in x for x in v)
 
 
 def test_gitlink_mode_change_rejected():
-    v = k8s.patch_gate(GITLINK_MODE)
+    v = patchgate.patch_gate(GITLINK_MODE)
     assert any("GITLINK" in x and "vendor/lib" in x for x in v)
 
 
 def test_gitlink_deleted_rejected():
-    v = k8s.patch_gate(GITLINK_DELETED)
+    v = patchgate.patch_gate(GITLINK_DELETED)
     assert any("GITLINK" in x for x in v)
 
 
@@ -216,16 +216,16 @@ index 1111111..2222222 160000
 -Subproject commit 1111111111111111111111111111111111111111
 +Subproject commit 2222222222222222222222222222222222222222
 """
-    v = k8s.patch_gate(patch)
+    v = patchgate.patch_gate(patch)
     assert any("GITLINK" in x and "vendor/lib" in x for x in v)
 
 
 def test_safe_rename_passes():
-    assert k8s.patch_gate(SAFE_RENAME) == []
+    assert patchgate.patch_gate(SAFE_RENAME) == []
 
 
 def test_safe_copy_passes():
-    assert k8s.patch_gate(SAFE_COPY) == []
+    assert patchgate.patch_gate(SAFE_COPY) == []
 
 
 def test_gitignore_is_zone_rejected_not_gitdir():
@@ -235,7 +235,7 @@ def test_gitignore_is_zone_rejected_not_gitdir():
     # it before apply. Policy change authorized by the wave C spec
     # ("корневые файлы … REJECT"); legitimate machine patches never touch
     # root files (the container writes only src/tests/docs).
-    v = k8s.patch_gate(GITIGNORE_OK)
+    v = patchgate.patch_gate(GITIGNORE_OK)
     assert any("ZONE" in x and ".gitignore" in x for x in v), v
     assert not any("GITDIR" in x for x in v), v
 
@@ -253,11 +253,11 @@ def test_strict_patch_text_rejects_invalid_utf8():
     # and applied — errors="replace" (U+FFFD) would verify a contract against
     # a tree different from the one that gets applied.
     with pytest.raises(UnicodeDecodeError):
-        k8s.strict_patch_text(INVALID_UTF8)
+        patchgate.strict_patch_text(INVALID_UTF8)
 
 
 def test_strict_patch_text_passes_valid_utf8():
-    assert k8s.strict_patch_text(CLEAN.encode("utf-8")) == CLEAN
+    assert patchgate.strict_patch_text(CLEAN.encode("utf-8")) == CLEAN
 
 
 def test_patch_identity(tmp_path):
@@ -265,11 +265,11 @@ def test_patch_identity(tmp_path):
     # missing or altered file must fail the re-verification (fail closed).
     patch_bytes = CLEAN.encode("utf-8")
     expected = hashlib.sha256(patch_bytes).hexdigest()
-    assert k8s.patch_sha256(patch_bytes) == expected
+    assert patchgate.patch_sha256(patch_bytes) == expected
     f = tmp_path / "changes.patch"
     f.write_bytes(patch_bytes)
-    assert k8s.patch_identity_ok(str(f), expected)
+    assert patchgate.patch_identity_ok(str(f), expected)
     f.write_bytes(patch_bytes + b"\n# tampered\n")
-    assert not k8s.patch_identity_ok(str(f), expected)
+    assert not patchgate.patch_identity_ok(str(f), expected)
     f.unlink()
-    assert not k8s.patch_identity_ok(str(f), expected)
+    assert not patchgate.patch_identity_ok(str(f), expected)

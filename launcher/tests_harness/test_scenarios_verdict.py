@@ -74,7 +74,7 @@ import subprocess
 
 import pytest
 
-from launcher import k8s, kube, preflight
+from launcher import k8s, kube, patchgate, preflight
 from launcher.config import Config
 
 # CC-237 (schema v2): the worker summary is TYPED — no errors/failures/
@@ -449,7 +449,7 @@ def test_scenario_identity_mismatch_before_live_apply_downgrades(tmp_path,
     def counting(path, sha):
         state["n"] += 1
         return state["n"] == 1
-    monkeypatch.setattr(k8s, "patch_identity_ok", counting)
+    monkeypatch.setattr(patchgate, "patch_identity_ok", counting)
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     assert state["n"] == 2  # both gates ran (the stub targets the second)
     assert rc == 16

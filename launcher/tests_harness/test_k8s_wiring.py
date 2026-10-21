@@ -48,7 +48,7 @@ import argparse
 import json
 import os
 
-from launcher import cli, k8s, kube, preflight
+from launcher import cli, k8s, kube, patchgate, preflight
 from launcher.config import Config
 
 
@@ -368,7 +368,7 @@ def _payload_host_run(tmp_path, monkeypatch, payload, real_apply=False):
         f.write("synthetic")
     monkeypatch.setattr(k8s, "extract_payload", lambda text, nonce: payload)
     # Post-payload stages: mocked so the test is about the comparison only.
-    monkeypatch.setattr(k8s, "patch_gate", lambda text: [])
+    monkeypatch.setattr(patchgate, "patch_gate", lambda text: [])
     if not real_apply:
         monkeypatch.setattr(k8s, "apply_patch_scratch",
                             lambda blob, text: str(tmp_path / "scratch"))

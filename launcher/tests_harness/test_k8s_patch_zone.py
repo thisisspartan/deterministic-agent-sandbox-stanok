@@ -114,7 +114,7 @@ import os
 import subprocess
 
 
-from launcher import k8s
+from launcher import k8s, patchgate
 
 GIT = ["git", "-c", "user.email=wc@wave.c", "-c", "user.name=wc",
        "-c", "commit.gpgsign=false", "-c", "core.quotepath=true"]
@@ -155,7 +155,7 @@ def _base(tmp_path, files):
 
 def _gate(patch_bytes):
     # the production entry: strict decode of the exact bytes, then the gate
-    return k8s.patch_gate(k8s.strict_patch_text(patch_bytes))
+    return patchgate.patch_gate(patchgate.strict_patch_text(patch_bytes))
 
 
 # --- 1/2: TCB files the deny-list never checked ---------------------------
@@ -390,14 +390,14 @@ def test_formfeed_content_line_passes_gate():
     # line, and the MACHINE parser sees exactly one path — the header must
     # not be real.
     assert b"+foo" + _FORMFEED in patch
-    assert k8s._numstat_paths(k8s.strict_patch_text(patch)) == ["src/fake.py"]
+    assert patchgate._numstat_paths(patchgate.strict_patch_text(patch)) == ["src/fake.py"]
     assert _gate(patch) == []
 
 
 def test_line_separator_content_line_passes_gate():
     patch = _new_file_patch(_LINE_SEP)
     assert b"+foo" + _LINE_SEP in patch
-    assert k8s._numstat_paths(k8s.strict_patch_text(patch)) == ["src/fake.py"]
+    assert patchgate._numstat_paths(patchgate.strict_patch_text(patch)) == ["src/fake.py"]
     assert _gate(patch) == []
 
 
@@ -456,7 +456,7 @@ def test_git_unquote_named_control_escapes():
     # letters through unchanged.
     quoted = '"A\\aB\\bC\\tD\\nE\\vF\\fG\\rH\\"I\\\\J"'
     expected = "A\x07B\x08C\tD\nE\x0bF\x0cG\rH\"I\\J"
-    assert k8s._git_unquote(quoted) == expected
+    assert patchgate._git_unquote(quoted) == expected
 
 
 # --- 18: parser-environment failures — variant 2 (prepared, operator) -------
