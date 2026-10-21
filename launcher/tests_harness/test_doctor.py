@@ -381,7 +381,7 @@ def test_context_md_budget():
     ctx = REPO_ROOT.parent / "CONTEXT.md"
     if not ctx.is_file():
         # The public clone has no supervisor zone: CONTEXT.md is a session log
-        # (project history), never synced by sync-skeleton.sh — valid absence.
+        # (project history), gitignored local-only state — valid absence.
         pytest.skip("supervisor zone not present — CONTEXT.md absent (public clone)")
     size = ctx.stat().st_size
     assert size <= 16384, \
@@ -419,7 +419,8 @@ def test_supervisor_zone_not_published():
     # .mcp.json (external review 2026-10-16: machine-local absolute paths;
     # the published template is .mcp.json.example) carry internal
     # addresses/hosts and incident history — they must NEVER be tracked there
-    # (rule: .claude/sync-skeleton.sh + the parent .gitignore; enforced here).
+    # (rule: the parent .gitignore — publication is direct push of the tracked
+    # tree, the sync-skeleton mirror was retired 2026-10-21; enforced here).
     # A tracked path is a published path; present-but-UNTRACKED (the
     # supervisor's local zone, gitignored) is the valid state.
     # Layout rules (SPEC-CI-MINIMAL, 2026-10-13): the guard is meaningful
