@@ -37,13 +37,18 @@ import json
 import os
 import shutil
 from collections.abc import Sequence  # read-only parameter type: callers pass a list, the default is () — the function only unpacks/logs it
+from typing import TYPE_CHECKING, Any
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
+from launcher.verdicts import Verdict
+
+if TYPE_CHECKING:  # quoted annotations only: no runtime import (Pod-safe, verify.py precedent)
+    from launcher.config import Config
 
 
-def _publish_evidence(cfg, label: str, container_rc: int,
+def _publish_evidence(cfg: "Config", label: str, container_rc: int,
                       contract_violations: Sequence[str] = (),
-                      fresh_check: tuple | None = None) -> None:
+                      fresh_check: tuple[int, str] | None = None) -> None:
     """Copy the container-written verdict from the rw LOG_DIR/<label> into the
     host-owned evidence/<label> (CC-134).
 
@@ -116,7 +121,7 @@ def _publish_evidence(cfg, label: str, container_rc: int,
         # the container claimed success; the container's non-zero exit
         # stays ground truth.
         summary["rc"] = container_rc or int(ExitCode.DEFECT)
-        summary["probe_result"] = "CONTRACT-FAIL"
+        summary["probe_result"] = Verdict.CONTRACT_FAIL.value
         # CC-237 (schema v2): the free text goes to failures.log, not to
         # summary.json — the typed fields (verifier/rc/probe_result) are
         # forced here, the explanation is appended to the log.
@@ -137,7 +142,7 @@ def _publish_evidence(cfg, label: str, container_rc: int,
         fresh_rc, tail = fresh_check
         summary["verifier"] = "FAIL"
         summary["rc"] = fresh_rc
-        summary["probe_result"] = "FRESH-FAIL"
+        summary["probe_result"] = Verdict.FRESH_FAIL.value
         # CC-237 (schema v2): the explanation goes to failures.log.
         _append_failures(dst, [
             f"HOST FRESH-CHECK: the suite failed in a fresh container the "
@@ -148,7 +153,7 @@ def _publish_evidence(cfg, label: str, container_rc: int,
             "verdict FRESH-FAIL")
 
 
-def _loop_trap_field(job: dict):
+def _loop_trap_field(job: dict[str, Any]) -> dict[str, Any] | None:
     """CC-237 (schema v2): the typed circuit-breaker record —
     {"tool": str, "hash": str, "n": int} | None. The marker file may carry
     extra keys (ts) or malformed values; anything that is not exactly the
@@ -163,7 +168,7 @@ def _loop_trap_field(job: dict):
     return None
 
 
-def _acceptance_field(job: dict) -> dict:
+def _acceptance_field(job: dict[str, Any]) -> dict[str, Any]:
     """G4 (SPEC-G4-ACCEPTANCE-CONTRACT-2026-10-14): the typed acceptance-
     contract record — {"mode": "provided"|"none"|"undeclared",
     "paths": [str]}. mode=provided requires a non-empty paths list; mode=none
@@ -184,7 +189,7 @@ def _acceptance_field(job: dict) -> dict:
     return {"mode": mode, "paths": list(paths)}
 
 
-def _test_fit_field(job: dict) -> dict:
+def _test_fit_field(job: dict[str, Any]) -> dict[str, Any]:
     """CC-247: the typed test-fit counters —
     {"edits_after_green": int>=0, "new_tests_after_green": int>=0}. Proxy
     metric only: no gate, no text. Anything malformed (negative, bool, str,
@@ -194,7 +199,7 @@ def _test_fit_field(job: dict) -> dict:
     fit = job.get("test_fit")
     if not isinstance(fit, dict):
         return zeros
-    out = {}
+    out: dict[str, int] = {}
     for key in ("edits_after_green", "new_tests_after_green"):
         v = fit.get(key)
         if not isinstance(v, int) or isinstance(v, bool) or v < 0:
@@ -203,7 +208,7 @@ def _test_fit_field(job: dict) -> dict:
     return out
 
 
-def _compactions_field(job: dict) -> list:
+def _compactions_field(job: dict[str, Any]) -> list[dict[str, Any]]:
     """P1 telemetry (Opik analysis CC-302/CC-304, 2026-10-20): the typed
     compact_boundary record — [{"turn": int>=1, "trigger": str,
     "pre_tokens": int>=0}]. The token totals deliberately exclude
@@ -215,7 +220,7 @@ def _compactions_field(job: dict) -> list:
     raw = job.get("compactions")
     if not isinstance(raw, list):
         return []
-    out = []
+    out: list[dict[str, Any]] = []
     for e in raw:
         if not isinstance(e, dict):
             continue
@@ -230,12 +235,12 @@ def _compactions_field(job: dict) -> list:
     return out
 
 
-def _failure_lines(job: dict) -> list[str]:
+def _failure_lines(job: dict[str, Any]) -> list[str]:
     """CC-237 (schema v2): every free-text failure of a run as plain lines —
     the error string, verify_gate failures (verify.py entries are
     (name, msg) tuples or plain strings), contract-lock violations.
     summary.json stays typed; failures.log carries the text."""
-    lines = []
+    lines: list[str] = []
     if job.get("error"):
         lines.append(str(job["error"]))
     for f in job.get("failures", []):
@@ -267,7 +272,7 @@ def _append_failures(directory: str, lines: list[str]) -> None:
             f.write(line + "\n")
 
 
-def _rotate_stale_summary(cfg, label: str) -> None:
+def _rotate_stale_summary(cfg: "Config", label: str) -> None:
     """Rotate a stale summary.json / failures.log left by an EARLIER run of
     the same label (a run aborted at a gate after writing its report, or a
     killed process). Without rotation, early_abort's write-if-absent guard
@@ -297,15 +302,16 @@ def _status_fields(rc: int, verifier: str, turns: int) -> str:
     (NO-OP-PASS vs exhausted-retries) — the disambiguation is the
     session/host override, applied by decide(), not here."""
     if rc == 0 and verifier == "PASS":
-        return "CLEAN-FIRST" if turns == 1 else "PASS-AFTER-LOCAL-RETRY"
+        return (Verdict.CLEAN_FIRST.value if turns == 1
+                else Verdict.PASS_AFTER_LOCAL_RETRY.value)
     if rc == 16:
         # ENV-FAIL: the image lacks the test runner — an infrastructure
         # failure (rebuild the image), neither a defect nor a NO-OP.
-        return "ENV-FAIL"
-    return "VERIFY-FAIL"
+        return Verdict.ENV_FAIL.value
+    return Verdict.VERIFY_FAIL.value
 
 
-def decide(job: dict) -> str:
+def decide(job: dict[str, Any]) -> str:
     """probe_result with the priority made explicit (red-team review
     2026-10-08; override-vs-override priority added by the operator review
     2026-10-09): a non-empty contract_lock_violations list wins over every
@@ -317,15 +323,17 @@ def decide(job: dict) -> str:
     test_scenarios_verdict.py pins this priority end-to-end (S6): any
     change here must pass it UNCHANGED."""
     if job.get("contract_lock_violations"):
-        return "CONTRACT-FAIL"
+        return Verdict.CONTRACT_FAIL.value
     override = job.get("probe_result")
     if override:
-        return override
+        # Producers write registry str values (verdicts.py); str() keeps the
+        # value identical for them and keeps the declared return type.
+        return str(override)
     return _status_fields(job.get("rc", 1), job.get("verifier", "FAIL"),
                           job.get("turns", 1))
 
 
-def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
+def build_summary(cfg: "Config", job: dict[str, Any], elapsed_s: int) -> dict[str, Any]:
     """Single source of the summary.json schema (shared by write_summary
     and early_abort)."""
     turns = job.get("turns", 1)
@@ -389,7 +397,7 @@ def build_summary(cfg, job: dict, elapsed_s: int) -> dict:
     }
 
 
-def write_summary(cfg, job: dict, elapsed_s: int) -> None:
+def write_summary(cfg: "Config", job: dict[str, Any], elapsed_s: int) -> None:
     """Writes the exact summary.json contract expected by the L1 Supervisor.
 
     S1 (rollback of T3-4): the path is cfg.summary_dir(label) — inside the
@@ -404,7 +412,7 @@ def write_summary(cfg, job: dict, elapsed_s: int) -> None:
     _write_failures(d, _failure_lines(job))
 
 
-def write_env_fail_summary(cfg, label: str, error: str) -> None:
+def write_env_fail_summary(cfg: "Config", label: str, error: str) -> None:
     """Stage 3 (T3-6): a host-side infrastructure failure — the fresh check
     could not run (EXEC_ERROR). The verdict cannot be issued: the host writes
     an ENV-FAIL summary (rc=16) into the evidence dir, the error text in
@@ -412,7 +420,7 @@ def write_env_fail_summary(cfg, label: str, error: str) -> None:
     evidence_dir, _ = cfg.label_paths(label)
     os.makedirs(evidence_dir, exist_ok=True)
     job = {"label": label, "rc": int(ExitCode.ENV_FAIL), "verifier": "FAIL",
-           "probe_result": "ENV-FAIL", "turns": 0, "error": error}
+           "probe_result": Verdict.ENV_FAIL.value, "turns": 0, "error": error}
     with open(os.path.join(evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
     _write_failures(evidence_dir, [error])

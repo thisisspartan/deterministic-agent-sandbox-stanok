@@ -11,6 +11,7 @@ import subprocess
 from typing import Any, TYPE_CHECKING
 
 from launcher.logs import log
+from launcher.verdicts import Verdict
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -408,7 +409,7 @@ def _contract_lock_forced_fail(job: dict[str, Any], turn: int) -> int | None:
     # LOOP-TRAP pattern: without it decide() falls through to the table and
     # the summary says VERIFY-FAIL — a contract violation would be
     # indistinguishable from a test failure. The table is unchanged.
-    job["probe_result"] = "CONTRACT-FAIL"
+    job["probe_result"] = Verdict.CONTRACT_FAIL.value
     job["verifier"] = "FAIL"
     job["error"] = ("CONTRACT-LOCK: the machine modified or deleted protected "
                    "files (tests/, scripts/run.sh) or created an undeclared "

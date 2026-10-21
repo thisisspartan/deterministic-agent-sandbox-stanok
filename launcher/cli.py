@@ -40,6 +40,7 @@ from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
     parse_ticket_header,
 )
+from launcher.verdicts import Verdict
 
 
 
@@ -547,7 +548,7 @@ def _early_abort(cfg, marker: str, label: str, ticket: str,
             "ticket": ticket,
             "rc": int(code),
             "verifier": "FAIL",
-            "probe_result": "EARLY-ABORT",
+            "probe_result": Verdict.EARLY_ABORT.value,
             "turns": 0,
             "error": err_msg,
         }

@@ -17,8 +17,12 @@ import subprocess
 import sys
 import urllib.request
 import tomllib
+from typing import TYPE_CHECKING, Any
 from launcher import zones
 from launcher.logs import log
+
+if TYPE_CHECKING:  # quoted annotations only: no runtime import (Pod-safe, verify.py precedent)
+    from launcher.config import Config
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -38,7 +42,7 @@ def root_refusal() -> None:
         sys.exit(1)
 
 
-def dirty_tree_gate(cfg) -> bool:
+def dirty_tree_gate(cfg: "Config") -> bool:
     # Fail-closed: a git error means the tree state is UNKNOWN -> treat as dirty.
     try:
         out = subprocess.run(["git", "status", "--porcelain"],
@@ -52,7 +56,7 @@ def dirty_tree_gate(cfg) -> bool:
         return True
 
 
-def hidden_files_gate(cfg) -> bool:
+def hidden_files_gate(cfg: "Config") -> bool:
     # W4 hygiene gate (fail-closed): reject a launch if src/tests/docs/scripts
     # holds, at ANY DEPTH, a hidden file or directory (name starting with '.',
     # except .gitkeep) or a file carrying a 'TEMP:' marker in its first 40
@@ -98,7 +102,7 @@ def hidden_files_gate(cfg) -> bool:
     return False
 
 
-def zone_symlinks(cfg) -> list[str]:
+def zone_symlinks(cfg: "Config") -> list[str]:
     """All symlinks under the writable zones — the ONE scanner behind the
     launch gate (zone_symlink_gate). The rule (cc217 review follow-up, operator
     decision 2026-10-09): in src/tests/docs/scripts symlinks do not exist.
@@ -131,7 +135,7 @@ def zone_symlinks(cfg) -> list[str]:
     return sorted(found)
 
 
-def zone_symlink_gate(cfg) -> list[str]:
+def zone_symlink_gate(cfg: "Config") -> list[str]:
     """The zone-symlink ban at launch (rc=13, wired in cli._launch_gates):
     no symlink may exist in src/tests/docs/scripts. A link hands its TARGET
     the zone's access — the `src/link -> launcher/` incident (under the
@@ -170,7 +174,7 @@ _LEGACY_VERDICT_CONFIG = ("conftest.py", "pytest.ini", "tox.ini",
                          "setup.cfg", "pyproject.toml")
 
 
-def _stack_manifests(cfg) -> tuple[dict[str, dict], bool]:
+def _stack_manifests(cfg: "Config") -> tuple[dict[str, dict[str, Any]], bool]:
     """Parse the STACK REGISTRY manifests (scripts/stacks/*.toml, sorted by
     filename) via tomllib — the SINGLE parser for the manifests (run.sh
     derives its STACKS lines with the same tomllib, no codegen). Returns
@@ -179,7 +183,7 @@ def _stack_manifests(cfg) -> tuple[dict[str, dict], bool]:
     if tomllib is None:
         return {}, False
     stacks_dir = os.path.join(cfg.repo_root, "scripts", "stacks")
-    out: dict[str, dict] = {}
+    out: dict[str, dict[str, Any]] = {}
     ok = True
     try:
         entries = sorted(os.listdir(stacks_dir))
@@ -200,7 +204,7 @@ def _stack_manifests(cfg) -> tuple[dict[str, dict], bool]:
     return out, ok
 
 
-def _verdict_config_patterns(cfg) -> tuple[str, ...]:
+def _verdict_config_patterns(cfg: "Config") -> tuple[str, ...]:
     """CC-151 (stack-agnostic subversion guard): the union of the
     `verdict_config` lists declared by the stack manifests
     (scripts/stacks/*.toml). Each stack declares the config filenames that
@@ -220,7 +224,7 @@ def _verdict_config_patterns(cfg) -> tuple[str, ...]:
     return tuple(sorted(patterns))
 
 
-def check_test_config(cfg) -> bool:
+def check_test_config(cfg: "Config") -> bool:
     # W6 verdict-subversion gate (owner decision A, fail-closed); CC-151 makes
     # it stack-agnostic: the forbidden set is the union of the `verdict_config`
     # lists declared by the stack manifests (scripts/stacks/*.toml), not a
@@ -300,18 +304,20 @@ def context_rot_threshold() -> int | None:
     return int(window * 0.8)
 
 
-def _fetch_server_props(cfg) -> dict | None:
+def _fetch_server_props(cfg: "Config") -> dict[str, Any] | None:
     """GET {cfg.server_url}/props (no proxy, 5 s timeout). None on any failure."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(urllib.request.Request(f"{cfg.server_url}/props"), timeout=5) as resp:
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
+            props: dict[str, Any] = json.loads(
+                resp.read().decode("utf-8", errors="replace"))
+            return props
     except Exception as e:
         log(f"SERVER UNAVAILABLE ({cfg.server_url}: {type(e).__name__}) (rc=20)")
         return None
 
 
-def _server_model_identities(props) -> list[str]:
+def _server_model_identities(props: dict[str, Any]) -> list[str]:
     """Model identities the server declares in /props (CC-266, SPEC-MODEL-PIN-PREFLIGHT):
     model_alias, elements of model_path_aliases, basename of model_path without
     its extension. Non-string/empty entries are ignored."""
@@ -330,7 +336,7 @@ def _server_model_identities(props) -> list[str]:
     return ids
 
 
-def preflight_server(cfg) -> bool:
+def preflight_server(cfg: "Config") -> bool:
     global _DERIVED_REQUIRED_WINDOW
     if os.environ.get("STANOK_SKIP_SERVER_CHECK") == "1":
         return True
@@ -374,7 +380,7 @@ def preflight_server(cfg) -> bool:
     return True
 
 
-def _stack_preflights(cfg) -> list[str]:
+def _stack_preflights(cfg: "Config") -> list[str]:
     """The `preflight` command of each stack manifest (scripts/stacks/*.toml,
     sorted by filename) — the cheap per-stack runner-availability probe
     (e.g. `env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest --version`).
@@ -382,7 +388,7 @@ def _stack_preflights(cfg) -> list[str]:
     regex over run.sh (the pre-CC-148 registry block no longer lives there;
     the old regex silently returned [] and disabled the doctor probe)."""
     manifests, _ok = _stack_manifests(cfg)
-    preflights = []
+    preflights: list[str] = []
     for data in manifests.values():
         pre = data.get("preflight")
         if isinstance(pre, str) and pre.strip():
@@ -402,7 +408,7 @@ def _stack_preflights(cfg) -> list[str]:
 DIGEST_INPUTS = ("Dockerfile", "scripts/run.sh", "scripts/stacks/*.toml", "image-requirements.lock")
 
 
-def _image_digest(cfg) -> str:
+def _image_digest(cfg: "Config") -> str:
     """sha256 over DIGEST_INPUTS (the single declared list — see above).
     setup.sh bakes this into the image LABEL stanok.digest at build time;
     preflight_image() re-computes it in doctor (CC-106: moved off the
@@ -419,7 +425,7 @@ def _image_digest(cfg) -> str:
     return h.hexdigest()
 
 
-def preflight_image(cfg, image: str) -> bool:
+def preflight_image(cfg: "Config", image: str) -> bool:
     """Host-side image provenance + runner preflight.
     1. The image LABEL stanok.digest must equal sha256 over gates.DIGEST_INPUTS
        (Dockerfile + run.sh + scripts/stacks/*.toml + image-requirements.lock) — an image

@@ -34,6 +34,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from launcher.verdicts import Verdict
+
 # Context-size buckets for the observation summary (token ranges, half-open).
 # Fixed presentation ranges, NOT thresholds: crossing a bucket boundary is an
 # observation, never a verdict.
@@ -74,9 +76,13 @@ def classify(summary: dict[str, Any]) -> tuple[str, str]:
     rc = summary.get("rc")
     verifier = summary.get("verifier")
     probe = summary.get("probe_result") or ""
+    if probe == Verdict.NO_OP_PASS.value:
+        # #314: classify from the probe BEFORE the rc branches. A real
+        # NO-OP carries rc=1+PASS (session NO-OP assert, pinned by
+        # test_pass_blind.py); keying the NO-OP outcome on rc==0 made the
+        # declared outcome unreachable from real evidence.
+        return "NO-OP", probe
     if rc == 0 and verifier == "PASS":
-        if probe == "NO-OP-PASS":
-            return "NO-OP", probe
         return "PASS", probe
     if rc == TIMEOUT_RC:
         return "TIMEOUT", probe or "rc=124"

@@ -24,6 +24,7 @@ from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.gates import context_rot_threshold
 from launcher.verify import _check_contract_lock, _contract_lock_forced_fail, _fix_prompt_rules, _tests_manifest, verify_gate
+from launcher.verdicts import Verdict
 
 if TYPE_CHECKING:
     from launcher.plan import SessionPlan  # annotation-only use (T1/F821 fix)
@@ -86,7 +87,7 @@ def _loop_trap_verdict(job: dict, loop_trap: dict) -> int:
     _contract_lock_forced_fail pattern). No fix prompt, no local retries: a
     retry re-enters the same loop — the marker is cumulative for the
     session. rc=1 is the existing defect code (no new rc)."""
-    job["probe_result"] = "LOOP-TRAP"
+    job["probe_result"] = Verdict.LOOP_TRAP.value
     job["loop_trap"] = loop_trap
     job["verifier"] = "FAIL"
     job["error"] = (
@@ -716,7 +717,7 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
             log("NO-OP-PASS: verifier passed on turn 1 with zero "
                 "Write/Edit calls — the machine did no work")
             job["verifier"] = "PASS"
-            job["probe_result"] = "NO-OP-PASS"
+            job["probe_result"] = Verdict.NO_OP_PASS.value
             job["turns"] = turn
             return 1, ""
         # CC-234 (operator spec 2026-10-11): a PASS where the agent never
@@ -729,7 +730,7 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
         if activity.get("bash_ok", 0) == 0:
             log("PASS-BLIND: verifier PASS but zero successful Bash calls "
                 "by the agent — not a clean acceptance")
-            job["probe_result"] = "PASS-BLIND"
+            job["probe_result"] = Verdict.PASS_BLIND.value
         log("VERIFIER: PASS — All tests passed successfully!")
         job["verifier"] = "PASS"
         job["turns"] = turn
