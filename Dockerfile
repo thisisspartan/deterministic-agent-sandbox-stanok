@@ -167,6 +167,23 @@ RUN set -eux; \
     tar -xzf /tmp/node.tar.gz --strip-components=1 -C /usr/local; \
     rm -f /tmp/node.tar.gz
 COPY .build-context/claude-code-2.1.88/ /opt/claude-code-2.1.88/
+# 2026-10-21 external review N2: the staged CLI was COPY'd without an
+# in-build verification — the SHA gate lived only in setup.sh, so a stale
+# .build-context from an earlier run could survive a build whose digest
+# inputs happen to match. In-build parity with the W7 pattern already used
+# for uv and node above: setup.sh passes the same hashes it verified as
+# --build-arg; empty defaults make `test -n` fail the build, so a build
+# that skips the args REFUSES instead of shipping unverified content.
+ARG CLI_JS_SHA=
+ARG PKG_JSON_SHA=
+ARG RG_SHA=
+RUN set -eux; \
+    test -n "${CLI_JS_SHA}"; test -n "${PKG_JSON_SHA}"; test -n "${RG_SHA}"; \
+    { \
+      echo "${CLI_JS_SHA}  /opt/claude-code-2.1.88/cli.js"; \
+      echo "${PKG_JSON_SHA}  /opt/claude-code-2.1.88/package.json"; \
+      echo "${RG_SHA}  /opt/claude-code-2.1.88/vendor/ripgrep/x64-linux/rg"; \
+    } | sha256sum -c -
 RUN chmod +x /opt/claude-code-2.1.88/cli.js \
     && ln -s /opt/claude-code-2.1.88/cli.js /usr/local/bin/claude
 

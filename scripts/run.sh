@@ -127,10 +127,15 @@ unclaimed_files() {
     base="${f##*/}"
     dir="${f%/*}"
     [[ "${dir##*/}" == "fixtures" || "${dir##*/}" == "data" || "${dir##*/}" == "__pycache__" ]] && continue
+    # shellcheck disable=SC2018,SC2019  # byte-range 'A-Z'->'a-z' is the
+    # point: registry test basenames are ASCII (test_*.py / *.test.js), the
+    # case-insensitivity probe needs no Unicode folding.
     low="$(printf '%s' "$base" | tr 'A-Z' 'a-z')"
     case "$low" in *test*) ;; *) continue ;; esac
     claimed=0
     while IFS='|' read -r _ glob _ _ _ _; do
+      # shellcheck disable=SC2053  # the unquoted RHS is the mechanism: $glob
+      # must pattern-match the basename (quoting would turn it into a literal).
       [[ "$base" == $glob ]] && { claimed=1; break; }
     done <<< "$STACKS"
     [ "$claimed" = 1 ] || printf '%s\n' "$f"
@@ -165,6 +170,7 @@ cmd_test_all() {
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     while IFS='|' read -r _ glob _ tcmd _ pre; do
+      # shellcheck disable=SC2053  # unquoted RHS: pattern match (see above)
       if [[ "${f##*/}" == $glob ]]; then
         RUNNER["$f"]="$tcmd"
         PREFLIGHT["$f"]="$pre"

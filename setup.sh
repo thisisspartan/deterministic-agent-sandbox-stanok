@@ -61,6 +61,12 @@ fi
 # the pinned bundle, but a rebuilt-from-different-source bundle could
 # coincidentally match the SHA without carrying the 11 patch anchors.
 # verify.sh confirms the anchors are present (fail-fast).
+# STATUS (2026-10-21 external review N3): this check is ADVISORY, by
+# design — the hard gate is the SHA block above (exit 1 on any mismatch).
+# The bundle's STOCK base branch legitimately has no patches/verify.sh, so
+# its absence is a WARN-skip, not a failure: an anchor-check absence is
+# never a build error; an anchor-check FAILURE (verify.sh present and
+# failing) aborts the build because its non-zero rc propagates here.
 if [[ -f "$CLI_SRC/patches/verify.sh" ]]; then
     echo "--- CLI patch anchor check (CC-143) ---"
     bash "$CLI_SRC/patches/verify.sh" "$CLI_SRC/cli.js"
@@ -79,15 +85,29 @@ echo "--- building the machine image (Docker boundary) ---"
 # scripts/run.sh + scripts/stacks/*.toml — the STACKS registry +
 # image-requirements.lock — the image dependency lock) into the image LABEL
 # stanok.digest. The inputs
-# are concatenated in EXPLICIT filename order (ls | sort — no reliance on
-# shell-glob order), the same list and order gates.DIGEST_INPUTS declares in
-# doctor: test_image_digest_inputs.py pins the two lists equal,
+# are concatenated in EXPLICIT filename order (LC_ALL=C ls | LC_ALL=C sort —
+# no reliance on shell-glob order and no locale dependence: the 2026-10-21
+# external review N1 found that a plain `sort` follows the ambient locale's
+# collation while gates.DIGEST_INPUTS/gates.py sorts bytewise; the C locale
+# makes both byte-identical), the same list and order gates.DIGEST_INPUTS
+# declares in doctor: test_image_digest_inputs.py pins the two lists equal
+# AND pins the byte-identity of the two computations,
 # test_docker_image_digest_matches fails a stale image (CC-106: the check
 # lives in doctor, not the launch path).
-STANOK_DIGEST="$(cat "$DIR/Dockerfile" "$DIR/scripts/run.sh" $(ls "$DIR"/scripts/stacks/*.toml | sort) "$DIR/image-requirements.lock" | sha256sum | cut -d' ' -f1)"
+# shellcheck disable=SC2046,SC2012  # word splitting here is the point (the
+# expansion is the file list for cat; the glob is restricted to the known
+# ASCII registry filenames, so `ls` is deliberate — find would only break the
+# test_image_digest_inputs parser that pins this exact form)
+STANOK_DIGEST="$(cat "$DIR/Dockerfile" "$DIR/scripts/run.sh" $(LC_ALL=C ls "$DIR"/scripts/stacks/*.toml | LC_ALL=C sort) "$DIR/image-requirements.lock" | sha256sum | cut -d' ' -f1)"
 IMAGE_NAME="${STANOK_DOCKER_IMAGE:-stanok-machine:latest}"
+# N2 (2026-10-21 review): the CLI hashes verified above are passed into the
+# build so the Dockerfile re-verifies the staged files in-build (a stale
+# .build-context then fails the build instead of shipping).
 docker build -t "$IMAGE_NAME" -f "$DIR/Dockerfile" "$DIR" \
-    --build-arg STANOK_DIGEST="$STANOK_DIGEST"
+    --build-arg STANOK_DIGEST="$STANOK_DIGEST" \
+    --build-arg CLI_JS_SHA="$CLI_JS_SHA" \
+    --build-arg PKG_JSON_SHA="$PKG_JSON_SHA" \
+    --build-arg RG_SHA="$RG_SHA"
 
 # Image delivery (operator 2026-10-12): push to the node-local registry so k3s
 # pulls BY DIGEST (launcher/k8s.py resolves the RepoDigest at launch). This

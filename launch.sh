@@ -25,6 +25,9 @@ fi
 # default: CLAUDE_TMPDIR is the TMPDIR the nested sandbox runtime exports
 # (cli.js aG8), default /tmp/claude.
 mkdir -p "/tmp/claude-$(id -u)" && chmod 700 "/tmp/claude-$(id -u)"
-export CLAUDE_TMPDIR="/tmp/claude-$(id -u)"
+# declare/export split (shellcheck SC2155): `export x="$(cmd)"` masks a
+# failing command substitution — the plain assignment lets the failure show.
+CLAUDE_TMPDIR="/tmp/claude-$(id -u)"
+export CLAUDE_TMPDIR
 
 exec "$PY" "$DIR/launcher/stanok.py" "$@"
