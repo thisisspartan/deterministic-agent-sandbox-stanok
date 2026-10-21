@@ -20,6 +20,8 @@ import signal
 import subprocess
 import sys
 import time
+from typing import Any
+
 from launcher import k8s, logs, stanok
 from launcher.abort import _early_abort, _pid_alive  # wave A step 1: facade — these names ARE launcher.abort's
 from launcher.config import Config, RunState
@@ -41,7 +43,8 @@ from launcher.ticket import (
 
 
 
-def _fail_early(cfg, run_state, job: dict, start_ts: int, code: int, error: str) -> int:
+def _fail_early(cfg: Config, run_state: RunState, job: dict[str, Any],
+                start_ts: int, code: int, error: str) -> int:
     """Early-failure exit for cmd_run: write the summary, remove the marker.
 
     The same three steps every pre-session refusal in cmd_run needs (ticket
@@ -59,7 +62,7 @@ def _fail_early(cfg, run_state, job: dict, start_ts: int, code: int, error: str)
     return int(code)
 
 
-def _open_run_state(cfg, label: str) -> tuple:
+def _open_run_state(cfg: Config, label: str) -> tuple[RunState, int]:
     """Per-run setup: dirs, the logging sink, RunState, the .running marker.
 
     Returns (run_state, start_ts). The logging sink is a per-run handle (see
@@ -96,7 +99,8 @@ def _open_run_state(cfg, label: str) -> tuple:
     return run_state, start_ts
 
 
-def _read_ticket_contract(cfg, ticket_path: str) -> tuple:
+def _read_ticket_contract(cfg: Config,
+                         ticket_path: str) -> tuple[str, list[str], list[str], bool, list[str], str]:
     """Ticket-scoped invariant (W2.1): read the ticket and parse its header.
 
     Returns (ticket_prompt, declared_paths, edit_paths, reset_none,
@@ -121,7 +125,8 @@ def _read_ticket_contract(cfg, ticket_path: str) -> tuple:
     return ticket_prompt, declared_paths, edit_paths, reset_none, accept_paths, accept_mode
 
 
-def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: int,
+def _run_session(cfg: Config, run_state: RunState, job: dict[str, Any],
+                 ticket_prompt: str, local_retries: int,
                  plan: SessionPlan, start_ts: int) -> int:
     """Run the continuous session, then finalize: Opik sample, summary, marker."""
     rc = 1
@@ -169,7 +174,7 @@ def _run_session(cfg, run_state, job: dict, ticket_prompt: str, local_retries: i
     return rc
 
 
-def cmd_run(cfg, args) -> int:
+def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
     try:
         if os.getpgid(0) != os.getpid():
             os.setpgid(0, 0)
@@ -240,7 +245,7 @@ def _read_failures(evidence_dir: str) -> list[str]:
         return [line for line in f.read().splitlines() if line]
 
 
-def _status_dict(cfg, label: str) -> dict:
+def _status_dict(cfg: Config, label: str) -> dict[str, Any]:
     """The status JSON `status` prints — single source, also used by `wait`.
 
     Precedence: a live `.running` marker (running/dead) over a summary.json
@@ -283,7 +288,7 @@ def _status_dict(cfg, label: str) -> dict:
     return {"state": "missing"}
 
 
-def cmd_status(cfg, label: str) -> int:
+def cmd_status(cfg: Config, label: str) -> int:
     print(json.dumps(_status_dict(cfg, label)))
     return 0
 
@@ -292,7 +297,7 @@ WAIT_POLL_S = 5
 WAIT_TIMEOUT_S = 2700  # 45 min — the cap §4 of CLAUDE.supervisor.md names
 
 
-def cmd_wait(cfg, label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:
+def cmd_wait(cfg: Config, label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:
     """Block until the run reaches a terminal state, print its final status.
 
     This is the ONE primitive behind `run --follow` and the standalone
@@ -320,7 +325,7 @@ def cmd_wait(cfg, label: str, timeout_s: int = WAIT_TIMEOUT_S) -> int:
         time.sleep(WAIT_POLL_S)
 
 
-def cmd_stop(cfg, label: str) -> int:
+def cmd_stop(cfg: Config, label: str) -> int:
     evidence_dir, _ = cfg.label_paths(label)
     marker = os.path.join(evidence_dir, ".running")
     if not os.path.exists(marker):
@@ -372,16 +377,16 @@ def cmd_stop(cfg, label: str) -> int:
 # ==================================================================================
 # Launch orchestration (R2: the former launch.sh, in Python)
 # ==================================================================================
-def _inner_run_argv(cfg, args) -> list:
+def _inner_run_argv(cfg: Config, args: argparse.Namespace) -> list[str]:
     """The container-side / child-side `run` argv (single source)."""
-    inner = ["run", args.ticket]
+    inner: list[str] = ["run", args.ticket]
     if args.local_retries != cfg.default_retries:
         inner += ["--local-retries", str(args.local_retries)]
     inner += ["--", args.label, *args.extra]
     return inner
 
 
-def launch_background(cfg, args) -> int:
+def launch_background(cfg: Config, args: argparse.Namespace) -> int:
     """Background run (replaces launch.sh's nohup branch): a detached
     self-spawn executes the sync path — the child writes the marker with its
     own pid and supervises the k8s runtime (or runs in-process under
@@ -429,7 +434,7 @@ def launch_background(cfg, args) -> int:
 # ==================================================================================
 # CLI entry point
 # ==================================================================================
-def _resolve_ticket(cfg, arg: str) -> str:
+def _resolve_ticket(cfg: Config, arg: str) -> str:
     candidates = [
         os.path.join(os.path.dirname(cfg.repo_root), arg),  # project root (highest priority)
         os.path.join(cfg.repo_root, arg),                    # machine root
@@ -441,7 +446,7 @@ def _resolve_ticket(cfg, arg: str) -> str:
     return candidates[0]
 
 
-def _build_parser(cfg) -> argparse.ArgumentParser:
+def _build_parser(cfg: Config) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="stanok",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -499,7 +504,7 @@ def _build_parser(cfg) -> argparse.ArgumentParser:
     return p
 
 
-def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
+def _launch_gates(cfg: Config, args: argparse.Namespace) -> "tuple[ExitCode, str] | None":
     """The launch gate order — the documented rc contract (ARCHITECTURE.md).
 
     One readable sequence: label-guard (rc=15) -> ROLE-LEAK (rc=24) ->
@@ -563,7 +568,7 @@ def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":
     return None
 
 
-def _capture_start_commit(cfg) -> None:
+def _capture_start_commit(cfg: Config) -> None:
     """W2.6 provenance (plan 2026-10-08, step 1): capture HEAD on the HOST
     before any launch and export it as STANOK_START_COMMIT — the container
     never runs git (in a worktree `.git` is a file pointing outside the
@@ -585,7 +590,7 @@ def _capture_start_commit(cfg) -> None:
         log(f"WARN: commit provenance: git rev-parse HEAD error: {e}")
 
 
-def _lock_key(cfg) -> "str | None":
+def _lock_key(cfg: Config) -> "str | None":
     """D2 (plan 2026-10-08, step 3): the lock key is the shared GIT COMMON
     DIR, not the repo path — a worktree has a different path but the same
     git directory, so two runs from two worktrees of one repo serialize
