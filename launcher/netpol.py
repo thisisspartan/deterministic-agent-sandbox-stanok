@@ -52,7 +52,7 @@ def model_ip() -> str:
             "address — a NetworkPolicy ipBlock needs a literal address")
 
 
-def netpol_variables() -> dict:
+def netpol_variables() -> dict[str, str]:
     # NAMESPACE: the effective Job namespace (STANOK_K8S_NAMESPACE) — the same
     # knob the Job templates render (k8s._namespace). A NetworkPolicy only
     # selects Pods in its own namespace: rendering it to a hardcoded "default"
@@ -87,7 +87,7 @@ def revision(text: str) -> str:
     return hashlib.sha256(canonical(text).encode("utf-8")).hexdigest()[:12]
 
 
-def render_netpol_with_revision() -> tuple:
+def render_netpol_with_revision() -> tuple[str, str]:
     """Two-pass render: addresses first, then the revision of the canonical
     semantic content, then the name substitution. Returns (manifest, revision)."""
     rendered = k8s.render_template(k8s._read_manifest(TEMPLATE), netpol_variables())

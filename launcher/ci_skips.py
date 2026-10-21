@@ -31,7 +31,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 
-def _nodeid(tc):
+def _nodeid(tc: ET.Element) -> str:
     name = tc.get("name") or ""
     f = tc.get("file")
     if f:
@@ -46,17 +46,17 @@ def _nodeid(tc):
     return f"<unresolved>::{name}"
 
 
-def extract(xml_path):
+def extract(xml_path: str) -> list[str]:
     """Return the sorted list of nodeids for skipped testcases."""
     root = ET.parse(xml_path).getroot()
-    out = []
+    out: list[str] = []
     for tc in root.iter("testcase"):
         if tc.find("skipped") is not None:
             out.append(_nodeid(tc))
     return sorted(out)
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
     if len(argv) != 1:
         print("usage: python -m launcher.ci_skips <junit-xml>", file=sys.stderr)
         return 2

@@ -6,6 +6,7 @@ One best-effort HTTP sample after the verdict; never polled during a run.
 import json
 import os
 import urllib.request
+from typing import Any
 
 from launcher import config
 
@@ -43,7 +44,7 @@ def _opik_trace_count() -> int | None:
         return None
 
 
-def _trace_matches(trace: dict, session_id: str) -> bool:
+def _trace_matches(trace: dict[str, Any], session_id: str) -> bool:
     """One trace belongs to this session iff metadata.thread_id matches
     (the same client-side filter as opik-traces.py, CC-159)."""
     return (trace.get("metadata") or {}).get("thread_id") == session_id
@@ -86,7 +87,7 @@ def session_trace_count(session_id: str, since_iso: str) -> int | None:
     return count
 
 
-def opik_traces_field():
+def opik_traces_field() -> str | int | None:
     """The value of summary.json's `opik_traces` field (S4, SPEC-NETWORK R5).
 
     In the worker Pod the field is the literal "disabled": the Pod's

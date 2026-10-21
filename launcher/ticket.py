@@ -17,8 +17,18 @@ test_session_plan.py / test_doctor.py.
 
 import os
 import re
+from typing import Protocol
+
 from launcher import zones
 from launcher.verify import _protected_files
+
+
+class TicketConfig(Protocol):
+    """What ticket.py actually needs from a cfg: the repo root (Q14, 2026-10-21
+    mypy-strict migration). Config satisfies this structurally; so does the
+    deliberate SimpleNamespace(repo_root=...) at ticketcheck's CLI entry."""
+
+    repo_root: str
 
 # The ONE kind list for a ticket header (CC-132). `scripts` is a ZONE, not a
 # kind: a path under scripts/ is declared with impl:/test:/docs:/edit: like
@@ -42,7 +52,7 @@ _ACCEPT_NONE_RE = re.compile(r"^accept:\s*none\s*$", re.IGNORECASE)
 _KEYWORD_PREFIX_RE = re.compile(r"^(impl|test|docs|edit|accept|reset)\s*:", re.IGNORECASE)
 
 
-def declared_carveout(cfg, rel: str) -> str | None:
+def declared_carveout(cfg: TicketConfig, rel: str) -> str | None:
     """The declared-path rule: the carve-out a declared path implies, or None
     if the path is undeclarable (T4, CC-135; CC-258: the Docker rw-mount
     derivation is gone — this now serves only the declaration gate).
@@ -106,13 +116,13 @@ def declared_carveout(cfg, rel: str) -> str | None:
     return None
 
 
-def _validate_declared_path(cfg, rel: str) -> bool:
+def _validate_declared_path(cfg: TicketConfig, rel: str) -> bool:
     """parse_ticket_header's gate: a path is declarable exactly when
     declared_carveout accepts it."""
     return declared_carveout(cfg, rel) is not None
 
 
-def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bool, list[str], str]:
+def parse_ticket_header(cfg: TicketConfig, ticket_text: str) -> tuple[list[str], list[str], bool, list[str], str]:
     """Ticket-scoped invariant (W2.1): the header is the leading block of
     literal `impl: <path>` / `test: <path>` / `docs: <path>` / `edit: <path>`
     lines plus an optional `reset: none` escape hatch for extension tickets.
@@ -224,7 +234,7 @@ def parse_ticket_header(cfg, ticket_text: str) -> tuple[list[str], list[str], bo
     return declared, edit_paths, reset_none, accept_paths, accept_mode
 
 
-def _validate_accept_paths(cfg, accept_entries: list[str],
+def _validate_accept_paths(cfg: TicketConfig, accept_entries: list[str],
                           declared: list[str]) -> list[str]:
     """G4 validation of `accept:` paths (fail-closed, ValueError -> rc=13).
 
@@ -266,7 +276,7 @@ def _validate_accept_paths(cfg, accept_entries: list[str],
     return list(accept_entries)
 
 
-def assert_create_paths_are_new(cfg, declared: list[str], edit_paths: list[str]) -> None:
+def assert_create_paths_are_new(cfg: TicketConfig, declared: list[str], edit_paths: list[str]) -> None:
     """CC-133: create-vs-edit is a header CLAIM that nothing used to verify.
 
     A path declared as a create (`impl:`/`test:`/`docs:`) that ALREADY EXISTS
@@ -305,7 +315,7 @@ def assert_create_paths_are_new(cfg, declared: list[str], edit_paths: list[str])
             )
 
 
-def assert_edit_paths_are_not_protected(cfg, edit_paths: list[str]) -> None:
+def assert_edit_paths_are_not_protected(cfg: TicketConfig, edit_paths: list[str]) -> None:
     """CC-206: `edit:` on a protected file is a ticket defect (rc=13),
     refused BEFORE any container start.
 
