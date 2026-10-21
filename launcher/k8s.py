@@ -174,7 +174,11 @@ def extract_payload(text: str, nonce: str):
     Decompressed-size guard (R4, Z.ai external review 2026-10-20, operator
     order 2026-10-21): a block whose extracted files total more than
     PAYLOAD_MAX_DECOMPRESSED_BYTES fails closed like a malformed block
-    (None) — the host never materializes an unbounded gzip-tar."""
+    (None). Scope of the guard (B1a review 2026-10-21): it bounds what the
+    host RETAINS — the extraction (gzip.decompress + per-member reads) runs
+    before this check, so peak materialization during extraction is not
+    bounded by the cap; a peak-bounded streaming read is a candidate for
+    #312."""
     pattern = (re.escape(begin_marker(nonce)) + r"\s*(.*?)\s*"
                + re.escape(end_marker(nonce)))
     blocks = re.findall(pattern, text, re.DOTALL)

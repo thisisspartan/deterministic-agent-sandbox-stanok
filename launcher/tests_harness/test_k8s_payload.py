@@ -80,7 +80,8 @@ def test_decompressed_size_cap():
     # the limit is accepted ("превышает" is strict >); a total one byte over
     # fails closed — None, like every malformed block. The block payload
     # stays small because b"\0" compresses: the cap measures the DECOMPRESSED
-    # total, which is exactly what the host must not materialize unbounded.
+    # total the host must not RETAIN unbounded (B1a 2026-10-21: extraction
+    # materializes before the check — peak is not bounded; #312 candidate).
     # A real payload (pod_runner's five flat files) is orders of magnitude
     # below 64MiB — this guard bounds only pathological/adversarial blocks.
     assert k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES == 64 * 1024 * 1024
