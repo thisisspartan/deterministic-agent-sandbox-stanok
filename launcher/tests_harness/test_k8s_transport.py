@@ -14,7 +14,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_transport.py -q
 import base64
 import subprocess
 
-from launcher import k8s
+from launcher import payload
 
 
 def _make_repo(tmp_path):
@@ -33,10 +33,10 @@ def _make_repo(tmp_path):
 
 def test_pack_unpack_roundtrip(tmp_path):
     repo = _make_repo(tmp_path)
-    blob = k8s.pack_tree(str(repo))
+    blob = payload.pack_tree(str(repo))
     dest = tmp_path / "out"
     dest.mkdir()
-    k8s.unpack_tree(blob, str(dest))
+    payload.unpack_tree(blob, str(dest))
     assert (dest / "src" / "a.py").read_text(encoding="utf-8") == "X = 1\n"
     # The Pod re-inits its own git: the transport carries the tree, not .git.
     assert not (dest / ".git").exists()
@@ -44,8 +44,8 @@ def test_pack_unpack_roundtrip(tmp_path):
 
 def test_pack_is_compact_base64_and_guarded(tmp_path):
     repo = _make_repo(tmp_path)
-    blob = k8s.pack_tree(str(repo))
+    blob = payload.pack_tree(str(repo))
     base64.b64decode(blob)  # must be valid base64 (ConfigMap value)
     assert len(blob) < 100_000  # a small repo packs small (gzip works)
-    assert k8s.transport_ok(blob) is True
-    assert k8s.transport_ok("x" * (k8s.TRANSPORT_MAX_B64 + 1)) is False
+    assert payload.transport_ok(blob) is True
+    assert payload.transport_ok("x" * (payload.TRANSPORT_MAX_B64 + 1)) is False

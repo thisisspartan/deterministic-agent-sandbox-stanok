@@ -40,22 +40,16 @@ CC-232: a pre-flight doctor gate (cluster health + manifest contract tests)
 runs fail-closed before any resource is created — rc=16 on failure.
 """
 
-import base64
 import dataclasses
-import gzip
-import io
 import json
 import os
-import re
 import shutil
 import subprocess
-import tarfile
 import tempfile
 import time
-import uuid
 from typing import TYPE_CHECKING, Any
 
-from launcher import gates, kube, lifecycle, opik, peaks, patchgate, preflight, verify
+from launcher import gates, kube, lifecycle, payload, peaks, patchgate, preflight, summary, verify
 from launcher.abort import _early_abort  # wave A step 1: was a lazy import from cli (the cli->k8s cycle was its only reason; abort imports neither)
 from launcher.config import RunState
 from launcher.exitcodes import ExitCode
@@ -76,31 +70,6 @@ LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 # Wave A portion 2 (2026-10-21): K8S_DIR moved with _read_manifest to
 # launcher/kube.py — the manifest directory is read only there.
 
-# The ConfigMap size guard (O4): measured 2026-10-10 — full git bundle
-# 1,308,067B > the threshold; `git archive HEAD | gzip | base64` ~240KB.
-# Fail-closed BEFORE any kubectl call.
-TRANSPORT_MAX_B64 = 800_000
-
-# R4 (Z.ai external review 2026-10-20, operator order 2026-10-21): the
-# decompressed-payload cap. The payload is the Pod's evidence channel; a
-# pathological or hostile gzip-tar block can decompress to an arbitrary
-# size, and the host must not materialize it unconditionally. An extracted
-# total above this limit is rejected whole (None — the run is treated as
-# aborted), fail-closed like the member-name guard in extract_payload.
-# Real payloads are the five flat files pod_runner.py:154-161 emits, far
-# below 64MiB; the cap bounds only malformed/adversarial blocks.
-# #312 (B1a, host-side — precedent CC-266): the budget is enforced IN-STREAM
-# (see _bounded_gunzip below), not post-hoc — peak materialization is O(cap).
-# Pair tests: tests_harness/test_k8s_payload.py (R4 + #312 pairs).
-PAYLOAD_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
-
-# #312 (B1a): headroom INSIDE the stream budget for tar STRUCTURE — 512-byte
-# headers/blocks, padding, pax attributes. An honest payload at the file-sum
-# cap carries ~10 KiB of structure (the five flat files); 1 MiB admits that
-# with ~100x margin, while a header FLOOD merely consumes its own budget and
-# is rejected fail-closed like every malformed shape.
-PAYLOAD_TAR_OVERHEAD_BYTES = 1 * 1024 * 1024
-
 # C3 (review 2026-10-17): the fresh Pod's own `git apply` failure must exit
 # with a code DISJOINT from every run.sh/runner code (run.sh header:
 # 0,1,2,3,4,5,6,7,124; pytest 0-5, node --test 0/1, jq 0/5) so the host can
@@ -113,144 +82,26 @@ FRESH_APPLY_FAIL_RC = 20
 
 
 # ==================================================================================
-# Pure helpers (testable without a cluster)
+# #316 (2026-10-22, host-side — precedent CC-266): the transport/codec cluster
+# (TRANSPORT_MAX_B64, PAYLOAD_MAX_DECOMPRESSED_BYTES, PAYLOAD_TAR_OVERHEAD_BYTES,
+# new_nonce/begin_marker/end_marker, pack_tree/unpack_tree/transport_ok,
+# build_payload/_bounded_gunzip/_GUNZIP_CHUNK/extract_payload,
+# rewrite_tracing_endpoint) moved verbatim to launcher/payload.py (strict from
+# birth). Single home: k8s holds no def, no constant and no re-export; the
+# call sites here (host_launch_k8s, _fresh_job, apply_patch_scratch) call them
+# as payload._X — a test stub on a name there intercepts every call site.
+# The reason for the separate home: pod_runner.py runs INSIDE the Pod and
+# needs only the pure codec helpers; importing them through this host module
+# pulled the whole kubectl/Job/patch-gate orchestrator into the Pod runtime
+# (the layer finding of the 2026-10-22 pre-flight review). payload.py imports
+# nothing from launcher and is Pod-importable; pod_runner calls
+# payload.rewrite_tracing_endpoint / payload.build_payload directly. Guard:
+# tests_harness/test_payload_facade.py. The host evidence stamps
+# (stamp_opik_traces, _stamp_summary_identity, _stamp_resource_peaks) moved
+# to launcher/summary.py — the evidence-schema module whose docstring already
+# declares patch_sha256/image_digest/opik_traces/resource_peaks as
+# host-stamped fields; k8s calls them as summary._X.
 # ==================================================================================
-def new_nonce() -> str:
-    """Host-generated per-run nonce (uuid4): the payload block must carry
-    exactly this nonce — a stale or foreign block is never accepted."""
-    return uuid.uuid4().hex
-
-
-def begin_marker(nonce: str) -> str:
-    return f"__STANOK_EVIDENCE_BEGIN_{nonce}__"
-
-
-def end_marker(nonce: str) -> str:
-    return f"__STANOK_EVIDENCE_END_{nonce}__"
-
-
-def pack_tree(repo_root: str) -> str:
-    """The tree transport: `git archive HEAD | gzip | base64` — the tracked
-    tree only (no .git: the Pod re-inits its own git for the patch)."""
-    p = subprocess.run(["git", "archive", "HEAD"], cwd=repo_root,
-                       capture_output=True, check=True)
-    return base64.b64encode(gzip.compress(p.stdout, mtime=0)).decode("ascii")
-
-
-def unpack_tree(blob: str, dest: str) -> None:
-    raw = gzip.decompress(base64.b64decode(blob))
-    with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
-        # fail closed (wave C F5; corrected by measurement 2026-10-20):
-        # unpack_tree is HOST-side only — the host runtime is the launcher
-        # venv (measured 3.13.13), which HAS the `filter` kwarg; the Pod
-        # image is measured 3.11.2 with NO `filter` kwarg in extractall,
-        # which is exactly why pod_runner._unpack keeps the TypeError
-        # fallback. The old host-side `except TypeError` silently dropped
-        # the filter on a runtime where it cannot occur; removed — a
-        # TypeError must propagate.
-        tf.extractall(dest, filter="data")
-
-
-def transport_ok(blob: str) -> bool:
-    return len(blob) <= TRANSPORT_MAX_B64
-
-
-def build_payload(files: dict[str, bytes]) -> str:
-    """One base64 gzip-tar block: {name: bytes} -> the Pod's stdout payload."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for name, data in files.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            tf.addfile(info, io.BytesIO(data))
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-# #312: the streaming window of _bounded_gunzip — output is decompressed in
-# capped reads so an over-budget stream aborts before its bytes exist.
-_GUNZIP_CHUNK = 256 * 1024
-
-
-def _bounded_gunzip(compressed: bytes, limit: int) -> "bytes | None":
-    """#312 (B1a): gunzip with a hard output budget. Returns the decompressed
-    stream, or None the MOMENT it would exceed `limit` — gzip.GzipFile.read(n)
-    caps each read, so the output never grows past limit + one chunk and a
-    bomb is rejected mid-stream, before its bytes are materialized. Malformed
-    input raises exactly like the plain gzip.decompress this replaces."""
-    out = bytearray()
-    with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as gz:
-        while True:
-            chunk = gz.read(_GUNZIP_CHUNK)
-            if not chunk:
-                return bytes(out)
-            out += chunk
-            if len(out) > limit:
-                return None
-
-
-def extract_payload(text: str, nonce: str) -> "dict[str, bytes] | None":
-    """The exactly-one rule: one and only one nonce-matching block, else
-    None (the run is treated as aborted, never a verdict).
-
-    Member-name guard (operator spec 2026-10-20, external-review finding):
-    the Pod is an external boundary and its member names reach
-    `os.path.join(live_dir, name)` at the write site — a directory component
-    or a leading '/' would write outside live_dir. A name must be a bare
-    flat filename: `os.path.basename(name) != name or
-    name.startswith(("/", ".."))` fails closed like a malformed block
-    (None, the run is aborted). `''` and `'.'` collapse os.path.join to
-    live_dir itself — IsADirectoryError at the write site, not a clean
-    abort (B1a review 2026-10-20) — rejected by the same guard.
-    pod_runner.py:154-161 emits only flat names (changes.patch,
-    internal_rc.txt, summary.json, launcher.stdout.log, failures.log), so
-    a real payload never trips this.
-
-    Decompressed-size guard (R4, Z.ai external review 2026-10-20, operator
-    order 2026-10-21): a block whose extracted files total more than
-    PAYLOAD_MAX_DECOMPRESSED_BYTES fails closed like a malformed block
-    (None). #312 (B1a 2026-10-21, host-side — precedent CC-266) makes the
-    budget IN-STREAM instead of post-hoc: the gunzip is bounded by the cap
-    plus tar structure overhead (PAYLOAD_TAR_OVERHEAD_BYTES), and each
-    member read is capped by the remaining budget — peak materialization
-    is O(cap), so an over-cap bomb aborts mid-stream, before its bytes
-    exist. Pair tests: tests_harness/test_k8s_payload.py (R4 + #312 pairs,
-    the latter with a tracemalloc peak)."""
-    pattern = (re.escape(begin_marker(nonce)) + r"\s*(.*?)\s*"
-               + re.escape(end_marker(nonce)))
-    blocks = re.findall(pattern, text, re.DOTALL)
-    if len(blocks) != 1:
-        return None
-    # #312 (B1a): the budget starts at the gunzip — the decompressed stream
-    # itself is capped (file bytes + tar structure overhead), so a bomb never
-    # materializes; the b64 blob is already bounded by the input text.
-    raw = _bounded_gunzip(base64.b64decode(blocks[0]),
-                          PAYLOAD_MAX_DECOMPRESSED_BYTES
-                          + PAYLOAD_TAR_OVERHEAD_BYTES)
-    if raw is None:
-        return None
-    files: dict[str, bytes] = {}
-    total = 0
-    with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
-        for m in tf.getmembers():
-            if m.isfile():
-                name = m.name
-                if (not name or name == "."
-                        or os.path.basename(name) != name
-                        or name.startswith(("/", ".."))):
-                    return None
-                member_file = tf.extractfile(m)
-                if member_file is None:  # fail-closed like the name checks above
-                    return None
-                # #312 (B1a): the R4 budget enforced per member — the read is
-                # capped by what remains, so an over-cap total is rejected
-                # BEFORE the bytes exist (not post-hoc after the loop).
-                remaining = PAYLOAD_MAX_DECOMPRESSED_BYTES - total
-                data = member_file.read(remaining + 1)
-                if len(data) > remaining:
-                    return None
-                files[name] = data
-                total += len(data)
-    return files
 
 
 # Wave A portion 4 (2026-10-21): the patch-gate cluster (_DIFF_HEADER_PREFIX
@@ -261,8 +112,8 @@ def extract_payload(text: str, nonce: str) -> "dict[str, bytes] | None":
 # patchgate._X — a test stub on a name there intercepts every call site.
 # Guard: tests_harness/test_patchgate_facade.py. _live_tree_drift and the
 # scratch cluster (apply_patch_scratch/scratch_contract_violations) stay here:
-# they belong to the transport/contract machinery (unpack_tree,
-# verify._compare_manifests, gates.dirty_tree_gate) of a later portion.
+# they belong to the transport/contract machinery (payload.unpack_tree,
+# verify._compare_manifests, gates.dirty_tree_gate).
 
 
 def _live_tree_drift(cfg: "Config") -> str | None:
@@ -326,7 +177,7 @@ def apply_patch_scratch(tree_blob: str, patch_text: str) -> str:
     scratch = None
     try:
         scratch = tempfile.mkdtemp(prefix="stanok-scratch-")
-        unpack_tree(tree_blob, scratch)
+        payload.unpack_tree(tree_blob, scratch)
         if patch_text.strip():
             patch_file = os.path.join(scratch, ".changes.patch")
             with open(patch_file, "w", encoding="utf-8") as f:
@@ -358,35 +209,6 @@ def scratch_contract_violations(cfg: "Config", before: dict[str, str],
     scratch_cfg = dataclasses.replace(cfg, repo_root=scratch_dir)
     return verify._compare_manifests(before, verify._tests_manifest(scratch_cfg),
                                      declared)
-
-
-def rewrite_tracing_endpoint(settings_text: str, endpoint: str) -> str:
-    """CC-225 (operator 2026-10-10): the in-Pod Opik config is ENV-only.
-    The extracted settings carry BETA_TRACING_ENDPOINT=http://localhost:8080/
-    ... — inside the Pod localhost is the Pod, so the OTLP export is silently
-    dropped (live cc221..cc224: zero traces, opik_traces "disabled"). The
-    host passes the reachable backend URL through the Job env
-    (STANOK_OPIK_TRACE_URL); the Pod runner rewrites the settings value from
-    that env BEFORE the base commit — settings.env is applied by claude
-    natively (session.py:530 --settings), and the rewrite is part of the
-    Pod's baseline, not a tree change. An empty endpoint returns the settings
-    unchanged (byte-for-byte)."""
-    if not endpoint:
-        return settings_text
-    data = json.loads(settings_text)
-    data.setdefault("env", {})["BETA_TRACING_ENDPOINT"] = endpoint
-    return json.dumps(data, ensure_ascii=False, indent=2)
-
-
-def stamp_opik_traces(summary: dict[str, Any], count: int | None) -> dict[str, Any]:
-    """CC-225: the host is the only party that can reach the Opik backend,
-    so the host — not the Pod — issues the opik_traces field. The in-Pod
-    summary carries the literal "disabled" (STANOK_IN_CONTAINER=1); the host
-    replaces it with the trace count measured for THIS session. None (Opik
-    unreachable) never masquerades as 0 — the field stays as written."""
-    if count is not None:
-        summary["opik_traces"] = count
-    return summary
 
 
 # Wave A portion 2 (2026-10-21): render_template / _read_manifest and the
@@ -456,14 +278,14 @@ def _fresh_job(cfg: "Config", ns: str, fresh_name: str, cm_tree: str,
                peaks_out: dict[str, Any] | None = None) -> tuple[int, str]:
     try:
         # BL-4 (b): the patch transport guard — symmetry with the tree guard
-        # (host_launch_k8s, TRANSPORT_MAX_B64): fail closed BEFORE the
+        # (host_launch_k8s, payload.TRANSPORT_MAX_B64): fail closed BEFORE the
         # kubectl call. The classification is unchanged (EXEC_ERROR -> the
         # caller's rc=16); the guard only moves the failure before any
         # cluster call.
         patch_size = os.path.getsize(patch_file)
-        if patch_size > TRANSPORT_MAX_B64:
+        if patch_size > payload.TRANSPORT_MAX_B64:
             return (1, f"EXEC_ERROR: patch transport {patch_size}B exceeds "
-                       f"the ConfigMap limit {TRANSPORT_MAX_B64}B — "
+                       f"the ConfigMap limit {payload.TRANSPORT_MAX_B64}B — "
                        "fail-closed before any kubectl call")
         kube._kubectl_checked("create", "configmap", cm_patch, "-n", ns,
                         f"--from-file=changes.patch={patch_file}")
@@ -633,7 +455,7 @@ def _run_worker(cfg: "Config", live_dir: str, ns: str, label: str,
 
 
 def _classify_missing_payload(cfg: "Config", label: str,
-                             payload: dict[str, bytes] | None, pod: str | None,
+                             payload_files: dict[str, bytes] | None, pod: str | None,
                              ns: str, job_name: str,
                              stream_failed: bool) -> int:
     """The missing-payload classification (moved verbatim from
@@ -654,8 +476,8 @@ def _classify_missing_payload(cfg: "Config", label: str,
     # summary: name it in the abort log — the session ran and died,
     # the evidence transport did not deliver a verdict.
     internal = ""
-    if payload is not None:
-        internal = payload.get("internal_rc.txt", b"").strip().decode(
+    if payload_files is not None:
+        internal = payload_files.get("internal_rc.txt", b"").strip().decode(
             "ascii", "replace")
     # Deadline contract (external review 2026-10-16): the Job's own
     # condition says DeadlineExceeded — the session outlived the Job
@@ -679,7 +501,7 @@ def _classify_missing_payload(cfg: "Config", label: str,
     return int(ExitCode.CHILD_DIED)
 
 
-def _stage_patch(payload: dict[str, bytes],
+def _stage_patch(payload_files: dict[str, bytes],
                  live_dir: str) -> tuple[str, str, str, str | None]:
     """Patch identity staging (moved verbatim from host_launch_k8s). The hash
     of the EXACT payload bytes is computed ONCE here; the on-disk patch file
@@ -690,7 +512,7 @@ def _stage_patch(payload: dict[str, bytes],
     violation BEFORE any gate/scratch/fresh/apply operation — no U+FFFD
     substitution. Returns (patch_file, patch_sha, patch_text,
     decode_violation)."""
-    patch_bytes = payload.get("changes.patch", b"")
+    patch_bytes = payload_files.get("changes.patch", b"")
     patch_sha = patchgate.patch_sha256(patch_bytes)
     try:
         patch_text = patchgate.strict_patch_text(patch_bytes)
@@ -706,39 +528,16 @@ def _stage_patch(payload: dict[str, bytes],
     return patch_file, patch_sha, patch_text, decode_violation
 
 
-def _stamp_summary_identity(live_dir: str, patch_sha: str, accept_mode: str,
-                           accept_paths: list[str], pod: str | None, ns: str,
-                           run_start_iso: str) -> None:
-    """Host identity stamping into the evidence summary (moved verbatim from
-    host_launch_k8s): patch_sha256; the acceptance contract (G4 — host-stamped
-    from the HOST's own ticket parse, the Pod is not its own judge); image
-    provenance (the Pod's own containerStatuses record; None is explicit,
-    with a WARN, same as commit_sha); opik_traces (CC-225 — only the host
-    reaches the Opik backend, None never masquerades as 0). Fail-soft on an
-    unreadable summary (except -> pass), exactly as before."""
-    sum_path = os.path.join(live_dir, "summary.json")
-    try:
-        with open(sum_path, encoding="utf-8") as f:
-            summary = json.load(f)
-        summary["patch_sha256"] = patch_sha
-        summary["acceptance"] = {"mode": accept_mode,
-                                 "paths": list(accept_paths)}
-        image_digest = lifecycle._pod_image_id(pod, ns)
-        summary["image_digest"] = image_digest
-        if image_digest is None:
-            log("WARN: image provenance: Pod imageID unavailable — "
-                "publishing image_digest=None")
-        sid = summary.get("session_id")
-        if sid:
-            stamp_opik_traces(
-                summary, opik.session_trace_count(sid, run_start_iso))
-        with open(sum_path, "w", encoding="utf-8") as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
-    except (OSError, json.JSONDecodeError):
-        pass
+# #316 (2026-10-22): the host identity-stamp cluster (stamp_opik_traces,
+# _stamp_summary_identity, _stamp_resource_peaks) moved verbatim to
+# launcher/summary.py (its docstring already declares patch_sha256/
+# image_digest/opik_traces/resource_peaks as host-stamped fields; the
+# stamps belong with the schema they stamp). Single home: k8s holds no def
+# and no re-export; host_launch_k8s calls them as summary._X. Guard:
+# tests_harness/test_payload_facade.py.
 
 
-def _check_internal_rc(cfg: "Config", label: str, payload: dict[str, bytes],
+def _check_internal_rc(cfg: "Config", label: str, payload_files: dict[str, bytes],
                       worker_rc: int) -> int | None:
     """Verdict cross-check (moved verbatim from host_launch_k8s, external
     review 2026-10-16): pod_runner ships the session subprocess's own exit
@@ -751,7 +550,7 @@ def _check_internal_rc(cfg: "Config", label: str, payload: dict[str, bytes],
     or None."""
     internal_rc = None
     try:
-        internal_rc = int(payload["internal_rc.txt"].strip())
+        internal_rc = int(payload_files["internal_rc.txt"].strip())
     except (KeyError, ValueError):
         pass
     if internal_rc is not None and internal_rc != worker_rc:
@@ -823,25 +622,6 @@ def _run_fresh_check(cfg: "Config", contract_violations: list[str], ns: str,
     if fresh_tail.startswith("EXEC_ERROR:"):
         return None, fresh_tail, fresh_peaks
     return (fresh_rc, fresh_tail), None, fresh_peaks
-
-
-def _stamp_resource_peaks(summary_path: str, worker_peaks: dict[str, Any] | None,
-                          fresh_peaks: dict[str, Any] | None) -> None:
-    """Resource measurement stamp (moved verbatim from host_launch_k8s;
-    operator decision 2026-10-16): host-stamped like patch_sha256 — the
-    OBSERVED kubelet peaks of this run, closing the "pending measured peaks"
-    gap of bb5eed6. None = no sample ever succeeded (never a 0 masquerade).
-    These are kubelet numbers, not truth claims (gVisor caveat, BL-4)."""
-    try:
-        with open(summary_path, encoding="utf-8") as f:
-            summary = json.load(f)
-        summary["resource_peaks"] = {"worker": worker_peaks,
-                                     "fresh": fresh_peaks}
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
-    except (OSError, json.JSONDecodeError):
-        log("WARN: resource_peaks: summary.json unreadable — field not "
-            "stamped")
 
 
 def _apply_final_pass(cfg: "Config", label: str, patch_file: str,
@@ -1005,22 +785,22 @@ def host_launch_k8s(cfg: "Config", args: "argparse.Namespace",
     # recompute compares against this (the live tree is untouched during the
     # run; the tree the verdict was computed against is the scratch).
     before_manifest = verify.contract_snapshot(cfg)
-    nonce = new_nonce()
+    nonce = payload.new_nonce()
     deadline = job_deadline(cfg)
     # CC-225: the run-start bound for the Opik trace scan (the API list is
     # newest-first; the scan stops at this timestamp).
     run_start_iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
 
     try:
-        tree_blob = pack_tree(cfg.repo_root)
+        tree_blob = payload.pack_tree(cfg.repo_root)
     except (subprocess.CalledProcessError, OSError) as e:
         return _early_abort(cfg, marker, label, args.ticket, ExitCode.ENV_FAIL,
                             f"ERROR: tree transport pack failed: {e}")
-    if not transport_ok(tree_blob):
+    if not payload.transport_ok(tree_blob):
         return _early_abort(
             cfg, marker, label, args.ticket, ExitCode.ENV_FAIL,
             f"ERROR: tree transport {len(tree_blob)}B exceeds the ConfigMap "
-            f"limit {TRANSPORT_MAX_B64}B — fail-closed before any kubectl call")
+            f"limit {payload.TRANSPORT_MAX_B64}B — fail-closed before any kubectl call")
     tree_file = os.path.join(live_dir, "tree.tar.gz.b64")
     with open(tree_file, "w", encoding="ascii") as f:
         f.write(tree_blob)
@@ -1050,15 +830,15 @@ def host_launch_k8s(cfg: "Config", args: "argparse.Namespace",
         # nothing is published, `status` reports `missing`. The
         # classification itself moved to _classify_missing_payload (wave A
         # portion 7, verbatim).
-        payload: dict[str, bytes] | None = None
+        payload_files: dict[str, bytes] | None = None
         pod_log = os.path.join(live_dir, "pod-stdout.log")
         if os.path.isfile(pod_log):
             with open(pod_log, encoding="utf-8", errors="replace") as f:
-                payload = extract_payload(f.read(), nonce)
-        if payload is None or "summary.json" not in payload:
-            return _classify_missing_payload(cfg, label, payload, pod, ns,
+                payload_files = payload.extract_payload(f.read(), nonce)
+        if payload_files is None or "summary.json" not in payload_files:
+            return _classify_missing_payload(cfg, label, payload_files, pod, ns,
                                             job_name, stream_failed)
-        for name, data in payload.items():
+        for name, data in payload_files.items():
             with open(os.path.join(live_dir, name), "wb") as f:
                 f.write(data)
 
@@ -1067,13 +847,14 @@ def host_launch_k8s(cfg: "Config", args: "argparse.Namespace",
         # file is the payload bytes verbatim, the strict decode decides the
         # decode_violation channel before any gate/apply operation.
         patch_file, patch_sha, patch_text, decode_violation = _stage_patch(
-            payload, live_dir)
+            payload_files, live_dir)
 
         # Host identity stamping (patch_sha256, acceptance, image provenance,
         # opik_traces) moved verbatim to _stamp_summary_identity (wave A
-        # portion 7); fail-soft semantics unchanged.
-        _stamp_summary_identity(live_dir, patch_sha, accept_mode,
-                                accept_paths, pod, ns, run_start_iso)
+        # portion 7), home launcher/summary.py (#316); fail-soft semantics
+        # unchanged.
+        summary._stamp_summary_identity(live_dir, patch_sha, accept_mode,
+                                        accept_paths, pod, ns, run_start_iso)
 
         summary_path = os.path.join(live_dir, "summary.json")
         worker_rc = int(ExitCode.DEFECT)
@@ -1086,7 +867,7 @@ def host_launch_k8s(cfg: "Config", args: "argparse.Namespace",
         # Verdict cross-check moved verbatim to _check_internal_rc (wave A
         # portion 7): an internal_rc/summary-rc contradiction is an
         # infrastructure defect (rc=16), the same classification as before.
-        conflict_rc = _check_internal_rc(cfg, label, payload, worker_rc)
+        conflict_rc = _check_internal_rc(cfg, label, payload_files, worker_rc)
         if conflict_rc is not None:
             rc = conflict_rc
             return rc
@@ -1108,9 +889,10 @@ def host_launch_k8s(cfg: "Config", args: "argparse.Namespace",
             patch_file, deadline, created, image_ref)
 
         # Resource measurement stamp moved verbatim to _stamp_resource_peaks
-        # (wave A portion 7) — host-stamped like patch_sha256, kubelet
-        # numbers, never a 0 masquerade (gVisor caveat, BL-4).
-        _stamp_resource_peaks(summary_path, worker_peaks, fresh_peaks)
+        # (wave A portion 7), home launcher/summary.py (#316) — host-stamped
+        # like patch_sha256, kubelet numbers, never a 0 masquerade (gVisor
+        # caveat, BL-4).
+        summary._stamp_resource_peaks(summary_path, worker_peaks, fresh_peaks)
 
         _publish_evidence(cfg, label, worker_rc, contract_violations,
                           fresh_check)

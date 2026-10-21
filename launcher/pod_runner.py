@@ -42,7 +42,7 @@ def _unpack(blob: str) -> None:
         # The Pod image is measured Python 3.11.2 with NO `filter` kwarg
         # in extractall (docker probe 2026-10-20) — the TypeError fallback
         # is load-bearing here; without it every Pod run dies. (Host-side
-        # k8s.unpack_tree is hardened fail-closed instead: it runs on the
+        # payload.unpack_tree is hardened fail-closed instead: it runs on the
         # launcher venv 3.13.13, which has the kwarg.) The transport is
         # `git archive`: it never emits unsafe members, so the unfiltered
         # branch is a belt, not a live path.
@@ -71,7 +71,12 @@ def main() -> int:
     # The extracted tree carries the launcher package — the session runs the
     # unchanged in-container path against it.
     sys.path.insert(0, REPO)
-    from launcher import k8s
+    # #316 (2026-10-22, the layer finding of the pre-flight review): this
+    # needs only the pure codec helpers, so it imports launcher.payload —
+    # stdlib-only by construction. The old `from launcher import k8s` pulled
+    # the whole host orchestrator (kubectl, Job construction, the patch gate)
+    # into the Pod runtime. Guard: tests_harness/test_payload_facade.py.
+    from launcher import payload
 
     # 2. CC-225: the Opik tracing endpoint is ENV-only — the host passes the
     # reachable backend URL via the Job env; the settings value is rewritten
@@ -86,7 +91,7 @@ def main() -> int:
     settings = os.path.join(REPO, ".claude", "settings.stanok.json")
     if os.path.isfile(settings):
         with open(settings, encoding="utf-8") as f:
-            rewritten = k8s.rewrite_tracing_endpoint(
+            rewritten = payload.rewrite_tracing_endpoint(
                 f.read(), os.environ.get("STANOK_OPIK_TRACE_URL", ""))
         with open(settings, "w", encoding="utf-8") as f:
             f.write(rewritten)
@@ -159,8 +164,9 @@ def main() -> int:
         if os.path.isfile(p):
             with open(p, "rb") as fh:  # "fh", not "f": "f" is a TextIOWrapper from the settings rewrite above
                 files[name] = fh.read()
-    sys.stdout.write(k8s.begin_marker(nonce) + "\n" + k8s.build_payload(files)
-                     + "\n" + k8s.end_marker(nonce) + "\n")
+    sys.stdout.write(payload.begin_marker(nonce) + "\n"
+                     + payload.build_payload(files)
+                     + "\n" + payload.end_marker(nonce) + "\n")
     sys.stdout.flush()
     return 0
 

@@ -30,7 +30,7 @@ import os
 import subprocess
 import tempfile
 
-from launcher import k8s, verify
+from launcher import k8s, payload, verify
 from launcher.config import Config
 
 
@@ -71,7 +71,7 @@ def test_undeclared_src_file_is_a_violation(tmp_path):
     cfg = _cfg(repo, tmp_path)
     before = verify.contract_snapshot(cfg)
     patch = _new_file_patch("src/helper.py", "def twice(n):\n    return 2 * n")
-    scratch = k8s.apply_patch_scratch(k8s.pack_tree(str(repo)), patch)
+    scratch = k8s.apply_patch_scratch(payload.pack_tree(str(repo)), patch)
     v = k8s.scratch_contract_violations(
         cfg, before, scratch, ["src/k8s_contract.py", "tests/k8s_contract_test.py"])
     assert any("UNDECLARED: src/helper.py" in x for x in v)
@@ -83,7 +83,7 @@ def test_declared_paths_only_is_clean(tmp_path):
     before = verify.contract_snapshot(cfg)
     patch = (_new_file_patch("src/k8s_contract.py", "from doubling import twice")
              + _new_file_patch("tests/k8s_contract_test.py", "def test_x(): pass"))
-    scratch = k8s.apply_patch_scratch(k8s.pack_tree(str(repo)), patch)
+    scratch = k8s.apply_patch_scratch(payload.pack_tree(str(repo)), patch)
     v = k8s.scratch_contract_violations(
         cfg, before, scratch, ["src/k8s_contract.py", "tests/k8s_contract_test.py"])
     assert v == []
@@ -100,7 +100,7 @@ def test_modified_protected_test_is_a_violation(tmp_path):
              "@@ -1 +1 @@\n"
              "-def test_ok(): pass\n"
              "+def test_ok(): pass  # tampered\n")
-    scratch = k8s.apply_patch_scratch(k8s.pack_tree(str(repo)), patch)
+    scratch = k8s.apply_patch_scratch(payload.pack_tree(str(repo)), patch)
     v = k8s.scratch_contract_violations(cfg, before, scratch, [])
     assert any("MODIFIED: tests/t_test.py" in x for x in v)
 
@@ -132,7 +132,7 @@ def test_scratch_git_apply_failure_does_not_leak_temp_dir(tmp_path, monkeypatch)
     # (it raised the right type but left the dir in $TMPDIR). The
     # "git apply failed" literal is characterization (source: k8s.py).
     repo = _repo(tmp_path)
-    blob = k8s.pack_tree(str(repo))
+    blob = payload.pack_tree(str(repo))
     created = []
     real_mkdtemp = tempfile.mkdtemp  # bind BEFORE patching: k8s.tempfile is
     # this same module — calling tempfile.mkdtemp inside the spy self-recurses.

@@ -40,7 +40,7 @@ import subprocess
 
 import pytest
 
-from launcher import k8s, kube, lifecycle, preflight
+from launcher import k8s, kube, lifecycle, payload, preflight
 from launcher.config import Config
 
 CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
@@ -127,7 +127,7 @@ def _scenario(tmp_path, monkeypatch, fresh_hook=None, export_start_commit=True):
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
     monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref", lambda cfg: (FAKE_IMAGE, None))
-    monkeypatch.setattr(k8s, "new_nonce", lambda: FIXED_NONCE)
+    monkeypatch.setattr(payload, "new_nonce", lambda: FIXED_NONCE)
     monkeypatch.setattr(k8s, "_install_signal_handlers", lambda rs: None)
 
     def fake_kubectl(*a, **k):
@@ -139,9 +139,9 @@ def _scenario(tmp_path, monkeypatch, fresh_hook=None, export_start_commit=True):
     def fake_stream(pod, ns, path, deadline):
         files = {"summary.json": json.dumps(CLEAN_WORKER).encode("utf-8"),
                  "changes.patch": NEW_TEST_PATCH.encode("utf-8")}
-        text = (k8s.begin_marker(FIXED_NONCE) + "\n"
-                + k8s.build_payload(files) + "\n"
-                + k8s.end_marker(FIXED_NONCE) + "\n")
+        text = (payload.begin_marker(FIXED_NONCE) + "\n"
+                + payload.build_payload(files) + "\n"
+                + payload.end_marker(FIXED_NONCE) + "\n")
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         return True

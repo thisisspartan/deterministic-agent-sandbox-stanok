@@ -74,7 +74,7 @@ import subprocess
 
 import pytest
 
-from launcher import k8s, kube, lifecycle, patchgate, preflight
+from launcher import k8s, kube, lifecycle, patchgate, payload, preflight
 from launcher.config import Config
 
 # CC-237 (schema v2): the worker summary is TYPED — no errors/failures/
@@ -163,13 +163,13 @@ class _FakeCompleted:
 
 
 def _k8s_scenario(tmp_path, monkeypatch, *, worker_summary=CLEAN_WORKER,
-                  patch_text="", fresh_result=(0, ""), payload=True,
+                  patch_text="", fresh_result=(0, ""), payload_block=True,
                   ticket_text="# scenario\n\nreset: none\n"):
     """host_launch_k8s with the cluster cycle mocked; the REAL transport,
     patch gate, scratch contract recompute, fresh gating and publish run.
 
     worker_summary / patch_text: the Pod's evidence payload; fresh_result:
-    what k8s._fresh_job returns; payload=False: the Pod produced no evidence
+    what k8s._fresh_job returns; payload_block=False: the Pod produced no evidence
     block; ticket_text: the ticket manifest (default: `reset: none` — a
     valid no-deliverable ticket with NO declared paths, so every new file
     the patch creates is undeclared; B5 review 2026-10-17: host_launch_k8s
@@ -194,7 +194,7 @@ def _k8s_scenario(tmp_path, monkeypatch, *, worker_summary=CLEAN_WORKER,
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
     monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref", lambda cfg: (FAKE_IMAGE, None))
-    monkeypatch.setattr(k8s, "new_nonce", lambda: FIXED_NONCE)
+    monkeypatch.setattr(payload, "new_nonce", lambda: FIXED_NONCE)
     monkeypatch.setattr(k8s, "_install_signal_handlers", lambda rs: None)
 
     def fake_kubectl(*a, **k):
@@ -204,15 +204,15 @@ def _k8s_scenario(tmp_path, monkeypatch, *, worker_summary=CLEAN_WORKER,
     monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: "pod-x")
 
     def fake_stream(pod, ns, path, deadline):
-        if not payload:
+        if not payload_block:
             text = "worker stdout without any evidence block\n"
         else:
             files = {"summary.json": json.dumps(worker_summary).encode("utf-8")}
             if patch_text:
                 files["changes.patch"] = patch_text.encode("utf-8")
-            text = (k8s.begin_marker(FIXED_NONCE) + "\n"
-                    + k8s.build_payload(files) + "\n"
-                    + k8s.end_marker(FIXED_NONCE) + "\n")
+            text = (payload.begin_marker(FIXED_NONCE) + "\n"
+                    + payload.build_payload(files) + "\n"
+                    + payload.end_marker(FIXED_NONCE) + "\n")
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         return True  # A2: the new contract — a successful stream reports True
@@ -363,7 +363,7 @@ def test_scenario_honest_fail_not_fabricated(tmp_path, monkeypatch):
 def test_scenario_no_payload_publishes_nothing(tmp_path, monkeypatch):
     # The exactly-one rule: no nonce-matching block -> the run is treated as
     # aborted (status 'missing'), NO verdict is published, rc=17.
-    repo, cfg, calls, rc = _run(tmp_path, monkeypatch, payload=False)
+    repo, cfg, calls, rc = _run(tmp_path, monkeypatch, payload_block=False)
     assert rc == 17
     assert not (repo / "evidence" / "lbl" / "summary.json").exists()
     assert not (tmp_path / ".running").exists()  # the marker is cleaned up

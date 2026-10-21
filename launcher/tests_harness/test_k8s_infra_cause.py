@@ -39,7 +39,7 @@ import argparse
 import json
 import subprocess
 
-from launcher import k8s, kube, lifecycle, preflight
+from launcher import k8s, kube, lifecycle, payload, preflight
 from launcher.config import Config
 
 CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
@@ -252,7 +252,7 @@ def test_patch_guard_fails_before_any_kubectl(tmp_path, monkeypatch):
     # (b) a patch over the ConfigMap limit fails closed BEFORE the cluster
     # call; the classification (EXEC_ERROR -> rc=16) is unchanged.
     cfg, patch_file, calls = _fresh_env(tmp_path, monkeypatch, TESTFAIL_POD)
-    patch_file.write_bytes(b"x" * (k8s.TRANSPORT_MAX_B64 + 1))
+    patch_file.write_bytes(b"x" * (payload.TRANSPORT_MAX_B64 + 1))
     rc, tail = _call_fresh(cfg, patch_file)
     assert rc == 1
     assert tail.startswith("EXEC_ERROR:")
@@ -291,7 +291,7 @@ def _repo(tmp_path):
     return repo, Config(repo_root=str(repo), log_dir=str(logdir))
 
 
-def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
+def _scenario(tmp_path, monkeypatch, *, payload_block=True, pod_json=None,
               real_fresh=False, job_json=None):
     """host_launch_k8s with the cluster cycle mocked (the
     test_scenarios_verdict harness shape) plus: pod_json — what `get pod -o
@@ -310,7 +310,7 @@ def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
     monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref", lambda cfg: (FAKE_IMAGE, None))
-    monkeypatch.setattr(k8s, "new_nonce", lambda: FIXED_NONCE)
+    monkeypatch.setattr(payload, "new_nonce", lambda: FIXED_NONCE)
     monkeypatch.setattr(k8s, "_install_signal_handlers", lambda rs: None)
 
     def fake_kubectl(*a, **k):
@@ -326,13 +326,13 @@ def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
     monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: "pod-x")
 
     def fake_stream(pod, ns, path, deadline):
-        if not payload:
+        if not payload_block:
             text = "worker stdout without any evidence block\n"
         else:
             files = {"summary.json": json.dumps(CLEAN_WORKER).encode("utf-8")}
-            text = (k8s.begin_marker(FIXED_NONCE) + "\n"
-                    + k8s.build_payload(files) + "\n"
-                    + k8s.end_marker(FIXED_NONCE) + "\n")
+            text = (payload.begin_marker(FIXED_NONCE) + "\n"
+                    + payload.build_payload(files) + "\n"
+                    + payload.end_marker(FIXED_NONCE) + "\n")
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         return True  # A2: the new contract — a successful stream reports True
@@ -366,7 +366,7 @@ def _published_failures(repo):
 def test_worker_pod_oom_publishes_env_fail(tmp_path, monkeypatch):
     # (a1) the worker Pod died of a cgroup OOM with no payload — the run is
     # an infrastructure defect (rc=16, cause named), not a generic 'missing'.
-    repo, cfg, args, calls = _scenario(tmp_path, monkeypatch, payload=False,
+    repo, cfg, args, calls = _scenario(tmp_path, monkeypatch, payload_block=False,
                                        pod_json=OOM_POD)
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     assert rc == 16
@@ -380,7 +380,7 @@ def test_worker_pod_bare_137_keeps_missing_path(tmp_path, monkeypatch):
     # regression: a bare 137 with NO reason is NOT OOM, and without a
     # Job-level DeadlineExceeded condition the run stays the 'missing'
     # abort (rc=17, nothing published) — neither channel may be guessed.
-    repo, cfg, args, calls = _scenario(tmp_path, monkeypatch, payload=False,
+    repo, cfg, args, calls = _scenario(tmp_path, monkeypatch, payload_block=False,
                                        pod_json=DEADLINE_POD)
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     assert rc == 17
@@ -392,7 +392,7 @@ def test_worker_job_deadline_exceeded_publishes_env_fail(tmp_path, monkeypatch):
     # the Job's activeDeadlineSeconds — the Job condition says
     # DeadlineExceeded (the Pod shows only a bare 137): rc=16 ENV-FAIL with
     # the cause and the knobs named, not a generic 'missing'.
-    repo, cfg, args, calls = _scenario(tmp_path, monkeypatch, payload=False,
+    repo, cfg, args, calls = _scenario(tmp_path, monkeypatch, payload_block=False,
                                        pod_json=DEADLINE_POD,
                                        job_json=DEADLINE_JOB)
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))

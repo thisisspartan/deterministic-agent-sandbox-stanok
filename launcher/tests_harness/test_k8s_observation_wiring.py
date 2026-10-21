@@ -35,7 +35,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_observation_wir
 import argparse
 import os
 
-from launcher import k8s, kube, lifecycle, peaks, preflight
+from launcher import k8s, kube, lifecycle, peaks, payload, preflight
 from launcher.config import Config
 
 CLOCK_START = 1000.0  # arbitrary monotonic origin for the stubbed clock
@@ -81,8 +81,8 @@ def _drive(tmp_path, monkeypatch, *, advance_at_pod=None, advance_at_stream=None
     monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref",
                         lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
-    monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
-    monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
+    monkeypatch.setattr(payload, "pack_tree", lambda root: "x")
+    monkeypatch.setattr(payload, "transport_ok", lambda blob: True)
     monkeypatch.setattr(k8s, "_install_signal_handlers", lambda rs: None)
 
     def guard(*a, **k):

@@ -7,8 +7,8 @@ scalars and structured fields only, no free text. The allowlist:
   commit_sha, tokens, cache_hit_rate, inference_telemetry, tool_activity,
   loop_trap, test_fit, acceptance, compactions, opik_traces  (+ patch_sha256,
   image_digest,
-  host-stamped in k8s mode — k8s.py: the Pod's containerStatuses imageID,
-  None when unavailable).
+  host-stamped in k8s mode — summary.py host stamps (#316, moved verbatim
+  from k8s.py): the Pod's containerStatuses imageID, None when unavailable).
   test_fit = {"edits_after_green": int>=0, "new_tests_after_green": int>=0}
   — CC-247 proxy counters (no gate); malformed -> zeros.
   acceptance = {"mode": "provided"|"none"|"undeclared", "paths": [str]}
@@ -28,7 +28,12 @@ _publish_evidence (CC-134; T3-5 host-issued verdict priority
 CONTRACT-FAIL > FRESH-FAIL > the worker's claims — S2, PLAN-SIMPLIFY-2026-10-09:
 the I5 rc cross-check, the worker_* fields and INTEGRITY-FAIL are removed),
 _rotate_stale_summary,
-the status-field table. Static
+the status-field table,
+the host identity/resource stamps (stamp_opik_traces, _stamp_summary_identity,
+_stamp_resource_peaks — moved verbatim from k8s.py, #316, 2026-10-22; k8s
+calls them as summary._X; guard: tests_harness/test_payload_facade.py).
+Cycles checked before import: launcher.lifecycle -> kube/logs (kube is
+stdlib-only), launcher.opik -> config leaf — neither imports summary. Static
 config arrives as the passed-in Config; the per-run evidence dir as the
 passed-in RunState (C).
 """
@@ -38,6 +43,7 @@ import os
 import shutil
 from collections.abc import Sequence  # read-only parameter type: callers pass a list, the default is () — the function only unpacks/logs it
 from typing import TYPE_CHECKING, Any
+from launcher import lifecycle, opik  # #316: runtime use in the host stamps below; cycle-safety stated in the module docstring
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
 from launcher.verdicts import Verdict
@@ -424,4 +430,75 @@ def write_env_fail_summary(cfg: "Config", label: str, error: str) -> None:
     with open(os.path.join(evidence_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
     _write_failures(evidence_dir, [error])
+
+
+# ==================================================================================
+# #316 (2026-10-22, host-side — precedent CC-266): the host evidence-stamp
+# cluster (stamp_opik_traces, _stamp_summary_identity, _stamp_resource_peaks)
+# moved verbatim from launcher/k8s.py (they were k8s strict-class debt).
+# Single home: k8s holds no def and no re-export; host_launch_k8s calls them
+# as summary._X (guard: tests_harness/test_payload_facade.py). They belong
+# here with the fields they write: the summary.json schema is this module's
+# contract (allowlist above; test_summary_schema.py pins it).
+# ==================================================================================
+def stamp_opik_traces(summary: dict[str, Any], count: int | None) -> dict[str, Any]:
+    """CC-225: the host is the only party that can reach the Opik backend,
+    so the host — not the Pod — issues the opik_traces field. The in-Pod
+    summary carries the literal "disabled" (STANOK_IN_CONTAINER=1); the host
+    replaces it with the trace count measured for THIS session. None (Opik
+    unreachable) never masquerades as 0 — the field stays as written."""
+    if count is not None:
+        summary["opik_traces"] = count
+    return summary
+
+
+def _stamp_summary_identity(live_dir: str, patch_sha: str, accept_mode: str,
+                           accept_paths: list[str], pod: str | None, ns: str,
+                           run_start_iso: str) -> None:
+    """Host identity stamping into the evidence summary (moved verbatim from
+    host_launch_k8s): patch_sha256; the acceptance contract (G4 — host-stamped
+    from the HOST's own ticket parse, the Pod is not its own judge); image
+    provenance (the Pod's own containerStatuses record; None is explicit,
+    with a WARN, same as commit_sha); opik_traces (CC-225 — only the host
+    reaches the Opik backend, None never masquerades as 0). Fail-soft on an
+    unreadable summary (except -> pass), exactly as before."""
+    sum_path = os.path.join(live_dir, "summary.json")
+    try:
+        with open(sum_path, encoding="utf-8") as f:
+            summary = json.load(f)
+        summary["patch_sha256"] = patch_sha
+        summary["acceptance"] = {"mode": accept_mode,
+                                 "paths": list(accept_paths)}
+        image_digest = lifecycle._pod_image_id(pod, ns)
+        summary["image_digest"] = image_digest
+        if image_digest is None:
+            log("WARN: image provenance: Pod imageID unavailable — "
+                "publishing image_digest=None")
+        sid = summary.get("session_id")
+        if sid:
+            stamp_opik_traces(
+                summary, opik.session_trace_count(sid, run_start_iso))
+        with open(sum_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def _stamp_resource_peaks(summary_path: str, worker_peaks: dict[str, Any] | None,
+                          fresh_peaks: dict[str, Any] | None) -> None:
+    """Resource measurement stamp (moved verbatim from host_launch_k8s;
+    operator decision 2026-10-16): host-stamped like patch_sha256 — the
+    OBSERVED kubelet peaks of this run, closing the "pending measured peaks"
+    gap of bb5eed6. None = no sample ever succeeded (never a 0 masquerade).
+    These are kubelet numbers, not truth claims (gVisor caveat, BL-4)."""
+    try:
+        with open(summary_path, encoding="utf-8") as f:
+            summary = json.load(f)
+        summary["resource_peaks"] = {"worker": worker_peaks,
+                                     "fresh": fresh_peaks}
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+    except (OSError, json.JSONDecodeError):
+        log("WARN: resource_peaks: summary.json unreadable — field not "
+            "stamped")
 

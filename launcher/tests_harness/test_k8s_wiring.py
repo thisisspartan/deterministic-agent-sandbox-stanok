@@ -48,7 +48,7 @@ import argparse
 import json
 import os
 
-from launcher import cli, k8s, kube, lifecycle, patchgate, preflight
+from launcher import cli, k8s, kube, lifecycle, patchgate, payload, preflight
 from launcher.config import Config
 
 
@@ -249,8 +249,8 @@ def test_gate_runs_before_cluster_calls(tmp_path, monkeypatch):
     # call — mocked here (the delivery logic itself: test_k8s_image_delivery.py)
     monkeypatch.setattr(k8s, "_image_ref",
                         lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
-    monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")  # base64 str
-    monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
+    monkeypatch.setattr(payload, "pack_tree", lambda root: "x")  # base64 str
+    monkeypatch.setattr(payload, "transport_ok", lambda blob: True)
     _no_real_cluster_calls(monkeypatch)
 
     def stop(*a, **k):
@@ -276,8 +276,8 @@ def test_cleanup_deletes_only_created_resources(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref",
                         lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
-    monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
-    monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
+    monkeypatch.setattr(payload, "pack_tree", lambda root: "x")
+    monkeypatch.setattr(payload, "transport_ok", lambda blob: True)
     _no_real_cluster_calls(monkeypatch)
     calls = []
 
@@ -341,7 +341,7 @@ def test_pod_image_id_fail_soft_is_none(monkeypatch):
 
 # --- Verdict cross-check (external review 2026-10-16): internal_rc vs summary rc ---
 
-def _payload_host_run(tmp_path, monkeypatch, payload, real_apply=False):
+def _payload_host_run(tmp_path, monkeypatch, payload_files, real_apply=False):
     """Drive host_launch_k8s to the payload stage with a synthetic payload
     (extract_payload mocked — the nonce framing is tested in the transport
     tests); the post-payload stages are mocked so the test isolates the
@@ -354,8 +354,8 @@ def _payload_host_run(tmp_path, monkeypatch, payload, real_apply=False):
     monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
     monkeypatch.setattr(k8s, "_image_ref",
                         lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
-    monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
-    monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
+    monkeypatch.setattr(payload, "pack_tree", lambda root: "x")
+    monkeypatch.setattr(payload, "transport_ok", lambda blob: True)
     _no_real_cluster_calls(monkeypatch)
     monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0))
     monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: None)
@@ -366,7 +366,7 @@ def _payload_host_run(tmp_path, monkeypatch, payload, real_apply=False):
     os.makedirs(live_dir, exist_ok=True)
     with open(os.path.join(live_dir, "pod-stdout.log"), "w", encoding="utf-8") as f:
         f.write("synthetic")
-    monkeypatch.setattr(k8s, "extract_payload", lambda text, nonce: payload)
+    monkeypatch.setattr(payload, "extract_payload", lambda text, nonce: payload_files)
     # Post-payload stages: mocked so the test is about the comparison only.
     monkeypatch.setattr(patchgate, "patch_gate", lambda text: [])
     if not real_apply:

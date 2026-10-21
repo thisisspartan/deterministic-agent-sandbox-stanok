@@ -22,7 +22,7 @@ import argparse
 import json
 import os
 
-from launcher import k8s, kube, lifecycle, preflight
+from launcher import k8s, kube, lifecycle, payload, preflight
 from launcher.config import Config
 
 DIGEST = "192.168.122.156:5000/stanok-machine@sha256:deadbeef"
@@ -102,8 +102,8 @@ def _mock_launch_env(monkeypatch):
     # the unified preflight is mocked out here — these tests target the
     # delivery point (_image_ref); the preflight checks: test_k8s_preflight.py
     monkeypatch.setattr(preflight, "_preflight", lambda cfg: None)
-    monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
-    monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
+    monkeypatch.setattr(payload, "pack_tree", lambda root: "x")
+    monkeypatch.setattr(payload, "transport_ok", lambda blob: True)
 
 
 def test_unpushed_image_aborts_rc16_before_any_cluster_call(tmp_path, monkeypatch):

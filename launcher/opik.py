@@ -93,7 +93,7 @@ def opik_traces_field() -> str | int | None:
     In the worker Pod the field is the literal "disabled": the Pod's
     NetworkPolicy closes the path to the host Opik backend BY DESIGN (the
     machine's OTLP export target is the host's :8080; the host stamps the
-    real count — k8s.stamp_opik_traces, CC-225), and the field must be
+    real count — summary.stamp_opik_traces, CC-225), and the field must be
     present and explicit — not 0/null masquerading as "zero traces".
     Outside the Pod (host-side tooling) the existing best-effort count
     applies unchanged."""

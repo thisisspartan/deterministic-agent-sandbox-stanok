@@ -4,7 +4,7 @@ corrected by measurement 2026-10-20) — transport unpack hardening.
 The two unpack paths run on DIFFERENT runtimes and are hardened
 differently:
 
-  - `k8s.unpack_tree` is HOST-side only: the launcher venv (measured
+  - `payload.unpack_tree` is HOST-side only: the launcher venv (measured
     3.13.13, `launch.sh` PY default) has the tarfile `filter` kwarg, so
     its old `except TypeError` fallback was a silent policy downgrade on a
     runtime where it cannot occur — removed: a TypeError must propagate.
@@ -42,7 +42,7 @@ import tarfile
 
 import pytest
 
-from launcher import k8s
+from launcher import payload
 
 
 def _tar_blob(members=b"") -> str:
@@ -74,7 +74,7 @@ def _typeerror_filter(monkeypatch):
 def test_unpack_tree_propagates_filter_typeerror(tmp_path, monkeypatch):
     calls = _typeerror_filter(monkeypatch)
     with pytest.raises(TypeError):
-        k8s.unpack_tree(_tar_blob(b"x\n"), str(tmp_path / "dest"))
+        payload.unpack_tree(_tar_blob(b"x\n"), str(tmp_path / "dest"))
     # one filtered call only — the silent no-filter retry must be gone
     assert calls == ["data"], calls
     assert not (tmp_path / "dest").exists() or not list(
@@ -94,7 +94,7 @@ def test_unpack_tree_data_filter_rejects_absolute_link(tmp_path):
         tf.addfile(info)
     blob = base64.b64encode(gzip.compress(buf.getvalue())).decode("ascii")
     with pytest.raises(tarfile.AbsoluteLinkError):
-        k8s.unpack_tree(blob, str(tmp_path / "dest"))
+        payload.unpack_tree(blob, str(tmp_path / "dest"))
 
 
 def test_pod_runner_unpack_keeps_fallback_for_filterless_runtime(tmp_path,

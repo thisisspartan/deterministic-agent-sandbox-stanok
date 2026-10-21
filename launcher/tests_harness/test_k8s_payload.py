@@ -28,37 +28,37 @@ import io
 import tarfile
 import tracemalloc
 
-from launcher import k8s
+from launcher import payload
 
 
 def test_roundtrip():
     files = {"summary.json": b'{"rc": 0}', "changes.patch": b"diff --git x\n"}
-    blob = k8s.build_payload(files)
-    text = ("noise\n" + k8s.begin_marker("N1") + "\n" + blob + "\n"
-            + k8s.end_marker("N1") + "\nmore")
-    assert k8s.extract_payload(text, "N1") == files
+    blob = payload.build_payload(files)
+    text = ("noise\n" + payload.begin_marker("N1") + "\n" + blob + "\n"
+            + payload.end_marker("N1") + "\nmore")
+    assert payload.extract_payload(text, "N1") == files
 
 
 def test_foreign_nonce_rejected():
-    blob = k8s.build_payload({"summary.json": b"x"})
-    text = k8s.begin_marker("other") + blob + k8s.end_marker("other")
-    assert k8s.extract_payload(text, "N1") is None
+    blob = payload.build_payload({"summary.json": b"x"})
+    text = payload.begin_marker("other") + blob + payload.end_marker("other")
+    assert payload.extract_payload(text, "N1") is None
 
 
 def test_no_markers_rejected():
-    assert k8s.extract_payload("nothing here", "N1") is None
+    assert payload.extract_payload("nothing here", "N1") is None
 
 
 def test_two_blocks_rejected():
-    blob = k8s.build_payload({"a": b"1"})
-    text = (k8s.begin_marker("N1") + blob + k8s.end_marker("N1")
-            + k8s.begin_marker("N1") + blob + k8s.end_marker("N1"))
-    assert k8s.extract_payload(text, "N1") is None
+    blob = payload.build_payload({"a": b"1"})
+    text = (payload.begin_marker("N1") + blob + payload.end_marker("N1")
+            + payload.begin_marker("N1") + blob + payload.end_marker("N1"))
+    assert payload.extract_payload(text, "N1") is None
 
 
 def test_unclosed_block_rejected():
-    blob = k8s.build_payload({"a": b"1"})
-    assert k8s.extract_payload(k8s.begin_marker("N1") + blob, "N1") is None
+    blob = payload.build_payload({"a": b"1"})
+    assert payload.extract_payload(payload.begin_marker("N1") + blob, "N1") is None
 
 
 def test_member_names_are_flat_bare_filenames():
@@ -75,21 +75,21 @@ def test_member_names_are_flat_bare_filenames():
     # write site instead of the clean abort) — closed in the same guard.
     for bad in ("../escape.txt", "sub/summary.json", "/abs/summary.json",
                 "..leadingdot", "", "."):
-        blob = k8s.build_payload({"summary.json": b"{}", bad: b"1"})
-        text = (k8s.begin_marker("N1") + "\n" + blob + "\n"
-                + k8s.end_marker("N1"))
-        assert k8s.extract_payload(text, "N1") is None, bad
+        blob = payload.build_payload({"summary.json": b"{}", bad: b"1"})
+        text = (payload.begin_marker("N1") + "\n" + blob + "\n"
+                + payload.end_marker("N1"))
+        assert payload.extract_payload(text, "N1") is None, bad
     # companion positive: flat names (the real producer's set) still pass
     good = {"summary.json": b"{}", "changes.patch": b"d", "internal_rc.txt": b"0\n",
             "launcher.stdout.log": b"", "failures.log": b""}
-    text = (k8s.begin_marker("N1") + "\n" + k8s.build_payload(good) + "\n"
-            + k8s.end_marker("N1"))
-    assert k8s.extract_payload(text, "N1") == good
+    text = (payload.begin_marker("N1") + "\n" + payload.build_payload(good) + "\n"
+            + payload.end_marker("N1"))
+    assert payload.extract_payload(text, "N1") == good
 
 
 def test_decompressed_size_cap():
     # R4 pair test (#311, operator order 2026-10-21): extraction is capped at
-    # k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES; the limit itself is pinned from the
+    # payload.PAYLOAD_MAX_DECOMPRESSED_BYTES; the limit itself is pinned from the
     # operator's spec (64MiB), the constant is the single source. A total AT
     # the limit is accepted ("превышает" is strict >); a total one byte over
     # fails closed — None, like every malformed block. The block payload
@@ -98,16 +98,16 @@ def test_decompressed_size_cap():
     # materializes before the check — peak is not bounded; #312 candidate).
     # A real payload (pod_runner's five flat files) is orders of magnitude
     # below 64MiB — this guard bounds only pathological/adversarial blocks.
-    assert k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES == 64 * 1024 * 1024
-    limit = k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES
+    assert payload.PAYLOAD_MAX_DECOMPRESSED_BYTES == 64 * 1024 * 1024
+    limit = payload.PAYLOAD_MAX_DECOMPRESSED_BYTES
     at_limit = {"summary.json": b"{}{}", "big.bin": b"\0" * (limit - 4)}
-    text = (k8s.begin_marker("N1") + "\n" + k8s.build_payload(at_limit) + "\n"
-            + k8s.end_marker("N1"))
-    assert k8s.extract_payload(text, "N1") == at_limit
+    text = (payload.begin_marker("N1") + "\n" + payload.build_payload(at_limit) + "\n"
+            + payload.end_marker("N1"))
+    assert payload.extract_payload(text, "N1") == at_limit
     over = {"big.bin": b"\0" * limit, "one.bin": b"1"}  # total == limit + 1
-    text = (k8s.begin_marker("N1") + "\n" + k8s.build_payload(over) + "\n"
-            + k8s.end_marker("N1"))
-    assert k8s.extract_payload(text, "N1") is None
+    text = (payload.begin_marker("N1") + "\n" + payload.build_payload(over) + "\n"
+            + payload.end_marker("N1"))
+    assert payload.extract_payload(text, "N1") is None
 
 
 class _NulStream:
@@ -152,13 +152,13 @@ def test_payload_bomb_fails_closed_before_materialization():
     On the #312 code the budget aborts the gunzip mid-stream (peak ~ cap +
     stream overhead). The block is built by streaming (_bomb_block), so the
     fixture holds neither the bomb nor its tar."""
-    limit = k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES
-    text = (k8s.begin_marker("N1") + "\n" + _bomb_block(limit * 2) + "\n"
-            + k8s.end_marker("N1"))
+    limit = payload.PAYLOAD_MAX_DECOMPRESSED_BYTES
+    text = (payload.begin_marker("N1") + "\n" + _bomb_block(limit * 2) + "\n"
+            + payload.end_marker("N1"))
     tracemalloc.start()
     tracemalloc.reset_peak()  # baseline: only `text` (+ the small fixture) is alive
     try:
-        assert k8s.extract_payload(text, "N1") is None
+        assert payload.extract_payload(text, "N1") is None
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -197,12 +197,12 @@ def test_header_flood_rejected():
     not an external spec); 512 is the tar block size; the member count is
     chosen so the header stream crosses the budget under the 512 B/member
     floor — the structural precondition is asserted, not assumed."""
-    budget = k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES + k8s.PAYLOAD_TAR_OVERHEAD_BYTES
+    budget = payload.PAYLOAD_MAX_DECOMPRESSED_BYTES + payload.PAYLOAD_TAR_OVERHEAD_BYTES
     members = 140_000
     assert members * 512 > budget, "fixture must cross the stream budget"
-    text = (k8s.begin_marker("N1") + "\n" + _header_block(members) + "\n"
-            + k8s.end_marker("N1"))
-    assert k8s.extract_payload(text, "N1") is None
+    text = (payload.begin_marker("N1") + "\n" + _header_block(members) + "\n"
+            + payload.end_marker("N1"))
+    assert payload.extract_payload(text, "N1") is None
 
 
 def test_in_budget_structure_accepted():
@@ -213,9 +213,9 @@ def test_in_budget_structure_accepted():
     legal structure inside it is not a defect. Green on pre-#312 too
     (companion semantics, unchanged)."""
     members = 30_000
-    text = (k8s.begin_marker("N1") + "\n" + _header_block(members) + "\n"
-            + k8s.end_marker("N1"))
-    files = k8s.extract_payload(text, "N1")
+    text = (payload.begin_marker("N1") + "\n" + _header_block(members) + "\n"
+            + payload.end_marker("N1"))
+    files = payload.extract_payload(text, "N1")
     assert files is not None and len(files) == members
     assert sum(len(v) for v in files.values()) == 0
 
@@ -249,14 +249,14 @@ def test_duplicate_member_names_accumulate_toward_the_cap():
     (68.2 MiB) — the rejection must come from the member budget, not the
     stream budget; the boundary values are computed from the pinned
     constants, not copied from production behaviour."""
-    cap = k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES
+    cap = payload.PAYLOAD_MAX_DECOMPRESSED_BYTES
     first, second = 40 * 1024 * 1024, 26_000_000
     assert first + second > cap, "fixture must cross the member budget"
-    assert first + second < cap + k8s.PAYLOAD_TAR_OVERHEAD_BYTES, (
+    assert first + second < cap + payload.PAYLOAD_TAR_OVERHEAD_BYTES, (
         "fixture must stay inside the gunzip budget")
-    text = (k8s.begin_marker("N1") + "\n" + _dup_block(first, second) + "\n"
-            + k8s.end_marker("N1"))
-    assert k8s.extract_payload(text, "N1") is None
+    text = (payload.begin_marker("N1") + "\n" + _dup_block(first, second) + "\n"
+            + payload.end_marker("N1"))
+    assert payload.extract_payload(text, "N1") is None
 
 
 def test_duplicate_names_in_budget_accepted_last_wins():
@@ -268,6 +268,6 @@ def test_duplicate_names_in_budget_accepted_last_wins():
     duplicates into an error would not pass unnoticed), not a contract.
     Green on pre-#312 too."""
     size = 30 * 1024 * 1024
-    text = (k8s.begin_marker("N1") + "\n" + _dup_block(size, size) + "\n"
-            + k8s.end_marker("N1"))
-    assert k8s.extract_payload(text, "N1") == {"big.bin": b"\0" * size}
+    text = (payload.begin_marker("N1") + "\n" + _dup_block(size, size) + "\n"
+            + payload.end_marker("N1"))
+    assert payload.extract_payload(text, "N1") == {"big.bin": b"\0" * size}
