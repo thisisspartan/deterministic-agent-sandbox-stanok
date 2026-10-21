@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from launcher import k8s, logs, stanok
+from launcher.abort import _early_abort, _pid_alive  # wave A step 1: facade — these names ARE launcher.abort's
 from launcher.config import Config, RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
@@ -32,28 +33,12 @@ from launcher.gates import (
 )
 from launcher.opik import opik_traces_field
 from launcher.session import _install_signal_handlers, run_continuous_session
-from launcher.summary import (
-    _failure_lines, _rotate_stale_summary, _write_failures,
-    build_summary, write_summary,
-)
+from launcher.summary import _rotate_stale_summary, write_summary
 from launcher.ticket import (
     assert_create_paths_are_new, assert_edit_paths_are_not_protected,
     parse_ticket_header,
 )
-from launcher.verdicts import Verdict
 
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
 
 
 def _fail_early(cfg, run_state, job: dict, start_ts: int, code: int, error: str) -> int:
@@ -512,51 +497,6 @@ def _build_parser(cfg) -> argparse.ArgumentParser:
     )
     st.add_argument("label")
     return p
-
-
-def _early_abort(cfg, marker: str, label: str, ticket: str,
-                 code: ExitCode, err_msg: str) -> int:
-    """Launch-level refusal: log, clean a dead marker, write the EARLY-ABORT
-    summary (only when absent — a fresh verdict must not be overwritten).
-
-    S1: the summary goes to cfg.summary_dir(label) — inside the container the
-    rw LOG_DIR/<label> mount; on the host the evidence dir (the host is the
-    publisher)."""
-    log(err_msg)
-    if os.path.exists(marker):
-        # A live run's marker must survive an early abort of a
-        # concurrent launch attempt: remove it only when the
-        # recorded process is dead (or the marker is unparseable).
-        live = False
-        try:
-            with open(marker, encoding="utf-8") as f:
-                pid = int(f.read().split()[-1])
-            live = _pid_alive(pid)
-        except (OSError, ValueError):
-            pass
-        if not live:
-            try:
-                os.remove(marker)
-            except OSError:
-                pass
-    summary_dir = cfg.summary_dir(label)
-    os.makedirs(summary_dir, exist_ok=True)
-    sum_path = os.path.join(summary_dir, "summary.json")
-    if not os.path.exists(sum_path):
-        job = {
-            "label": label,
-            "ticket": ticket,
-            "rc": int(code),
-            "verifier": "FAIL",
-            "probe_result": Verdict.EARLY_ABORT.value,
-            "turns": 0,
-            "error": err_msg,
-        }
-        with open(sum_path, "w", encoding="utf-8") as f:
-            json.dump(build_summary(cfg, job, 0), f, ensure_ascii=False, indent=2)
-        # CC-237 (schema v2): the refusal text goes to failures.log.
-        _write_failures(summary_dir, _failure_lines(job))
-    return int(code)
 
 
 def _launch_gates(cfg, args) -> "tuple[ExitCode, str] | None":

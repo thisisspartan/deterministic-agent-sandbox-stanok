@@ -60,6 +60,7 @@ import urllib.request
 import uuid
 
 from launcher import gates, opik, verify, zones
+from launcher.abort import _early_abort  # wave A step 1: was a lazy import from cli (the cli->k8s cycle was its only reason; abort imports neither)
 from launcher.config import RunState
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
@@ -1361,8 +1362,6 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     The cluster calls are wrapped: a kubectl failure is an infrastructure
     defect (rc=16, write_env_fail_summary), NOT a ticket defect — the 3
     ticket retries must not be burned on it."""
-    from launcher.cli import _early_abort  # lazy: cli imports this module
-
     label = args.label
     ns = _namespace()
     kname = _k8s_name(label)
