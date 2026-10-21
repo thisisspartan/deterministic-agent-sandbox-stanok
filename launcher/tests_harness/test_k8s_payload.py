@@ -71,3 +71,25 @@ def test_member_names_are_flat_bare_filenames():
     text = (k8s.begin_marker("N1") + "\n" + k8s.build_payload(good) + "\n"
             + k8s.end_marker("N1"))
     assert k8s.extract_payload(text, "N1") == good
+
+
+def test_decompressed_size_cap():
+    # R4 pair test (#311, operator order 2026-10-21): extraction is capped at
+    # k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES; the limit itself is pinned from the
+    # operator's spec (64MiB), the constant is the single source. A total AT
+    # the limit is accepted ("превышает" is strict >); a total one byte over
+    # fails closed — None, like every malformed block. The block payload
+    # stays small because b"\0" compresses: the cap measures the DECOMPRESSED
+    # total, which is exactly what the host must not materialize unbounded.
+    # A real payload (pod_runner's five flat files) is orders of magnitude
+    # below 64MiB — this guard bounds only pathological/adversarial blocks.
+    assert k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES == 64 * 1024 * 1024
+    limit = k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES
+    at_limit = {"summary.json": b"{}{}", "big.bin": b"\0" * (limit - 4)}
+    text = (k8s.begin_marker("N1") + "\n" + k8s.build_payload(at_limit) + "\n"
+            + k8s.end_marker("N1"))
+    assert k8s.extract_payload(text, "N1") == at_limit
+    over = {"big.bin": b"\0" * limit, "one.bin": b"1"}  # total == limit + 1
+    text = (k8s.begin_marker("N1") + "\n" + k8s.build_payload(over) + "\n"
+            + k8s.end_marker("N1"))
+    assert k8s.extract_payload(text, "N1") is None

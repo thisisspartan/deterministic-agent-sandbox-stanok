@@ -494,3 +494,23 @@ def test_job_templates_are_restricted_clean():
         assert "hostPath" not in y, name
         assert "hostPort" not in y, name
         assert "privileged: true" not in y, name
+
+
+# --- R5 (#311, operator order 2026-10-21): template value validation ------
+
+def test_render_template_rejects_markup_injection():
+    # render_template is plain str.replace — no escaping. A value carrying
+    # "{{" chains a second substitution pass (manifest markup arriving
+    # through the value: a placeholder injected via a placeholder); a value
+    # carrying "\n" breaks YAML structure at the placeholder site. Both
+    # must raise before the manifest reaches the cluster. Companion
+    # positive: clean single-line values (the shape every real caller
+    # supplies — sanitized names, model_ip()-validated IPs, hex revisions,
+    # str() of ints) render exactly as before.
+    with pytest.raises(ValueError):
+        k8s.render_template("value: {{V}}", {"V": "{{MODEL_IP}}"})
+    with pytest.raises(ValueError):
+        k8s.render_template("value: {{V}}", {"V": "line1\nline2"})
+    assert k8s.render_template("image: {{IMAGE}}\nnamespace: {{NS}}", {
+        "IMAGE": "img@sha256:0123abcd", "NS": "default"}) == (
+        "image: img@sha256:0123abcd\nnamespace: default")

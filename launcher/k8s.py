@@ -78,6 +78,17 @@ K8S_DIR = os.path.join(LAUNCHER_DIR, "..", "k8s")
 # Fail-closed BEFORE any kubectl call.
 TRANSPORT_MAX_B64 = 800_000
 
+# R4 (Z.ai external review 2026-10-20, operator order 2026-10-21): the
+# decompressed-payload cap. The payload is the Pod's evidence channel; a
+# pathological or hostile gzip-tar block can decompress to an arbitrary
+# size, and the host must not materialize it unconditionally. An extracted
+# total above this limit is rejected whole (None — the run is treated as
+# aborted), fail-closed like the member-name guard in extract_payload.
+# Real payloads are the five flat files pod_runner.py:154-161 emits, far
+# below 64MiB; the cap bounds only malformed/adversarial blocks.
+# Pair test: tests_harness/test_k8s_payload.py (R4 pair).
+PAYLOAD_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
 # C3 (review 2026-10-17): the fresh Pod's own `git apply` failure must exit
 # with a code DISJOINT from every run.sh/runner code (run.sh header:
 # 0,1,2,3,4,5,6,7,124; pytest 0-5, node --test 0/1, jq 0/5) so the host can
@@ -158,7 +169,12 @@ def extract_payload(text: str, nonce: str):
     abort (B1a review 2026-10-20) — rejected by the same guard.
     pod_runner.py:154-161 emits only flat names (changes.patch,
     internal_rc.txt, summary.json, launcher.stdout.log, failures.log), so
-    a real payload never trips this."""
+    a real payload never trips this.
+
+    Decompressed-size guard (R4, Z.ai external review 2026-10-20, operator
+    order 2026-10-21): a block whose extracted files total more than
+    PAYLOAD_MAX_DECOMPRESSED_BYTES fails closed like a malformed block
+    (None) — the host never materializes an unbounded gzip-tar."""
     pattern = (re.escape(begin_marker(nonce)) + r"\s*(.*?)\s*"
                + re.escape(end_marker(nonce)))
     blocks = re.findall(pattern, text, re.DOTALL)
@@ -178,6 +194,8 @@ def extract_payload(text: str, nonce: str):
                 if member_file is None:  # fail-closed like the name checks above
                     return None
                 files[name] = member_file.read()
+    if sum(len(data) for data in files.values()) > PAYLOAD_MAX_DECOMPRESSED_BYTES:
+        return None  # R4: total above the cap — fail-closed like every guard above
     return files
 
 
@@ -530,7 +548,21 @@ def stamp_opik_traces(summary: dict, count) -> dict:
 
 def render_template(text: str, variables: dict) -> str:
     for key, value in variables.items():
-        text = text.replace("{{" + key + "}}", str(value))
+        v = str(value)
+        # R5 (Z.ai external review 2026-10-20, operator order 2026-10-21):
+        # str.replace rendering has no escaping. A value carrying "{{"
+        # chains a second substitution pass (manifest markup injected
+        # through the value); a value carrying "\n" breaks YAML structure
+        # at the placeholder site. Every real caller supplies single-line
+        # brace-free values (sanitized names, IPs validated by
+        # model_ip(), hex revisions, str() of ints); anything else raises
+        # before the manifest reaches the cluster.
+        # Pair test: tests_harness/test_k8s_manifests.py (R5 pair).
+        if "{{" in v or "\n" in v:
+            raise ValueError(
+                f"render_template: value for {key!r} must not contain "
+                "'{{' or a newline (manifest markup injection)")
+        text = text.replace("{{" + key + "}}", v)
     return text
 
 
