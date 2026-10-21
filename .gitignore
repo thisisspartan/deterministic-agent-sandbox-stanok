@@ -5,6 +5,11 @@ evidence/
 # environment and python
 .venv/
 __pycache__/
+# coverage gate artifacts (cover-requirements.lock; the CI coverage job and the
+# local calibration run write these — never part of the tree)
+.coverage
+.coverage.*
+htmlcov/
 # R4: CLI staging dir prepared by setup.sh before `docker build` (not source)
 .build-context/
 # Environment dotfiles that must never be tracked: per-machine state, not
