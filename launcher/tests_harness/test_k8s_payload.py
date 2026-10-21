@@ -11,9 +11,18 @@ a verdict. Tests:
   3  no markers -> None
   4  two nonce-matching blocks -> None (exactly-one rule)
   5  an unclosed block -> None
+  6  decompressed-size cap: AT the cap accepted, one byte over -> None (R4, #311)
+  7  a payload BOMB (decompressed total > cap) fails closed with a bounded
+     tracemalloc peak — BEFORE materialization (#312 pair, B1a)
 
 Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_payload.py -q
 """
+import base64
+import gzip
+import io
+import tarfile
+import tracemalloc
+
 from launcher import k8s
 
 
@@ -94,3 +103,61 @@ def test_decompressed_size_cap():
     text = (k8s.begin_marker("N1") + "\n" + k8s.build_payload(over) + "\n"
             + k8s.end_marker("N1"))
     assert k8s.extract_payload(text, "N1") is None
+
+
+class _NulStream:
+    """#312 pair helper: a read()-only source of `size` NULs for
+    tarfile.addfile — the fixture never holds more than one chunk."""
+
+    def __init__(self, size: int):
+        self._left = size
+
+    def read(self, n: int = -1) -> bytes:
+        if n < 0:
+            n = self._left
+        n = min(n, self._left)
+        self._left -= n
+        return b"\0" * n
+
+
+def _bomb_block(member_bytes: int) -> str:
+    """#312 pair helper: ONE flat member `big.bin` of `member_bytes` NULs as
+    a base64 gzip-tar block, built by STREAMING the member data through the
+    gzipper (tar mode "w|", no seek) — the fixture itself never holds the
+    bomb, so the tracemalloc peak in the bomb test measures extract_payload,
+    not the test. build_payload is unusable here: it would materialize the
+    full member in the test process first."""
+    gz = io.BytesIO()
+    with gzip.GzipFile(fileobj=gz, mode="wb", mtime=0) as g:
+        with tarfile.open(fileobj=g, mode="w|") as tf:
+            info = tarfile.TarInfo("big.bin")
+            info.size = member_bytes
+            tf.addfile(info, _NulStream(member_bytes))
+    return base64.b64encode(gz.getvalue()).decode("ascii")
+
+
+def test_payload_bomb_fails_closed_before_materialization():
+    """#312 pair test (B1a 2026-10-21, host-side — precedent CC-266): a gzip
+    bomb — ONE nonce-matching block whose single member claims TWICE the cap
+    of NULs, compressing to a few hundred KB — must fail closed (None)
+    WITHOUT materializing: the tracemalloc peak of the call stays under two
+    caps. Calibration contract: on the pre-#312 code this goes RED — the
+    bomb decompresses in full (raw + member copy, peak ~4x cap) before the
+    post-hoc sum check rejects it; that unbounded peak is the B1a finding.
+    On the #312 code the budget aborts the gunzip mid-stream (peak ~ cap +
+    stream overhead). The block is built by streaming (_bomb_block), so the
+    fixture holds neither the bomb nor its tar."""
+    limit = k8s.PAYLOAD_MAX_DECOMPRESSED_BYTES
+    text = (k8s.begin_marker("N1") + "\n" + _bomb_block(limit * 2) + "\n"
+            + k8s.end_marker("N1"))
+    tracemalloc.start()
+    tracemalloc.reset_peak()  # baseline: only `text` (+ the small fixture) is alive
+    try:
+        assert k8s.extract_payload(text, "N1") is None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 2 * limit, (
+        f"tracemalloc peak {peak} >= 2x cap ({2 * limit}): the bomb was "
+        f"materialized before rejection — B1a (the #312 budget must abort "
+        f"decompression in-stream)")

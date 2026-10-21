@@ -86,8 +86,17 @@ TRANSPORT_MAX_B64 = 800_000
 # aborted), fail-closed like the member-name guard in extract_payload.
 # Real payloads are the five flat files pod_runner.py:154-161 emits, far
 # below 64MiB; the cap bounds only malformed/adversarial blocks.
-# Pair test: tests_harness/test_k8s_payload.py (R4 pair).
+# #312 (B1a, host-side — precedent CC-266): the budget is enforced IN-STREAM
+# (see _bounded_gunzip below), not post-hoc — peak materialization is O(cap).
+# Pair tests: tests_harness/test_k8s_payload.py (R4 + #312 pairs).
 PAYLOAD_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
+# #312 (B1a): headroom INSIDE the stream budget for tar STRUCTURE — 512-byte
+# headers/blocks, padding, pax attributes. An honest payload at the file-sum
+# cap carries ~10 KiB of structure (the five flat files); 1 MiB admits that
+# with ~100x margin, while a header FLOOD merely consumes its own budget and
+# is rejected fail-closed like every malformed shape.
+PAYLOAD_TAR_OVERHEAD_BYTES = 1 * 1024 * 1024
 
 # C3 (review 2026-10-17): the fresh Pod's own `git apply` failure must exit
 # with a code DISJOINT from every run.sh/runner code (run.sh header:
@@ -154,6 +163,28 @@ def build_payload(files: dict) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+# #312: the streaming window of _bounded_gunzip — output is decompressed in
+# capped reads so an over-budget stream aborts before its bytes exist.
+_GUNZIP_CHUNK = 256 * 1024
+
+
+def _bounded_gunzip(compressed: bytes, limit: int) -> "bytes | None":
+    """#312 (B1a): gunzip with a hard output budget. Returns the decompressed
+    stream, or None the MOMENT it would exceed `limit` — gzip.GzipFile.read(n)
+    caps each read, so the output never grows past limit + one chunk and a
+    bomb is rejected mid-stream, before its bytes are materialized. Malformed
+    input raises exactly like the plain gzip.decompress this replaces."""
+    out = bytearray()
+    with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as gz:
+        while True:
+            chunk = gz.read(_GUNZIP_CHUNK)
+            if not chunk:
+                return bytes(out)
+            out += chunk
+            if len(out) > limit:
+                return None
+
+
 def extract_payload(text: str, nonce: str):
     """The exactly-one rule: one and only one nonce-matching block, else
     None (the run is treated as aborted, never a verdict).
@@ -174,18 +205,28 @@ def extract_payload(text: str, nonce: str):
     Decompressed-size guard (R4, Z.ai external review 2026-10-20, operator
     order 2026-10-21): a block whose extracted files total more than
     PAYLOAD_MAX_DECOMPRESSED_BYTES fails closed like a malformed block
-    (None). Scope of the guard (B1a review 2026-10-21): it bounds what the
-    host RETAINS — the extraction (gzip.decompress + per-member reads) runs
-    before this check, so peak materialization during extraction is not
-    bounded by the cap; a peak-bounded streaming read is a candidate for
-    #312."""
+    (None). #312 (B1a 2026-10-21, host-side — precedent CC-266) makes the
+    budget IN-STREAM instead of post-hoc: the gunzip is bounded by the cap
+    plus tar structure overhead (PAYLOAD_TAR_OVERHEAD_BYTES), and each
+    member read is capped by the remaining budget — peak materialization
+    is O(cap), so an over-cap bomb aborts mid-stream, before its bytes
+    exist. Pair tests: tests_harness/test_k8s_payload.py (R4 + #312 pairs,
+    the latter with a tracemalloc peak)."""
     pattern = (re.escape(begin_marker(nonce)) + r"\s*(.*?)\s*"
                + re.escape(end_marker(nonce)))
     blocks = re.findall(pattern, text, re.DOTALL)
     if len(blocks) != 1:
         return None
-    raw = gzip.decompress(base64.b64decode(blocks[0]))
+    # #312 (B1a): the budget starts at the gunzip — the decompressed stream
+    # itself is capped (file bytes + tar structure overhead), so a bomb never
+    # materializes; the b64 blob is already bounded by the input text.
+    raw = _bounded_gunzip(base64.b64decode(blocks[0]),
+                          PAYLOAD_MAX_DECOMPRESSED_BYTES
+                          + PAYLOAD_TAR_OVERHEAD_BYTES)
+    if raw is None:
+        return None
     files = {}
+    total = 0
     with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
         for m in tf.getmembers():
             if m.isfile():
@@ -197,9 +238,15 @@ def extract_payload(text: str, nonce: str):
                 member_file = tf.extractfile(m)
                 if member_file is None:  # fail-closed like the name checks above
                     return None
-                files[name] = member_file.read()
-    if sum(len(data) for data in files.values()) > PAYLOAD_MAX_DECOMPRESSED_BYTES:
-        return None  # R4: total above the cap — fail-closed like every guard above
+                # #312 (B1a): the R4 budget enforced per member — the read is
+                # capped by what remains, so an over-cap total is rejected
+                # BEFORE the bytes exist (not post-hoc after the loop).
+                remaining = PAYLOAD_MAX_DECOMPRESSED_BYTES - total
+                data = member_file.read(remaining + 1)
+                if len(data) > remaining:
+                    return None
+                files[name] = data
+                total += len(data)
     return files
 
 
