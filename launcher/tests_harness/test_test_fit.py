@@ -41,6 +41,12 @@ import types
 
 import pytest
 
+# R3 (#310, Z.ai review 2026-10-20 finding F3, operator order 2026-10-21):
+# the session code paths exercised here reach claude_agent_sdk at call time;
+# on a runner without the SDK this file must skip, not fail (guard pattern:
+# test_compaction_telemetry.py:27).
+pytest.importorskip("claude_agent_sdk")
+
 from launcher import session, summary
 from launcher.config import Config
 
