@@ -5,8 +5,9 @@ evidence/
 # environment and python
 .venv/
 __pycache__/
-# coverage gate artifacts (cover-requirements.lock; the CI coverage job and the
-# local calibration run write these — never part of the tree)
+# coverage gate artifacts: the CI coverage job writes only .coverage;
+# .coverage.* is from local parallel runs, htmlcov/ only from `coverage html`
+# — none of them are ever part of the tree
 .coverage
 .coverage.*
 htmlcov/
