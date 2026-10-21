@@ -68,6 +68,8 @@ from launcher.ticket import (
 )
 
 if TYPE_CHECKING:  # the gates.py house style — annotation-only, no runtime import
+    import argparse  # host_launch_k8s's caller passes an argparse.Namespace (cli.cmd_run)
+    from collections.abc import Sequence  # read-only parameter type (the verify.py:17 house style)
     from launcher.config import Config
 
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -153,7 +155,7 @@ def transport_ok(blob: str) -> bool:
     return len(blob) <= TRANSPORT_MAX_B64
 
 
-def build_payload(files: dict) -> str:
+def build_payload(files: dict[str, bytes]) -> str:
     """One base64 gzip-tar block: {name: bytes} -> the Pod's stdout payload."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
@@ -186,7 +188,7 @@ def _bounded_gunzip(compressed: bytes, limit: int) -> "bytes | None":
                 return None
 
 
-def extract_payload(text: str, nonce: str):
+def extract_payload(text: str, nonce: str) -> "dict[str, bytes] | None":
     """The exactly-one rule: one and only one nonce-matching block, else
     None (the run is treated as aborted, never a verdict).
 
@@ -226,7 +228,7 @@ def extract_payload(text: str, nonce: str):
                           + PAYLOAD_TAR_OVERHEAD_BYTES)
     if raw is None:
         return None
-    files = {}
+    files: dict[str, bytes] = {}
     total = 0
     with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
         for m in tf.getmembers():
@@ -263,7 +265,7 @@ def extract_payload(text: str, nonce: str):
 # verify._compare_manifests, gates.dirty_tree_gate) of a later portion.
 
 
-def _live_tree_drift(cfg) -> str | None:
+def _live_tree_drift(cfg: "Config") -> str | None:
     """B4 (external review 2026-10-17): the live-apply is only sound if the
     live tree is still the tree the run started from. The verdict was
     computed against the TRANSPORTED tree (`git archive HEAD` at snapshot
@@ -345,8 +347,9 @@ def apply_patch_scratch(tree_blob: str, patch_text: str) -> str:
         raise
 
 
-def scratch_contract_violations(cfg, before: dict, scratch_dir: str,
-                               declared) -> list:
+def scratch_contract_violations(cfg: "Config", before: dict[str, str],
+                               scratch_dir: str,
+                               declared: "Sequence[str]") -> list[str]:
     """The host contract recompute over the scratch tree — the SAME
     verify._tests_manifest + _compare_manifests as the pre-run snapshot
     (one implementation — no drift): the live tree is untouched in k8s
@@ -375,7 +378,7 @@ def rewrite_tracing_endpoint(settings_text: str, endpoint: str) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-def stamp_opik_traces(summary: dict, count) -> dict:
+def stamp_opik_traces(summary: dict[str, Any], count: int | None) -> dict[str, Any]:
     """CC-225: the host is the only party that can reach the Opik backend,
     so the host — not the Pod — issues the opik_traces field. The in-Pod
     summary carries the literal "disabled" (STANOK_IN_CONTAINER=1); the host
@@ -415,7 +418,7 @@ def stamp_opik_traces(summary: dict, count) -> dict:
 _DEADLINE_MARGIN_S = 300
 
 
-def job_deadline(cfg) -> int:
+def job_deadline(cfg: "Config") -> int:
     """CC-230 + the deadline contract (external review 2026-10-16): Job
     activeDeadlineSeconds must STRICTLY EXCEED the session's own turn
     timeout. The old default (1800) equalled STANOK_TURN_TIMEOUT_S (1800):
@@ -447,9 +450,10 @@ def job_deadline(cfg) -> int:
 # --all` pair as the worker, no model endpoint — the Docker-era
 # fresh_verify_argv mirror is gone with the Docker path, CC-258)
 # ==================================================================================
-def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
-               patch_file: str, deadline: int, created: list,
-               image_ref: str, peaks_out: dict | None = None) -> tuple:
+def _fresh_job(cfg: "Config", ns: str, fresh_name: str, cm_tree: str,
+               cm_patch: str, patch_file: str, deadline: int,
+               created: list[tuple[str, str]], image_ref: str,
+               peaks_out: dict[str, Any] | None = None) -> tuple[int, str]:
     try:
         # BL-4 (b): the patch transport guard — symmetry with the tree guard
         # (host_launch_k8s, TRANSPORT_MAX_B64): fail closed BEFORE the
@@ -478,8 +482,8 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
     # kubelet sampling as the worker Job; peaks go into the caller's holder
     # (host-stamped like patch_sha256). Only done when a holder is provided —
     # without one the flow is byte-for-byte the pre-measurement one.
-    sampler = None
-    fresh_pod = None
+    sampler: peaks._ResourceSampler | None = None
+    fresh_pod: str | None = None
     if peaks_out is not None:
         fresh_pod = lifecycle._pod_of_job(fresh_name, ns, timeout_s=30)
         if fresh_pod is not None:
@@ -529,7 +533,7 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
 # (before any cluster resource): an image not pushed to the registry is an
 # infrastructure defect (rc=16) with the fix named — never a silent pull wait.
 # ==================================================================================
-def _image_ref(cfg):
+def _image_ref(cfg: "Config") -> "tuple[str | None, str | None]":
     """Resolve the pushed RepoDigest for cfg.docker_image at cfg.registry.
     Returns (ref, None) on success, (None, reason) when the image is absent
     locally or not pushed — the reason text names the fix (setup.sh)."""
@@ -539,14 +543,16 @@ def _image_ref(cfg):
     if r.returncode != 0:
         return None, (f"image {cfg.docker_image!r} not found locally — "
                       "run setup.sh (build)")
+    digests: list[Any] = []
     try:
         # `docker inspect --format={{json .RepoDigests}}` prints `null` for an
         # image that exists but was never pushed — `or []` normalizes it.
+        # (the gates.py pattern: the json.loads result bound to an annotated local)
         digests = json.loads(r.stdout) or []
     except json.JSONDecodeError:
-        digests = []
-    ref = next((d for d in digests if isinstance(d, str)
-                and d.startswith(cfg.registry + "/")), None)
+        pass
+    ref: str | None = next((d for d in digests if isinstance(d, str)
+                            and d.startswith(cfg.registry + "/")), None)
     if ref is None:
         return None, (f"image {cfg.docker_image!r} is not pushed to the registry "
                       f"{cfg.registry!r} — run setup.sh (build+push); one-time "
@@ -904,7 +910,8 @@ def _apply_final_pass(cfg: "Config", label: str, patch_file: str,
 # host_launch_k8s — the ONLY host branch (CC-231; CC-258 removed the
 # Docker path)
 # ==================================================================================
-def host_launch_k8s(cfg, args, marker: str) -> int:
+def host_launch_k8s(cfg: "Config", args: "argparse.Namespace",
+                    marker: str) -> int:
     """The host supervision: transport -> worker Job -> payload -> patch gate
     + patch identity (SHA-256, re-verified before every apply) -> scratch
     contract -> fresh Job -> _publish_evidence -> rc alignment. The
@@ -967,7 +974,11 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     # BEFORE any cluster resource — an image not pushed to the registry aborts
     # with rc=16 and names the fix (setup.sh), never a silent ImagePullBackOff.
     image_ref, image_err = _image_ref(cfg)
-    if image_err:
+    # _image_ref's documented pairing: ref is None ⟺ reason is non-None
+    # (docstring; every test stub honors it) — testing the ref side is the
+    # same branch and narrows image_ref to str for the Job renders below
+    # (Q14 strict, S2).
+    if image_ref is None:
         return _early_abort(cfg, marker, label, args.ticket, ExitCode.ENV_FAIL,
                             f"ERROR: PREFLIGHT: {image_err}")
 
