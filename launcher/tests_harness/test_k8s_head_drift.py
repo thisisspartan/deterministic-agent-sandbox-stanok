@@ -40,7 +40,7 @@ import subprocess
 
 import pytest
 
-from launcher import k8s
+from launcher import k8s, kube
 from launcher.config import Config
 
 CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
@@ -133,7 +133,7 @@ def _scenario(tmp_path, monkeypatch, fresh_hook=None, export_start_commit=True):
     def fake_kubectl(*a, **k):
         calls.append(a[0] if a else "")
         return _FakeCompleted(0)
-    monkeypatch.setattr(k8s, "_kubectl", fake_kubectl)
+    monkeypatch.setattr(kube, "_kubectl", fake_kubectl)
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
 
     def fake_stream(pod, ns, path, deadline):

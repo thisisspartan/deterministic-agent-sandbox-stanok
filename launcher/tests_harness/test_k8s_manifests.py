@@ -76,7 +76,7 @@ from pathlib import Path
 
 import pytest
 
-from launcher import k8s, netpol
+from launcher import k8s, kube, netpol
 from launcher.config import Config
 
 K8S_DIR = Path(__file__).resolve().parents[2] / "k8s"
@@ -166,7 +166,7 @@ def test_netpol_defaults(monkeypatch):
 def test_networkpolicy_namespace_follows_job_knob(monkeypatch):
     # External review 2026-10-16: the boundary must live where the Jobs run.
     # The template carries {{NAMESPACE}}; netpol_variables() supplies it from
-    # k8s._namespace() — the same knob worker/fresh-job.yaml.tmpl render.
+    # kube._namespace() — the same knob worker/fresh-job.yaml.tmpl render.
     y = _read("networkpolicy.yaml.tmpl")
     assert y.count("namespace: {{NAMESPACE}}") == 2
 
@@ -351,23 +351,23 @@ def test_revision_deterministic_and_non_self_referential(monkeypatch):
     assert r1 == r2  # same inputs -> same revision (make-before-break safe)
 
     # a semantic change (an egress port) -> a different revision
-    orig = k8s._read_manifest
-    k8s._read_manifest = lambda name: orig(name).replace("port: 8080",
+    orig = kube._read_manifest
+    kube._read_manifest = lambda name: orig(name).replace("port: 8080",
                                                           "port: 9090")
     try:
         _, r3 = netpol.render_netpol_with_revision()
     finally:
-        k8s._read_manifest = orig
+        kube._read_manifest = orig
     assert r3 != r1
 
     # a NAME-only change -> the SAME revision (the hash never contains the
     # name it is used in — non-self-referential)
-    k8s._read_manifest = lambda name: orig(name).replace(
+    kube._read_manifest = lambda name: orig(name).replace(
         "stanok-worker-egress-", "stanok-worker-egressX-")
     try:
         _, r4 = netpol.render_netpol_with_revision()
     finally:
-        k8s._read_manifest = orig
+        kube._read_manifest = orig
     assert r4 == r1
 
 
@@ -508,9 +508,9 @@ def test_render_template_rejects_markup_injection():
     # supplies — sanitized names, model_ip()-validated IPs, hex revisions,
     # str() of ints) render exactly as before.
     with pytest.raises(ValueError):
-        k8s.render_template("value: {{V}}", {"V": "{{MODEL_IP}}"})
+        kube.render_template("value: {{V}}", {"V": "{{MODEL_IP}}"})
     with pytest.raises(ValueError):
-        k8s.render_template("value: {{V}}", {"V": "line1\nline2"})
-    assert k8s.render_template("image: {{IMAGE}}\nnamespace: {{NS}}", {
+        kube.render_template("value: {{V}}", {"V": "line1\nline2"})
+    assert kube.render_template("image: {{IMAGE}}\nnamespace: {{NS}}", {
         "IMAGE": "img@sha256:0123abcd", "NS": "default"}) == (
         "image: img@sha256:0123abcd\nnamespace: default")

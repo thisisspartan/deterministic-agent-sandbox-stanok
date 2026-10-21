@@ -35,7 +35,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_observation_wir
 import argparse
 import os
 
-from launcher import k8s
+from launcher import k8s, kube
 from launcher.config import Config
 
 CLOCK_START = 1000.0  # arbitrary monotonic origin for the stubbed clock
@@ -85,7 +85,7 @@ def _drive(tmp_path, monkeypatch, *, advance_at_pod=None, advance_at_stream=None
     def guard(*a, **k):
         raise AssertionError(f"real cluster call from test: {a[:3]}")
     monkeypatch.setattr(k8s.subprocess, "run", guard)
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0))
 
     def fake_pod(job_name, ns, timeout_s=120):

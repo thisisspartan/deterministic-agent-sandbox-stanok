@@ -47,7 +47,7 @@ import argparse
 import json
 import os
 
-from launcher import cli, k8s
+from launcher import cli, k8s, kube
 from launcher.config import Config
 
 
@@ -105,16 +105,16 @@ def test_cluster_env_falls_back_to_user_kubeconfig(tmp_path, monkeypatch):
     kc = tmp_path / ".kube" / "config"
     kc.parent.mkdir()
     kc.write_text("x", encoding="utf-8")
-    assert k8s._cluster_env()["KUBECONFIG"] == str(kc)
+    assert kube._cluster_env()["KUBECONFIG"] == str(kc)
     # an explicit KUBECONFIG is never overridden
     monkeypatch.setenv("KUBECONFIG", "/somewhere/else")
-    assert k8s._cluster_env()["KUBECONFIG"] == "/somewhere/else"
+    assert kube._cluster_env()["KUBECONFIG"] == "/somewhere/else"
 
 
 def test_cluster_env_no_fallback_without_kubeconfig(tmp_path, monkeypatch):
     monkeypatch.delenv("KUBECONFIG", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))  # no .kube/config there
-    assert "KUBECONFIG" not in k8s._cluster_env()
+    assert "KUBECONFIG" not in kube._cluster_env()
 
 
 def test_stream_pod_logs_uses_cluster_env(tmp_path, monkeypatch):
@@ -228,7 +228,7 @@ def test_gate_aborts_before_any_cluster_call(tmp_path, monkeypatch):
     monkeypatch.setattr(k8s, "_preflight",
                         lambda cfg: "cluster unreachable: mock")
     _no_real_cluster_calls(monkeypatch)
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: calls.append(a) or _FakeCompleted(0))
     marker = str(tmp_path / ".running")
     rc = k8s.host_launch_k8s(cfg, args, marker)
@@ -255,7 +255,7 @@ def test_gate_runs_before_cluster_calls(tmp_path, monkeypatch):
     def stop(*a, **k):
         order.append(a[0])
         return _FakeCompleted(1, stderr="stop-here")  # -> _kubectl_checked raises
-    monkeypatch.setattr(k8s, "_kubectl", stop)
+    monkeypatch.setattr(kube, "_kubectl", stop)
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     assert order == ["gate", "create"]  # gate first, resources after it
     assert rc == 16  # the failed cluster call -> infra path
@@ -283,7 +283,7 @@ def test_cleanup_deletes_only_created_resources(tmp_path, monkeypatch):
     def fake(*a, **k):
         calls.append(a)
         return _FakeCompleted(0)  # every create succeeds
-    monkeypatch.setattr(k8s, "_kubectl", fake)
+    monkeypatch.setattr(kube, "_kubectl", fake)
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: None)
     monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "failed")
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
@@ -307,7 +307,7 @@ def test_pod_image_id_reads_the_pod_record(monkeypatch):
     def fake(*a, **k):
         seen.append(a)
         return _FakeCompleted(0, "sha256:913ad405b489\n")
-    monkeypatch.setattr(k8s, "_kubectl", fake)
+    monkeypatch.setattr(kube, "_kubectl", fake)
     assert k8s._pod_image_id("pod-x", "default") == "sha256:913ad405b489"
     assert seen == [("get", "pod", "pod-x", "-n", "default",
                      "-o", "jsonpath={.status.containerStatuses[0].imageID}")]
@@ -317,7 +317,7 @@ def test_pod_image_id_accepts_containerd_registry_qualified_form(monkeypatch):
     # live defect (verify-registry run, 2026-10-12): containerd/k3s reports
     # "<repo>@sha256:<hex>", not the bare docker form — the DEFAULT runtime
     # must be accepted (it is the stronger proof: it names the registry).
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(
         0, "192.168.122.156:5000/stanok-machine@sha256:20a61e6943f4\n"))
     assert k8s._pod_image_id("pod-x", "default") == \
         "192.168.122.156:5000/stanok-machine@sha256:20a61e6943f4"
@@ -325,16 +325,16 @@ def test_pod_image_id_accepts_containerd_registry_qualified_form(monkeypatch):
 
 def test_pod_image_id_fail_soft_is_none(monkeypatch):
     # no pod / kubectl error / non-digest value -> None (explicit, never a guess)
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, "sha256:abc"))
     assert k8s._pod_image_id(None, "default") is None
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(1, "", "not found"))
     assert k8s._pod_image_id("pod-x", "default") is None
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, "stanok-machine:latest"))
     assert k8s._pod_image_id("pod-x", "default") is None
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0, ""))
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0, ""))
     assert k8s._pod_image_id("pod-x", "default") is None
 
 
@@ -356,7 +356,7 @@ def _payload_host_run(tmp_path, monkeypatch, payload, real_apply=False):
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
     monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
     _no_real_cluster_calls(monkeypatch)
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0))
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0))
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: None)
     monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "succeeded")
     # The payload path requires pod-stdout.log to exist; its content is

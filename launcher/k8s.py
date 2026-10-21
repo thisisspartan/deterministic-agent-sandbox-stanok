@@ -59,7 +59,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from launcher import gates, opik, verify, zones
+from launcher import gates, kube, opik, verify, zones
 from launcher.abort import _early_abort  # wave A step 1: was a lazy import from cli (the cli->k8s cycle was its only reason; abort imports neither)
 from launcher.config import RunState
 from launcher.exitcodes import ExitCode
@@ -72,7 +72,8 @@ from launcher.ticket import (
 )
 
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
-K8S_DIR = os.path.join(LAUNCHER_DIR, "..", "k8s")
+# Wave A portion 2 (2026-10-21): K8S_DIR moved with _read_manifest to
+# launcher/kube.py — the manifest directory is read only there.
 
 # The ConfigMap size guard (O4): measured 2026-10-10 — full git bundle
 # 1,308,067B > the threshold; `git archive HEAD | gzip | base64` ~240KB.
@@ -598,93 +599,17 @@ def stamp_opik_traces(summary: dict, count) -> dict:
     return summary
 
 
-def render_template(text: str, variables: dict) -> str:
-    for key, value in variables.items():
-        v = str(value)
-        # R5 (Z.ai external review 2026-10-20, operator order 2026-10-21):
-        # str.replace rendering has no escaping. A value carrying "{{"
-        # chains a second substitution pass (manifest markup injected
-        # through the value); a value carrying "\n" breaks YAML structure
-        # at the placeholder site. Every real caller supplies single-line
-        # brace-free values (sanitized names, IPs validated by
-        # model_ip(), hex revisions, str() of ints); anything else raises
-        # before the manifest reaches the cluster.
-        # Pair test: tests_harness/test_k8s_manifests.py (R5 pair).
-        if "{{" in v or "\n" in v:
-            raise ValueError(
-                f"render_template: value for {key!r} must not contain "
-                "'{{' or a newline (manifest markup injection)")
-        text = text.replace("{{" + key + "}}", v)
-    return text
-
-
-# ==================================================================================
-# kubectl plumbing (runtime knobs, not Config fields)
-# ==================================================================================
-def _kubectl_bin() -> str:
-    return os.environ.get("STANOK_KUBECTL") or "kubectl"
-
-
-def _namespace() -> str:
-    return os.environ.get("STANOK_K8S_NAMESPACE", "default")
-
-
-def _k8s_name(label: str) -> str:
-    """Object names are sanitized (labels allow [A-Za-z0-9_.-], k8s names do
-    not); the evidence/label paths keep the ORIGINAL label — only cluster
-    object names are rewritten."""
-    name = re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]", "-", label.lower()))
-    return name.strip("-")[:50]
-
-
-def _read_manifest(name: str) -> str:
-    with open(os.path.join(K8S_DIR, name), encoding="utf-8") as f:
-        return f.read()
-
-
-def _cluster_env() -> dict:
-    """CC-232: kubectl config resolution on the operator host. With KUBECONFIG
-    unset, kubectl's own fallback chain can land on the non-world-readable
-    /etc/rancher/k3s/k3s.yaml (the 2026-10-10 doctor failure); when
-    KUBECONFIG is unset and ~/.kube/config exists, set it explicitly — the
-    same fallback the doctor k8s health tests use."""
-    env = dict(os.environ)
-    if not env.get("KUBECONFIG"):
-        kc = os.path.expanduser("~/.kube/config")
-        if os.path.isfile(kc):
-            env["KUBECONFIG"] = kc
-    return env
-
-
-def _kubectl(*argv, timeout: int = 60, input_text: str | None = None):
-    return subprocess.run([_kubectl_bin(), *argv], capture_output=True,
-                          text=True, timeout=timeout, input=input_text,
-                          env=_cluster_env())
-
-
-def _kubectl_checked(*argv, timeout: int = 60):
-    r = _kubectl(*argv, timeout=timeout)
-    if r.returncode != 0:
-        raise RuntimeError(f"kubectl {' '.join(argv[:2])} failed "
-                           f"(rc={r.returncode}): {r.stderr.strip()}")
-    return r
-
-
-def _create_manifest(text: str) -> None:
-    """`create`, not `apply` (operator P0 2026-10-11): create fails when the
-    object already exists, so a success proves THIS run created it — the
-    ownership proof the finally cleanup needs. An `apply` would silently
-    modify a foreign object and the cleanup would delete it."""
-    r = _kubectl("create", "-f", "-", input_text=text)
-    if r.returncode != 0:
-        raise RuntimeError(f"kubectl create failed (rc={r.returncode}): "
-                           f"{r.stderr.strip()}")
+# Wave A portion 2 (2026-10-21): render_template / _read_manifest and the
+# kubectl plumbing (_kubectl, _kubectl_checked, _create_manifest,
+# _kubectl_bin, _namespace, _k8s_name, _cluster_env) moved verbatim to
+# launcher/kube.py (agreed T3 sequence). Every call below is kube._X —
+# kube is the single patch home (guard: tests_harness/test_kube_facade.py).
 
 
 def _pod_of_job(job_name: str, ns: str, timeout_s: int = 120):
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        r = _kubectl("get", "pods", "-n", ns, "-l", f"job-name={job_name}",
+        r = kube._kubectl("get", "pods", "-n", ns, "-l", f"job-name={job_name}",
                      "-o", "jsonpath={.items[0].metadata.name}")
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
@@ -706,7 +631,7 @@ def _pod_image_id(pod, ns: str):
     guess)."""
     if not pod:
         return None
-    r = _kubectl("get", "pod", pod, "-n", ns, "-o",
+    r = kube._kubectl("get", "pod", pod, "-n", ns, "-o",
                  "jsonpath={.status.containerStatuses[0].imageID}")
     out = (r.stdout or "").strip()
     if r.returncode != 0 or not re.search(r"(?:^|@)sha256:[0-9a-f]+$", out):
@@ -723,12 +648,12 @@ def _stream_pod_logs(pod: str, ns: str, path: str, timeout_s: int) -> bool:
     produced no logs"; the caller names it in the missing-payload abort."""
     with open(path, "wb") as lf:
         try:
-            # CC-232: same config resolution as _kubectl — the log stream is
+            # CC-232: same config resolution as kube._kubectl — the log stream is
             # a kubectl call too (incident cc233: without it the stream died
             # on the non-readable /etc/rancher/k3s/k3s.yaml fallback).
-            r = subprocess.run([_kubectl_bin(), "logs", "-f", pod, "-n", ns],
+            r = subprocess.run([kube._kubectl_bin(), "logs", "-f", pod, "-n", ns],
                                stdout=lf, stderr=subprocess.STDOUT,
-                               timeout=timeout_s, env=_cluster_env())
+                               timeout=timeout_s, env=kube._cluster_env())
         except subprocess.TimeoutExpired:
             log("K8S: kubectl logs -f hit the host timeout")
             return False
@@ -746,7 +671,7 @@ def _job_rc_and_tail(job_name: str, ns: str) -> tuple:
     """(exit_rc, tail) of a FAILED Job: the Pod's terminated exit code plus
     its log tail (the fresh-check failure text)."""
     exit_rc = 1
-    p = _kubectl("get", "pods", "-n", ns, "-l", f"job-name={job_name}",
+    p = kube._kubectl("get", "pods", "-n", ns, "-l", f"job-name={job_name}",
                  "-o", "jsonpath={.items[0].status.containerStatuses[0]."
                        "state.terminated.exitCode}")
     if p.returncode == 0 and p.stdout.strip().lstrip("-").isdigit():
@@ -754,7 +679,7 @@ def _job_rc_and_tail(job_name: str, ns: str) -> tuple:
     pod = _pod_of_job(job_name, ns, timeout_s=30)
     tail = ""
     if pod:
-        lg = _kubectl("logs", pod, "-n", ns)
+        lg = kube._kubectl("logs", pod, "-n", ns)
         tail = (lg.stderr or "") + "\n" + (lg.stdout or "")
     return exit_rc, tail
 
@@ -776,7 +701,7 @@ def _pod_infra_cause(pod, ns: str):
     Fail-soft: no pod / kubectl error / unparseable JSON -> None."""
     if not pod:
         return None
-    r = _kubectl("get", "pod", pod, "-n", ns, "-o", "json")
+    r = kube._kubectl("get", "pod", pod, "-n", ns, "-o", "json")
     if r.returncode != 0:
         return None
     try:
@@ -800,7 +725,7 @@ def _job_infra_cause(name: str, ns: str):
     — the Job-level reason is the honest signal. Infrastructure defect:
     the session outlived the Job deadline, not a ticket defect.
     Fail-soft: no job / kubectl error / unparseable JSON -> None."""
-    r = _kubectl("get", "job", name, "-n", ns, "-o", "json")
+    r = kube._kubectl("get", "job", name, "-n", ns, "-o", "json")
     if r.returncode != 0:
         return None
     try:
@@ -821,7 +746,7 @@ def _wait_job_terminal(name: str, ns: str, timeout_s: int) -> str:
     hour) — the host must learn about a failed Job immediately."""
     deadline = time.monotonic() + timeout_s
     while True:
-        r = _kubectl("get", "job", name, "-n", ns, "-o", "json")
+        r = kube._kubectl("get", "job", name, "-n", ns, "-o", "json")
         if r.returncode == 0:
             try:
                 conds = json.loads(r.stdout).get("status", {}).get("conditions", [])
@@ -927,13 +852,13 @@ SAMPLE_INTERVAL_S = 10.0
 
 
 def _node_of_pod(pod: str, ns: str):
-    r = _kubectl("get", "pod", pod, "-n", ns, "-o", "jsonpath={.spec.nodeName}")
+    r = kube._kubectl("get", "pod", pod, "-n", ns, "-o", "jsonpath={.spec.nodeName}")
     node = (r.stdout or "").strip()
     return node or None
 
 
 def _kubelet_stats(node: str) -> dict:
-    r = _kubectl_checked("get", "--raw",
+    r = kube._kubectl_checked("get", "--raw",
                         f"/api/v1/nodes/{node}/proxy/stats/summary")
     return json.loads(r.stdout)
 
@@ -1034,10 +959,10 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
             return (1, f"EXEC_ERROR: patch transport {patch_size}B exceeds "
                        f"the ConfigMap limit {TRANSPORT_MAX_B64}B — "
                        "fail-closed before any kubectl call")
-        _kubectl_checked("create", "configmap", cm_patch, "-n", ns,
+        kube._kubectl_checked("create", "configmap", cm_patch, "-n", ns,
                         f"--from-file=changes.patch={patch_file}")
         created.append(("configmap", cm_patch))
-        _create_manifest(render_template(_read_manifest("fresh-job.yaml.tmpl"), {
+        kube._create_manifest(kube.render_template(kube._read_manifest("fresh-job.yaml.tmpl"), {
             "JOB_NAME": fresh_name.removeprefix("stanok-fresh-"),
             "IMAGE": image_ref, "NAMESPACE": ns,
             "CM_TREE": cm_tree, "CM_PATCH": cm_patch, "DEADLINE": str(deadline),
@@ -1104,9 +1029,9 @@ def _preflight_cluster(cfg):
     Returns None when launch-ready, else the abort reason. An infrastructure
     defect (rc=16), never a ticket defect — the 3 ticket retries are not
     burned on it."""
-    r = subprocess.run([_kubectl_bin(), "get", "nodes", "--no-headers"],
+    r = subprocess.run([kube._kubectl_bin(), "get", "nodes", "--no-headers"],
                        capture_output=True, text=True, timeout=30,
-                       env=_cluster_env())
+                       env=kube._cluster_env())
     if r.returncode != 0:
         return ("cluster unreachable: kubectl get nodes failed "
                 f"(rc={r.returncode}): {(r.stderr or r.stdout).strip()[:300]}")
@@ -1227,7 +1152,7 @@ def _preflight_runtime_class(cfg):
     rc = _runtime_class_name()
     if not rc:
         return None
-    r = _kubectl("get", "runtimeclass", rc, "--no-headers")
+    r = kube._kubectl("get", "runtimeclass", rc, "--no-headers")
     if r.returncode != 0:
         return (f"runtimeclass {rc!r} not in the cluster — fix: create it or "
                 "set STANOK_K8S_RUNTIME_CLASS=runc")
@@ -1248,8 +1173,8 @@ def _preflight_netpol(cfg):
     Coverage by NAME PREFIX, any revision: the make-before-break cutover
     (Package 1) means an older revision may legitimately be the applied one
     — presence of the boundary is the contract, never revision match."""
-    ns = _namespace()
-    r = _kubectl("get", "networkpolicy", "-n", ns, "-o",
+    ns = kube._namespace()
+    r = kube._kubectl("get", "networkpolicy", "-n", ns, "-o",
                  "jsonpath={.items[*].metadata.name}")
     if r.returncode != 0:
         return (f"cannot list NetworkPolicies in namespace {ns} "
@@ -1270,9 +1195,9 @@ def _preflight_dangling(cfg):
     crashed run (a finished Job awaiting its TTL is not dangling — it is
     already inert). A leftover Pod/Job collides with the new run's names or
     holds the node's resources — refuse with the cleanup named."""
-    ns = _namespace()
+    ns = kube._namespace()
     leftovers = []
-    r = _kubectl("get", "jobs", "-n", ns, "-l", "stanok", "-o",
+    r = kube._kubectl("get", "jobs", "-n", ns, "-l", "stanok", "-o",
                  "jsonpath={range .items[*]}{.metadata.name} "
                  "{.status.active}{\"\\n\"}{end}")
     if r.returncode != 0:
@@ -1282,7 +1207,7 @@ def _preflight_dangling(cfg):
         parts = line.split()
         if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) > 0:
             leftovers.append(f"job/{parts[0]}")
-    r = _kubectl("get", "pods", "-n", ns, "-l", "stanok", "-o",
+    r = kube._kubectl("get", "pods", "-n", ns, "-l", "stanok", "-o",
                  "jsonpath={range .items[*]}{.metadata.name} "
                  "{.status.phase}{\"\\n\"}{end}")
     if r.returncode != 0:
@@ -1363,8 +1288,8 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     defect (rc=16, write_env_fail_summary), NOT a ticket defect — the 3
     ticket retries must not be burned on it."""
     label = args.label
-    ns = _namespace()
-    kname = _k8s_name(label)
+    ns = kube._namespace()
+    kname = kube._k8s_name(label)
     job_name = f"stanok-job-{kname}"
     fresh_name = f"stanok-fresh-{kname}"
     cm_ticket = f"stanok-ticket-{kname}"
@@ -1372,9 +1297,9 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     cm_runner = f"stanok-runner-{kname}"
     cm_patch = f"stanok-patch-{kname}"
 
-    if shutil.which(_kubectl_bin()) is None:
+    if shutil.which(kube._kubectl_bin()) is None:
         return _early_abort(cfg, marker, label, args.ticket, ExitCode.ENV_FAIL,
-                            f"ERROR: kubectl ({_kubectl_bin()}) not found — the "
+                            f"ERROR: kubectl ({kube._kubectl_bin()}) not found — the "
                             "K8s runtime is unavailable (rc=16, infrastructure)")
 
     # The ticket gate (CC-133/CC-206) — before any cluster call: the machine
@@ -1471,18 +1396,18 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
     created = []
     try:
         try:
-            _kubectl_checked("create", "configmap", cm_ticket, "-n", ns,
+            kube._kubectl_checked("create", "configmap", cm_ticket, "-n", ns,
                              f"--from-file=ticket.md={args.ticket_path}")
             created.append(("configmap", cm_ticket))
-            _kubectl_checked("create", "configmap", cm_tree, "-n", ns,
+            kube._kubectl_checked("create", "configmap", cm_tree, "-n", ns,
                              f"--from-file=tree.tar.gz.b64={tree_file}")
             created.append(("configmap", cm_tree))
-            _kubectl_checked("create", "configmap", cm_runner, "-n", ns,
+            kube._kubectl_checked("create", "configmap", cm_runner, "-n", ns,
                              "--from-file=pod_runner.py=" +
                              os.path.join(LAUNCHER_DIR, "pod_runner.py"))
             created.append(("configmap", cm_runner))
-            _create_manifest(render_template(
-                _read_manifest("worker-job.yaml.tmpl"), {
+            kube._create_manifest(kube.render_template(
+                kube._read_manifest("worker-job.yaml.tmpl"), {
                     "JOB_NAME": job_name, "LABEL": label, "NONCE": nonce,
                     "IMAGE": image_ref, "NAMESPACE": ns,
                     "SERVER_URL": cfg.server_url, "MODEL": cfg.model,
@@ -1808,7 +1733,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
         # Resources this run never created are NOT touched — a foreign object
         # with a colliding name survives (operator P0 2026-10-11).
         for kind, name in created:
-            _kubectl("delete", kind, name, "-n", ns, "--ignore-not-found",
+            kube._kubectl("delete", kind, name, "-n", ns, "--ignore-not-found",
                      "--wait=false")
         try:
             os.remove(marker)

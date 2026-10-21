@@ -19,7 +19,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_preflight.py -q
 """
 import urllib.error
 
-from launcher import k8s
+from launcher import k8s, kube
 from launcher.config import Config
 
 
@@ -137,7 +137,7 @@ def test_runtimeclass_default_gvisor_is_checked(monkeypatch):
     # CC-256: unset -> the effective class is gvisor -> the check RUNS.
     monkeypatch.delenv("STANOK_K8S_RUNTIME_CLASS", raising=False)
     calls = []
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: calls.append(a) or _FakeCompleted(0, "gvisor"))
     assert k8s._preflight_runtime_class(None) is None
     assert calls and calls[0][:2] == ("get", "runtimeclass") and calls[0][2] == "gvisor"
@@ -146,7 +146,7 @@ def test_runtimeclass_default_gvisor_is_checked(monkeypatch):
 def test_runtimeclass_runc_optout_skips_the_check(monkeypatch):
     monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "runc")
     calls = []
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: calls.append(a) or _FakeCompleted(0))
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: calls.append(a) or _FakeCompleted(0))
     assert k8s._preflight_runtime_class(None) is None
     assert calls == []
 
@@ -158,7 +158,7 @@ def test_runtimeclass_missing_is_reason(monkeypatch):
     def fake(*a, **k):
         seen.append(a)
         return _FakeCompleted(1, "", "not found")
-    monkeypatch.setattr(k8s, "_kubectl", fake)
+    monkeypatch.setattr(kube, "_kubectl", fake)
     reason = k8s._preflight_runtime_class(None)
     assert reason and "runtimeclass 'gvisor' not in the cluster" in reason
     assert seen and seen[0][:2] == ("get", "runtimeclass")
@@ -166,7 +166,7 @@ def test_runtimeclass_missing_is_reason(monkeypatch):
 
 def test_runtimeclass_present_is_none(monkeypatch):
     monkeypatch.setenv("STANOK_K8S_RUNTIME_CLASS", "gvisor")
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0, "gvisor"))
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0, "gvisor"))
     assert k8s._preflight_runtime_class(None) is None
 
 
@@ -178,7 +178,7 @@ def _fake_netpol(monkeypatch, *, rc=0, out=""):
     def fake(*a, **k):
         seen.append(a)
         return _FakeCompleted(rc, out, "boom" if rc else "")
-    monkeypatch.setattr(k8s, "_kubectl", fake)
+    monkeypatch.setattr(kube, "_kubectl", fake)
     return seen
 
 
@@ -236,7 +236,7 @@ def _fake_kubectl(monkeypatch, *, jobs_out="", pods_out="", rc=0):
         if "jobs" in a:
             return _FakeCompleted(rc, jobs_out)
         return _FakeCompleted(rc, pods_out)
-    monkeypatch.setattr(k8s, "_kubectl", fake)
+    monkeypatch.setattr(kube, "_kubectl", fake)
     return seen
 
 

@@ -22,7 +22,7 @@ import argparse
 import json
 import os
 
-from launcher import k8s
+from launcher import k8s, kube
 from launcher.config import Config
 
 DIGEST = "192.168.122.156:5000/stanok-machine@sha256:deadbeef"
@@ -113,7 +113,7 @@ def test_unpushed_image_aborts_rc16_before_any_cluster_call(tmp_path, monkeypatc
     monkeypatch.setattr(k8s, "_image_ref",
                         lambda cfg: (None, "image not pushed to the registry — run setup.sh"))
     calls = []
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: calls.append(a) or _FakeCompleted(0))
     marker = str(tmp_path / ".running")
     rc = k8s.host_launch_k8s(cfg, args, marker)
@@ -136,7 +136,7 @@ def test_rendered_worker_job_carries_the_digest(tmp_path, monkeypatch):
         if a[:2] == ("create", "-f"):
             manifests.append(k.get("input_text") or "")
         return _FakeCompleted(0)
-    monkeypatch.setattr(k8s, "_kubectl", fake)
+    monkeypatch.setattr(kube, "_kubectl", fake)
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: None)
     monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "failed")
     k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))

@@ -74,7 +74,7 @@ import subprocess
 
 import pytest
 
-from launcher import k8s
+from launcher import k8s, kube
 from launcher.config import Config
 
 # CC-237 (schema v2): the worker summary is TYPED — no errors/failures/
@@ -200,7 +200,7 @@ def _k8s_scenario(tmp_path, monkeypatch, *, worker_summary=CLEAN_WORKER,
     def fake_kubectl(*a, **k):
         calls.append(a[0] if a else "")
         return _FakeCompleted(0)
-    monkeypatch.setattr(k8s, "_kubectl", fake_kubectl)
+    monkeypatch.setattr(kube, "_kubectl", fake_kubectl)
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
 
     def fake_stream(pod, ns, path, deadline):

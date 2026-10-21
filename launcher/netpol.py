@@ -8,7 +8,7 @@ STANOK_OPIK_BACKEND_IP; MODEL_IP is derived from STANOK_SERVER_URL, the same
 value the worker Job receives (fail closed: the URL host must parse as an
 IPv4 address — a hostname the netpol controller cannot match as an ipBlock
 is a configuration error, never a silent render). NAMESPACE is the effective
-Job namespace (STANOK_K8S_NAMESPACE via k8s._namespace) — the boundary is
+Job namespace (STANOK_K8S_NAMESPACE via kube._namespace) — the boundary is
 rendered into the namespace the Jobs actually run in.
 
 Versioned names (Package 1, operator spec 2026-10-10): the template carries
@@ -34,7 +34,7 @@ import re
 import sys
 from urllib.parse import urlparse
 
-from launcher import config, k8s
+from launcher import config, kube
 
 TEMPLATE = "networkpolicy.yaml.tmpl"
 # The Config.from_env default — the same fallback the worker gets.
@@ -54,14 +54,14 @@ def model_ip() -> str:
 
 def netpol_variables() -> dict[str, str]:
     # NAMESPACE: the effective Job namespace (STANOK_K8S_NAMESPACE) — the same
-    # knob the Job templates render (k8s._namespace). A NetworkPolicy only
+    # knob the Job templates render (kube._namespace). A NetworkPolicy only
     # selects Pods in its own namespace: rendering it to a hardcoded "default"
     # while the Jobs run elsewhere would silently leave them unrestricted
     # (external review 2026-10-16). The namespace line is canonical content,
     # so a namespace change is a semantic change -> new revision -> new names.
     return {
         "MODEL_IP": model_ip(),
-        "NAMESPACE": k8s._namespace(),
+        "NAMESPACE": kube._namespace(),
         "OPIK_HOST_IP": os.environ.get("STANOK_OPIK_HOST_IP",
                                        config.DEFAULT_OPIK_HOST_IP),
         "OPIK_BACKEND_IP": os.environ.get("STANOK_OPIK_BACKEND_IP",
@@ -90,7 +90,7 @@ def revision(text: str) -> str:
 def render_netpol_with_revision() -> tuple[str, str]:
     """Two-pass render: addresses first, then the revision of the canonical
     semantic content, then the name substitution. Returns (manifest, revision)."""
-    rendered = k8s.render_template(k8s._read_manifest(TEMPLATE), netpol_variables())
+    rendered = kube.render_template(kube._read_manifest(TEMPLATE), netpol_variables())
     rev = revision(rendered)
     return rendered.replace("{{REVISION}}", rev), rev
 

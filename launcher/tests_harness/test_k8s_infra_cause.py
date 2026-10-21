@@ -39,7 +39,7 @@ import argparse
 import json
 import subprocess
 
-from launcher import k8s
+from launcher import k8s, kube
 from launcher.config import Config
 
 CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
@@ -84,7 +84,7 @@ def _stub_pod(monkeypatch, pod_json, rc=0):
         if rc != 0:
             return _FakeCompleted(rc, "", "pods not found")
         return _FakeCompleted(0, json.dumps(pod_json))
-    monkeypatch.setattr(k8s, "_kubectl", fake)
+    monkeypatch.setattr(kube, "_kubectl", fake)
 
 
 def test_oomkilled_reason_is_classified(monkeypatch):
@@ -113,10 +113,10 @@ def test_fail_soft_is_none(monkeypatch):
     assert k8s._pod_infra_cause(None, "default") is None  # no pod
     _stub_pod(monkeypatch, OOM_POD, rc=1)
     assert k8s._pod_infra_cause("pod-x", "default") is None  # kubectl error
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, "not json"))
     assert k8s._pod_infra_cause("pod-x", "default") is None  # unparseable
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, "{}"))
     assert k8s._pod_infra_cause("pod-x", "default") is None  # no status
 
@@ -128,7 +128,7 @@ def _stub_job(monkeypatch, job_json, rc=0):
         if rc != 0:
             return _FakeCompleted(rc, "", "jobs not found")
         return _FakeCompleted(0, json.dumps(job_json))
-    monkeypatch.setattr(k8s, "_kubectl", fake)
+    monkeypatch.setattr(kube, "_kubectl", fake)
 
 
 def test_job_deadline_exceeded_condition_is_classified(monkeypatch):
@@ -149,10 +149,10 @@ def test_other_failed_reason_is_not_deadline(monkeypatch):
 def test_job_infra_cause_fail_soft_is_none(monkeypatch):
     _stub_job(monkeypatch, DEADLINE_JOB, rc=1)
     assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, "not json"))
     assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0, "{}"))
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0, "{}"))
     assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
 
 
@@ -163,9 +163,9 @@ def _fresh_env(tmp_path, monkeypatch, pod_json, job_rc_tail=None, job_json=None)
     patch_file = tmp_path / "changes.patch"
     patch_file.write_text("diff --git a/src/x.py b/src/x.py\n", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(k8s, "_kubectl_checked",
+    monkeypatch.setattr(kube, "_kubectl_checked",
                         lambda *a, **k: calls.append(a) or _FakeCompleted(0))
-    monkeypatch.setattr(k8s, "_create_manifest",
+    monkeypatch.setattr(kube, "_create_manifest",
                         lambda text: calls.append(("manifest",)))
     monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "failed")
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
@@ -174,7 +174,7 @@ def _fresh_env(tmp_path, monkeypatch, pod_json, job_rc_tail=None, job_json=None)
         if a[:2] == ("get", "job") and job_json is not None:
             return _FakeCompleted(0, json.dumps(job_json))
         return _FakeCompleted(0, json.dumps(pod_json))
-    monkeypatch.setattr(k8s, "_kubectl", fake_kubectl)
+    monkeypatch.setattr(kube, "_kubectl", fake_kubectl)
     if job_rc_tail is not None:
         monkeypatch.setattr(k8s, "_job_rc_and_tail", lambda *a, **k: job_rc_tail)
     return cfg, patch_file, calls
@@ -322,7 +322,7 @@ def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
         if a[:2] == ("get", "job") and job_json is not None:
             return _FakeCompleted(0, json.dumps(job_json))
         return _FakeCompleted(0)
-    monkeypatch.setattr(k8s, "_kubectl", fake_kubectl)
+    monkeypatch.setattr(kube, "_kubectl", fake_kubectl)
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
 
     def fake_stream(pod, ns, path, deadline):

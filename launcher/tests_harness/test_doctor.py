@@ -279,7 +279,7 @@ def test_k8s_cluster_nodes_ready():
                     "k8s runtime not expected")
     if shutil.which("kubectl") is None:
         pytest.skip("kubectl unavailable — flagged by test_kubectl_available")
-    # Same kubeconfig resolution as the launch path (k8s._cluster_env,
+    # Same kubeconfig resolution as the launch path (kube._cluster_env,
     # CC-232): the default /etc/rancher/k3s/k3s.yaml is not user-readable —
     # fall back to ~/.kube/config when KUBECONFIG is unset (the operator
     # host layout).

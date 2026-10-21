@@ -26,7 +26,7 @@ import argparse
 import hashlib
 import os
 
-from launcher import k8s, verify
+from launcher import k8s, kube, verify
 from launcher.config import Config
 
 
@@ -75,7 +75,7 @@ def test_snapshot_computed_before_cluster_calls(tmp_path, monkeypatch):
     def stop(*a, **k):
         calls.append(a[0])
         return _FakeCompleted(1, stderr="stop-here")  # -> _kubectl_checked raises
-    monkeypatch.setattr(k8s, "_kubectl", stop)
+    monkeypatch.setattr(kube, "_kubectl", stop)
 
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     assert rc == 16  # the failed cluster call -> infra path

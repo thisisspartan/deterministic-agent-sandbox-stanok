@@ -25,7 +25,7 @@ import signal
 import subprocess
 import time
 
-from launcher import cli, k8s
+from launcher import cli, k8s, kube
 from launcher.config import Config, RunState
 
 
@@ -221,8 +221,8 @@ def test_stop_permission_denied_is_failure(tmp_path, monkeypatch):
 
 def _stream_env(monkeypatch):
     logs = _capture(monkeypatch, k8s)
-    monkeypatch.setattr(k8s, "_cluster_env", lambda: {})
-    monkeypatch.setattr(k8s, "_kubectl_bin", lambda: "kubectl")
+    monkeypatch.setattr(kube, "_cluster_env", lambda: {})
+    monkeypatch.setattr(kube, "_kubectl_bin", lambda: "kubectl")
     return logs
 
 
@@ -281,7 +281,7 @@ def _missing_payload_run(tmp_path, monkeypatch, stream_ok):
                         lambda cfg: ("192.168.122.156:5000/stanok-machine@sha256:fake", None))
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
     monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0))
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0))
     monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
     monkeypatch.setattr(k8s, "_ResourceSampler", _SamplerStub)
     monkeypatch.setattr(k8s, "_stream_pod_logs",

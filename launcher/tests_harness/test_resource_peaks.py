@@ -35,7 +35,7 @@ import time
 
 import pytest
 
-from launcher import k8s
+from launcher import k8s, kube
 from launcher.config import Config
 
 FAKE_IMAGE = "192.168.122.156:5000/stanok-machine@sha256:fake"
@@ -185,17 +185,17 @@ def test_py311_join_contract():
 # --- 3: kubectl wrappers -----------------------------------------------------------
 
 def test_node_of_pod_fail_soft(monkeypatch):
-    monkeypatch.setattr(k8s, "_kubectl",
+    monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, " node-a\n"))
     assert k8s._node_of_pod(POD, NS) == "node-a"
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(1, ""))
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(1, ""))
     assert k8s._node_of_pod(POD, NS) is None
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(0, ""))
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0, ""))
     assert k8s._node_of_pod(POD, NS) is None
 
 
 def test_kubelet_stats_parses_json(monkeypatch):
-    monkeypatch.setattr(k8s, "_kubectl_checked",
+    monkeypatch.setattr(kube, "_kubectl_checked",
                         lambda *a, **k: _FakeCompleted(0, '{"pods": []}'))
     assert k8s._kubelet_stats("node-a") == {"pods": []}
 
@@ -220,10 +220,10 @@ def _fresh_env(tmp_path, monkeypatch, *, wait_result, pod_json):
     cfg = Config(repo_root=str(tmp_path), log_dir=str(tmp_path / "logs"))
     patch_file = tmp_path / "changes.patch"
     patch_file.write_text("diff --git a/src/x.py b/src/x.py\n", encoding="utf-8")
-    monkeypatch.setattr(k8s, "_kubectl_checked", lambda *a, **k: _FakeCompleted(0))
-    monkeypatch.setattr(k8s, "_create_manifest", lambda text: None)
+    monkeypatch.setattr(kube, "_kubectl_checked", lambda *a, **k: _FakeCompleted(0))
+    monkeypatch.setattr(kube, "_create_manifest", lambda text: None)
     monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: wait_result)
-    monkeypatch.setattr(k8s, "_kubectl", lambda *a, **k: _FakeCompleted(
+    monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(
         0, json.dumps(pod_json)))
     return cfg, patch_file
 
