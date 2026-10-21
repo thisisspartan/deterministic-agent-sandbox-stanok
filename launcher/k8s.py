@@ -54,7 +54,7 @@ import tempfile
 import time
 import uuid
 
-from launcher import gates, kube, opik, peaks, patchgate, preflight, verify
+from launcher import gates, kube, lifecycle, opik, peaks, patchgate, preflight, verify
 from launcher.abort import _early_abort  # wave A step 1: was a lazy import from cli (the cli->k8s cycle was its only reason; abort imports neither)
 from launcher.config import RunState
 from launcher.exitcodes import ExitCode
@@ -389,199 +389,26 @@ def stamp_opik_traces(summary: dict, count) -> dict:
 # kube is the single patch home (guard: tests_harness/test_kube_facade.py).
 
 
-def _pod_of_job(job_name: str, ns: str, timeout_s: int = 120):
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        r = kube._kubectl("get", "pods", "-n", ns, "-l", f"job-name={job_name}",
-                     "-o", "jsonpath={.items[0].metadata.name}")
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-        time.sleep(2)
-    return None
-
-
-def _pod_image_id(pod, ns: str):
-    """Image provenance (operator plan 2026-10-12): the image ID the runtime
-    recorded for THIS run's Pod — `status.containerStatuses[0].imageID`, the
-    kubelet/CRI's own record, not the host docker store's idea of the image.
-    A content-addressed image ID is identical across runtimes, so this is the
-    digest of the image the Job actually ran. Two runtime forms are valid:
-    docker reports a bare "sha256:<hex>"; containerd/k3s (the DEFAULT runtime,
-    live verify-registry run 2026-10-12) reports "<repo>@sha256:<hex>" — the
-    registry-qualified form is the stronger proof (it names the registry the
-    kubelet pulled from). Fail-soft: no pod, kubectl error, or a value whose
-    tail is not a sha256 digest -> None (explicit, like commit_sha — never a
-    guess)."""
-    if not pod:
-        return None
-    r = kube._kubectl("get", "pod", pod, "-n", ns, "-o",
-                 "jsonpath={.status.containerStatuses[0].imageID}")
-    out = (r.stdout or "").strip()
-    if r.returncode != 0 or not re.search(r"(?:^|@)sha256:[0-9a-f]+$", out):
-        return None
-    return out
-
-
-def _stream_pod_logs(pod: str, ns: str, path: str, timeout_s: int) -> bool:
-    """kubectl logs -f blocks until the Pod's containers exit — the payload
-    lands in the host-side log file, never in the supervisor's context.
-
-    A2 (review 2026-10-17): the kubectl exit code is checked — a failed
-    stream is reported as a stream failure, never conflated with "the Pod
-    produced no logs"; the caller names it in the missing-payload abort."""
-    with open(path, "wb") as lf:
-        try:
-            # CC-232: same config resolution as kube._kubectl — the log stream is
-            # a kubectl call too (incident cc233: without it the stream died
-            # on the non-readable /etc/rancher/k3s/k3s.yaml fallback).
-            r = subprocess.run([kube._kubectl_bin(), "logs", "-f", pod, "-n", ns],
-                               stdout=lf, stderr=subprocess.STDOUT,
-                               timeout=timeout_s, env=kube._cluster_env())
-        except subprocess.TimeoutExpired:
-            log("K8S: kubectl logs -f hit the host timeout")
-            return False
-        except OSError as e:
-            log(f"K8S: kubectl logs failed: {e}")
-            return False
-        if r.returncode != 0:
-            log(f"K8S: kubectl logs -f exited rc={r.returncode} — log stream "
-                f"failed, {path} may be incomplete")
-            return False
-    return True
-
-
-def _job_rc_and_tail(job_name: str, ns: str) -> tuple:
-    """(exit_rc, tail) of a FAILED Job: the Pod's terminated exit code plus
-    its log tail (the fresh-check failure text)."""
-    exit_rc = 1
-    p = kube._kubectl("get", "pods", "-n", ns, "-l", f"job-name={job_name}",
-                 "-o", "jsonpath={.items[0].status.containerStatuses[0]."
-                       "state.terminated.exitCode}")
-    if p.returncode == 0 and p.stdout.strip().lstrip("-").isdigit():
-        exit_rc = int(p.stdout.strip())
-    pod = _pod_of_job(job_name, ns, timeout_s=30)
-    tail = ""
-    if pod:
-        lg = kube._kubectl("logs", pod, "-n", ns)
-        tail = (lg.stderr or "") + "\n" + (lg.stdout or "")
-    return exit_rc, tail
-
-
-def _pod_infra_cause(pod, ns: str):
-    """BL-4 (a1/a2): classify a Pod death as an infrastructure cause.
-    The gap _wait_job_terminal leaves: Job-level conditions say only
-    'Failed', the Pod's own status says WHY. Two causes are infrastructure
-    (rc=16, the 3 ticket retries are not burned on it):
-      - containerStatuses[].state.terminated.reason == "OOMKilled" — the
-        cgroup OOM kill. Measured 2026-10-16 (two gVisor probes at worker
-        limits): kubelet reports it honestly under gVisor too — the Pod-slice
-        limit is enforced, the overshoot is swap-absorbed until the swap is
-        exhausted, then the sandbox is OOM-killed and the reason appears.
-      - status.reason == "Evicted" — kubelet eviction.
-    A bare exit 137 with NO reason is NOT OOM: the Job's
-    activeDeadlineSeconds kill is also a SIGKILL (job_deadline). Anything
-    else (a test failure) stays None — a ticket defect.
-    Fail-soft: no pod / kubectl error / unparseable JSON -> None."""
-    if not pod:
-        return None
-    r = kube._kubectl("get", "pod", pod, "-n", ns, "-o", "json")
-    if r.returncode != 0:
-        return None
-    try:
-        status = json.loads(r.stdout).get("status", {})
-    except json.JSONDecodeError:
-        return None
-    for cs in status.get("containerStatuses") or []:
-        term = (cs.get("state") or {}).get("terminated") or {}
-        if term.get("reason") == "OOMKilled":
-            return "OOMKilled"
-    if status.get("reason") == "Evicted":
-        return "Evicted"
-    return None
-
-
-def _job_infra_cause(name: str, ns: str):
-    """Deadline contract (external review 2026-10-16): a Job killed by its
-    own activeDeadlineSeconds reports Job condition Failed with
-    reason="DeadlineExceeded". The Pod side shows only a bare SIGKILL
-    (137, no reason), which _pod_infra_cause deliberately refuses to guess
-    — the Job-level reason is the honest signal. Infrastructure defect:
-    the session outlived the Job deadline, not a ticket defect.
-    Fail-soft: no job / kubectl error / unparseable JSON -> None."""
-    r = kube._kubectl("get", "job", name, "-n", ns, "-o", "json")
-    if r.returncode != 0:
-        return None
-    try:
-        conds = json.loads(r.stdout).get("status", {}).get("conditions", [])
-    except json.JSONDecodeError:
-        return None
-    for c in conds:
-        if (c.get("type") == "Failed" and c.get("status") == "True"
-                and c.get("reason") == "DeadlineExceeded"):
-            return "DeadlineExceeded"
-    return None
-
-
-def _wait_job_terminal(name: str, ns: str, timeout_s: int) -> str:
-    """Poll the Job until a terminal condition: 'complete' | 'failed' | 'timeout'.
-    `kubectl wait --for=condition=complete` blocks for the WHOLE timeout when the
-    Job FAILED (live cc221, 2026-10-10: a failed fresh Job hung the host for an
-    hour) — the host must learn about a failed Job immediately."""
-    deadline = time.monotonic() + timeout_s
-    while True:
-        r = kube._kubectl("get", "job", name, "-n", ns, "-o", "json")
-        if r.returncode == 0:
-            try:
-                conds = json.loads(r.stdout).get("status", {}).get("conditions", [])
-            except json.JSONDecodeError:
-                conds = []
-            for c in conds:
-                if c.get("status") == "True" and c.get("type") in ("Complete", "Failed"):
-                    return c["type"].lower()
-        if time.monotonic() >= deadline:
-            return "timeout"
-        time.sleep(5)
+# ==================================================================================
+# Wave A portion 6 (2026-10-21): the lifecycle observation cluster
+# (_pod_of_job, _pod_image_id, _stream_pod_logs, _job_rc_and_tail,
+# _pod_infra_cause, _job_infra_cause, _wait_job_terminal, the observation
+# graces _STREAM_GRACE_S/_TERMINAL_GRACE_S and _observation_timeout) moved
+# verbatim to launcher/lifecycle.py (strict from birth). Single home: k8s
+# holds no def, no constant and no re-export; the call sites here
+# (host_launch_k8s, _fresh_job) call lifecycle._X. The Job-construction
+# policy they are measured against stays here: _DEADLINE_MARGIN_S,
+# job_deadline (activeDeadlineSeconds belongs to Job creation). Guard:
+# tests_harness/test_lifecycle_facade.py.
+# ==================================================================================
 
 
 # Startup margin over the turn timeout: tree unpack, git init, settings
-# rewrite, CLI start (external review 2026-10-16).
+# rewrite, CLI start (external review 2026-10-16). The post-deadline
+# observation graces and the shared-end window calculator moved with the
+# observation cluster to launcher/lifecycle.py (wave A portion 6); the
+# timer contract test now reaches them at their new home.
 _DEADLINE_MARGIN_S = 300
-
-# A3 (review 2026-10-17): the post-deadline observation graces, named. The
-# host keeps watching past the Job's own activeDeadlineSeconds so it can
-# still read the Pod's logs and the Job's terminal condition after the Pod
-# self-terminates. The WORKER observation chain (job_deadline + stream
-# grace + terminal grace, all sharing one absolute end anchored at Job
-# creation) must stay under the supervisor's wait cap (cli.WAIT_TIMEOUT_S)
-# — test_timer_contract pins the SUM, not just the deadline stage.
-# Honest whole-run note (A3 doc honesty, review 2026-10-17): the cap
-# bounds the worker chain (2340 < 2700), NOT the whole run. The fresh
-# check runs after it: _fresh_job waits deadline + _TERMINAL_GRACE_S
-# (2160) after up to two 30 s Pod lookups (_pod_of_job calls inside
-# _fresh_job) — a whole run can reach at least 4530 s, past the 2700 s
-# cap. Consequence if that happens: the supervisor hits rc=124
-# (45-min cap) -> `launch.sh status` -> `launch.sh stop` (SIGTERM);
-# finally removes only the resources the run created; the patch is NOT
-# applied. Reconsideration
-# trigger: the first real run that hits the cap during the fresh phase.
-_STREAM_GRACE_S = 180
-_TERMINAL_GRACE_S = 60
-
-
-def _observation_timeout(obs_start: float, deadline: int, grace_s: int) -> int:
-    """A3 fix (external review 2026-10-17): _stream_pod_logs and
-    _wait_job_terminal take a DURATION measured from the call, so fresh
-    durations handed to the two sequential worker-path calls could reach
-    (deadline+180)+(deadline+60)=4440 — past the supervisor's wait cap.
-    Both windows instead share ONE absolute end point measured from
-    obs_start (Job creation): a call gets only the time remaining to
-    obs_start + deadline + grace_s. Worst case for the worker observation
-    chain from Job creation is then deadline + _STREAM_GRACE_S +
-    _TERMINAL_GRACE_S = 2340 < cap (the whole run, fresh check included,
-    can exceed the cap — see the constants-block note). Call this
-    at each call site, never precompute — the remaining time is what bounds
-    the chain."""
-    return max(0, int(obs_start + deadline + grace_s - time.monotonic()))
 
 
 def job_deadline(cfg) -> int:
@@ -605,10 +432,9 @@ def job_deadline(cfg) -> int:
 # (SAMPLE_INTERVAL_S, _node_of_pod, _kubelet_stats, _peak_from_stats,
 # _ResourceSampler) moved verbatim to launcher/peaks.py (strict from birth).
 # Single home: k8s holds no def, no constant and no re-export; the
-# construction sites here call peaks._ResourceSampler. _pod_of_job,
-# _wait_job_terminal and _stream_pod_logs stay here: Pod lifecycle
-# observation machinery of a later portion. Guard:
-# tests_harness/test_peaks_facade.py.
+# construction sites here call peaks._ResourceSampler. Guard:
+# tests_harness/test_peaks_facade.py. (The Pod lifecycle helpers named as a
+# "later portion" there moved to launcher/lifecycle.py with portion 6.)
 # ==================================================================================
 
 
@@ -651,12 +477,12 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
     sampler = None
     fresh_pod = None
     if peaks_out is not None:
-        fresh_pod = _pod_of_job(fresh_name, ns, timeout_s=30)
+        fresh_pod = lifecycle._pod_of_job(fresh_name, ns, timeout_s=30)
         if fresh_pod is not None:
             sampler = peaks._ResourceSampler(fresh_pod, ns)
             sampler.start()
-    completed = _wait_job_terminal(fresh_name, ns,
-                                  deadline + _TERMINAL_GRACE_S) == "complete"
+    completed = lifecycle._wait_job_terminal(fresh_name, ns,
+                                  deadline + lifecycle._TERMINAL_GRACE_S) == "complete"
     if sampler is not None and peaks_out is not None:  # sampler is only built when a holder was provided — the second test is type-honesty, not behavior
         peaks_out["peaks"] = sampler.stop_and_peaks()
     if completed:
@@ -665,8 +491,8 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
     # eviction) is EXEC_ERROR — the caller maps it to rc=16 ENV-FAIL, not a
     # FRESH-FAIL that burns the ticket's 3 retries on an infrastructure defect.
     if fresh_pod is None:
-        fresh_pod = _pod_of_job(fresh_name, ns, timeout_s=30)
-    cause = _pod_infra_cause(fresh_pod, ns)
+        fresh_pod = lifecycle._pod_of_job(fresh_name, ns, timeout_s=30)
+    cause = lifecycle._pod_infra_cause(fresh_pod, ns)
     if cause:
         return (1, f"EXEC_ERROR: fresh Pod {cause} — infrastructure defect")
     # A1 (review 2026-10-17): symmetry with the worker path — a fresh Job
@@ -674,10 +500,10 @@ def _fresh_job(cfg, ns: str, fresh_name: str, cm_tree: str, cm_patch: str,
     # (the caller maps EXEC_ERROR to rc=16), not a FRESH-FAIL that burns
     # the ticket's 3 retries. The Pod side shows only a bare SIGKILL; the
     # Job-level condition is the honest signal.
-    job_cause = _job_infra_cause(fresh_name, ns)
+    job_cause = lifecycle._job_infra_cause(fresh_name, ns)
     if job_cause:
         return (1, f"EXEC_ERROR: fresh Job {job_cause} — infrastructure defect")
-    exit_rc, tail = _job_rc_and_tail(fresh_name, ns)
+    exit_rc, tail = lifecycle._job_rc_and_tail(fresh_name, ns)
     # C3 (review 2026-10-17): the Pod-side apply guard exits with
     # FRESH_APPLY_FAIL_RC before any test runs. The host already applied the
     # identical verified bytes to the scratch tree — the same patch failing
@@ -871,7 +697,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 }))
             created.append(("job", job_name))
             obs_start = time.monotonic()  # A3: anchor of the observation chain
-            pod = _pod_of_job(job_name, ns)
+            pod = lifecycle._pod_of_job(job_name, ns)
             worker_peaks = None
             sampler = None
             stream_failed = False
@@ -882,11 +708,13 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
                 # observes (the sampler counts errors, never raises).
                 sampler = peaks._ResourceSampler(pod, ns)
                 sampler.start()
-                stream_failed = not _stream_pod_logs(
+                stream_failed = not lifecycle._stream_pod_logs(
                     pod, ns, os.path.join(live_dir, "pod-stdout.log"),
-                    _observation_timeout(obs_start, deadline, _STREAM_GRACE_S))
-            _wait_job_terminal(job_name, ns, _observation_timeout(
-                obs_start, deadline, _STREAM_GRACE_S + _TERMINAL_GRACE_S))
+                    lifecycle._observation_timeout(obs_start, deadline,
+                                                  lifecycle._STREAM_GRACE_S))
+            lifecycle._wait_job_terminal(job_name, ns, lifecycle._observation_timeout(
+                obs_start, deadline,
+                lifecycle._STREAM_GRACE_S + lifecycle._TERMINAL_GRACE_S))
             if sampler is not None:
                 worker_peaks = sampler.stop_and_peaks()
         except RuntimeError as e:
@@ -905,7 +733,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             with open(pod_log, encoding="utf-8", errors="replace") as f:
                 payload = extract_payload(f.read(), nonce)
         if payload is None or "summary.json" not in payload:
-            cause = _pod_infra_cause(pod, ns)
+            cause = lifecycle._pod_infra_cause(pod, ns)
             if cause:
                 # BL-4 (a1): the Pod died of an infrastructure cause (cgroup
                 # OOM / kubelet eviction) — rc=16 ENV-FAIL, not the generic
@@ -926,7 +754,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             # condition says DeadlineExceeded — the session outlived the Job
             # deadline. Infrastructure defect (rc=16), not a 'missing' abort:
             # the 3 ticket retries are not burned on it.
-            if _job_infra_cause(job_name, ns) == "DeadlineExceeded":
+            if lifecycle._job_infra_cause(job_name, ns) == "DeadlineExceeded":
                 log("K8S: Job hit activeDeadlineSeconds (DeadlineExceeded) — "
                     "infrastructure defect (rc=16); fix: raise "
                     "STANOK_K8S_JOB_DEADLINE_S or lower STANOK_TURN_TIMEOUT_S")
@@ -989,7 +817,7 @@ def host_launch_k8s(cfg, args, marker: str) -> int:
             # Image provenance (operator plan 2026-10-12): host-stamped like
             # patch_sha256 — the Pod's own containerStatuses record. None is
             # explicit (never a guess), with a WARN, same as commit_sha.
-            image_digest = _pod_image_id(pod, ns)
+            image_digest = lifecycle._pod_image_id(pod, ns)
             summary["image_digest"] = image_digest
             if image_digest is None:
                 log("WARN: image provenance: Pod imageID unavailable — "

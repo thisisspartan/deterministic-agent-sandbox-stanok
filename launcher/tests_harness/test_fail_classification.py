@@ -11,7 +11,7 @@ B3  cli._run_session: an infrastructure exception from the session
 B4  cli.cmd_stop: "Stop signal sent"/rc=0 only when SIGTERM was actually
     delivered. Marker without a PID -> rc=1; an already-gone PID -> honest
     "already gone" log, rc=0; a permission denial -> rc=1.
-A2  k8s._stream_pod_logs: the kubectl exit code is checked — non-zero rc /
+A2  lifecycle._stream_pod_logs: the kubectl exit code is checked — non-zero rc /
     timeout -> False with a distinct log line; host_launch_k8s names the
     stream failure in the missing-payload abort, so a failed stream is
     distinguishable from "the Pod produced no logs".
@@ -25,7 +25,7 @@ import signal
 import subprocess
 import time
 
-from launcher import cli, k8s, kube, peaks, preflight
+from launcher import cli, k8s, kube, lifecycle, peaks, preflight
 from launcher.config import Config, RunState
 
 
@@ -220,7 +220,11 @@ def test_stop_permission_denied_is_failure(tmp_path, monkeypatch):
 # --- A2: the log stream's exit code is checked and named -------------------------
 
 def _stream_env(monkeypatch):
-    logs = _capture(monkeypatch, k8s)
+    # lifecycle binds `log` from launcher.logs directly — the stub for a
+    # moved function's log call sits on lifecycle (single-home rule); the
+    # `k8s.subprocess` patches in the stream tests stay: subprocess is the
+    # shared module object in every importer (portion-2 precedent).
+    logs = _capture(monkeypatch, lifecycle)
     monkeypatch.setattr(kube, "_cluster_env", lambda: {})
     monkeypatch.setattr(kube, "_kubectl_bin", lambda: "kubectl")
     return logs
@@ -232,7 +236,7 @@ def test_stream_pod_logs_nonzero_rc_is_a_stream_failure(tmp_path, monkeypatch):
     logs = _stream_env(monkeypatch)
     monkeypatch.setattr(k8s.subprocess, "run",
                         lambda argv, **kw: _FakeCompleted(1, "", "pods not found"))
-    ok = k8s._stream_pod_logs("pod-x", "default", str(tmp_path / "out.log"), 5)
+    ok = lifecycle._stream_pod_logs("pod-x", "default", str(tmp_path / "out.log"), 5)
     assert ok is False
     assert any("rc=1" in line and "log stream failed" in line for line in logs)
 
@@ -243,7 +247,7 @@ def test_stream_pod_logs_timeout_is_a_stream_failure(tmp_path, monkeypatch):
     def boom(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="kubectl", timeout=5)
     monkeypatch.setattr(k8s.subprocess, "run", boom)
-    ok = k8s._stream_pod_logs("pod-x", "default", str(tmp_path / "out.log"), 5)
+    ok = lifecycle._stream_pod_logs("pod-x", "default", str(tmp_path / "out.log"), 5)
     assert ok is False
     assert any("host timeout" in line for line in logs)
 
@@ -253,7 +257,7 @@ def test_stream_pod_logs_zero_rc_is_success(tmp_path, monkeypatch):
     logs = _stream_env(monkeypatch)
     monkeypatch.setattr(k8s.subprocess, "run",
                         lambda argv, **kw: _FakeCompleted(0, "worker stdout"))
-    ok = k8s._stream_pod_logs("pod-x", "default", str(tmp_path / "out.log"), 5)
+    ok = lifecycle._stream_pod_logs("pod-x", "default", str(tmp_path / "out.log"), 5)
     assert ok is True
     assert not any("log stream failed" in line for line in logs)
 
@@ -282,13 +286,13 @@ def _missing_payload_run(tmp_path, monkeypatch, stream_ok):
     monkeypatch.setattr(k8s, "pack_tree", lambda root: "x")
     monkeypatch.setattr(k8s, "transport_ok", lambda blob: True)
     monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0))
-    monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
+    monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: "pod-x")
     monkeypatch.setattr(peaks, "_ResourceSampler", _SamplerStub)
-    monkeypatch.setattr(k8s, "_stream_pod_logs",
+    monkeypatch.setattr(lifecycle, "_stream_pod_logs",
                         lambda *a, **k: stream_ok)  # writes nothing
-    monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "failed")
-    monkeypatch.setattr(k8s, "_pod_infra_cause", lambda *a, **k: None)
-    monkeypatch.setattr(k8s, "_job_infra_cause", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_wait_job_terminal", lambda *a, **k: "failed")
+    monkeypatch.setattr(lifecycle, "_pod_infra_cause", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_job_infra_cause", lambda *a, **k: None)
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     return rc, logs
 

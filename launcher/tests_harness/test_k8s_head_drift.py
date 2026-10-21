@@ -40,7 +40,7 @@ import subprocess
 
 import pytest
 
-from launcher import k8s, kube, preflight
+from launcher import k8s, kube, lifecycle, preflight
 from launcher.config import Config
 
 CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
@@ -134,7 +134,7 @@ def _scenario(tmp_path, monkeypatch, fresh_hook=None, export_start_commit=True):
         calls.append(a[0] if a else "")
         return _FakeCompleted(0)
     monkeypatch.setattr(kube, "_kubectl", fake_kubectl)
-    monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
+    monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: "pod-x")
 
     def fake_stream(pod, ns, path, deadline):
         files = {"summary.json": json.dumps(CLEAN_WORKER).encode("utf-8"),
@@ -145,9 +145,9 @@ def _scenario(tmp_path, monkeypatch, fresh_hook=None, export_start_commit=True):
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         return True
-    monkeypatch.setattr(k8s, "_stream_pod_logs", fake_stream)
-    monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "complete")
-    monkeypatch.setattr(k8s, "_pod_image_id", lambda pod, ns: FAKE_IMAGE)
+    monkeypatch.setattr(lifecycle, "_stream_pod_logs", fake_stream)
+    monkeypatch.setattr(lifecycle, "_wait_job_terminal", lambda *a, **k: "complete")
+    monkeypatch.setattr(lifecycle, "_pod_image_id", lambda pod, ns: FAKE_IMAGE)
 
     def fake_fresh(*a, **k):
         calls.append("fresh")

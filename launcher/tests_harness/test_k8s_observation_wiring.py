@@ -2,7 +2,7 @@
 
 test_timer_contract pins the SUM (deadline + graces < cap) and
 test_observation_windows_are_remaining_time... pins the helper
-k8s._observation_timeout itself. What neither pins is the WIRING: that the
+lifecycle._observation_timeout itself. What neither pins is the WIRING: that the
 worker path in host_launch_k8s (k8s.py, the block after `obs_start =
 time.monotonic()`) actually calls _observation_timeout at BOTH call sites
 with the right graces — _stream_pod_logs with _STREAM_GRACE_S,
@@ -35,7 +35,7 @@ Run: <venv>/bin/python -m pytest launcher/tests_harness/test_k8s_observation_wir
 import argparse
 import os
 
-from launcher import k8s, kube, peaks, preflight
+from launcher import k8s, kube, lifecycle, peaks, preflight
 from launcher.config import Config
 
 CLOCK_START = 1000.0  # arbitrary monotonic origin for the stubbed clock
@@ -72,6 +72,9 @@ def _drive(tmp_path, monkeypatch, *, advance_at_pod=None, advance_at_stream=None
     monkeypatch.delenv("STANOK_K8S_JOB_DEADLINE_S", raising=False)
     monkeypatch.delenv("STANOK_START_COMMIT", raising=False)
     clock = [CLOCK_START]
+    # k8s.time is the shared `time` MODULE object — the same one lifecycle
+    # imports (portion-2 precedent), so this one patch drives k8s's
+    # obs_start anchor AND lifecycle._observation_timeout's time.monotonic.
     monkeypatch.setattr(k8s.time, "monotonic", lambda: clock[0])
 
     monkeypatch.setattr(k8s.shutil, "which", lambda name: "/usr/bin/kubectl")
@@ -92,7 +95,7 @@ def _drive(tmp_path, monkeypatch, *, advance_at_pod=None, advance_at_stream=None
         if advance_at_pod is not None:
             clock[0] = advance_at_pod
         return "pod-x"
-    monkeypatch.setattr(k8s, "_pod_of_job", fake_pod)
+    monkeypatch.setattr(lifecycle, "_pod_of_job", fake_pod)
 
     class _DummySampler:
         def __init__(self, pod, ns):
@@ -112,12 +115,12 @@ def _drive(tmp_path, monkeypatch, *, advance_at_pod=None, advance_at_stream=None
         if advance_at_stream is not None:
             clock[0] = advance_at_stream
         return True
-    monkeypatch.setattr(k8s, "_stream_pod_logs", fake_stream)
+    monkeypatch.setattr(lifecycle, "_stream_pod_logs", fake_stream)
 
     def fake_wait(name, ns, timeout_s):
         calls.append(("terminal", name, timeout_s))
         return "complete"
-    monkeypatch.setattr(k8s, "_wait_job_terminal", fake_wait)
+    monkeypatch.setattr(lifecycle, "_wait_job_terminal", fake_wait)
 
     rc = k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     return cfg, rc, calls
@@ -139,15 +142,15 @@ def test_worker_path_hands_remaining_time_not_fresh_durations(tmp_path, monkeypa
 
     # At the stream call nothing has elapsed since obs_start: the window is
     # the full stream stage of the chain — deadline + stream grace.
-    assert stream_t == deadline + k8s._STREAM_GRACE_S
+    assert stream_t == deadline + lifecycle._STREAM_GRACE_S
     # The stream consumed 120 s of its window. The terminal call must get
     # only the time remaining to the SHARED absolute end
     # (obs_start + deadline + stream + terminal): 240 - 120 = 120.
     # A fresh duration would be deadline + 60 = 2160; the stream grace
     # alone would give 0 — both wrong values are distinguishable from 120.
-    assert terminal_t == k8s._STREAM_GRACE_S + k8s._TERMINAL_GRACE_S - STREAM_CONSUMED
+    assert terminal_t == lifecycle._STREAM_GRACE_S + lifecycle._TERMINAL_GRACE_S - STREAM_CONSUMED
     # The defect class this wiring closes: a fresh per-call duration.
-    assert terminal_t < deadline + k8s._TERMINAL_GRACE_S
+    assert terminal_t < deadline + lifecycle._TERMINAL_GRACE_S
 
     # The call sites carry the real arguments: live_dir pod-stdout.log,
     # the Job name the run created.
@@ -163,8 +166,8 @@ def test_windows_floor_at_zero_past_the_absolute_end(tmp_path, monkeypatch):
                                        log_dir=str(tmp_path / "logs")))
     # The Pod lookup itself ran past the whole chain end: both calls must
     # receive 0 (max(0, ...) at the call sites), never a negative timeout.
-    past_end = CLOCK_START + deadline + k8s._STREAM_GRACE_S \
-        + k8s._TERMINAL_GRACE_S + 5
+    past_end = CLOCK_START + deadline + lifecycle._STREAM_GRACE_S \
+        + lifecycle._TERMINAL_GRACE_S + 5
     _, rc, calls = _drive(tmp_path, monkeypatch, advance_at_pod=past_end)
     assert rc == 17
     assert [c[0] for c in calls] == ["stream", "terminal"]

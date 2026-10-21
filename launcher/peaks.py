@@ -19,8 +19,9 @@ Single home: k8s holds no def and no
 re-export of these names; its two construction sites call
 `peaks._ResourceSampler`, and the class resolves its helpers through this
 module's globals — a test stub on a name here intercepts every call site.
-_pod_of_job / _wait_job_terminal / _stream_pod_logs / _fresh_job stay in k8s
-(Pod lifecycle observation machinery — a later portion). Guard:
+The Pod lifecycle observation helpers named here as "a later portion" moved
+to launcher.lifecycle with portion 6; _fresh_job (fresh-check policy) stays
+in k8s. Guard:
 test_peaks_facade.py (RED-calibrated). Acceptance: behavioral reference
 byte-identical (evidence/waveA-ref-* recipe: run with a nonexistent ticket
 -> rc=13).

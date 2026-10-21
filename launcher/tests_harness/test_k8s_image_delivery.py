@@ -22,7 +22,7 @@ import argparse
 import json
 import os
 
-from launcher import k8s, kube, preflight
+from launcher import k8s, kube, lifecycle, preflight
 from launcher.config import Config
 
 DIGEST = "192.168.122.156:5000/stanok-machine@sha256:deadbeef"
@@ -137,8 +137,8 @@ def test_rendered_worker_job_carries_the_digest(tmp_path, monkeypatch):
             manifests.append(k.get("input_text") or "")
         return _FakeCompleted(0)
     monkeypatch.setattr(kube, "_kubectl", fake)
-    monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: None)
-    monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "failed")
+    monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_wait_job_terminal", lambda *a, **k: "failed")
     k8s.host_launch_k8s(cfg, args, str(tmp_path / ".running"))
     assert manifests  # the worker Job was rendered and sent
     assert f"image: {DIGEST}" in manifests[0]

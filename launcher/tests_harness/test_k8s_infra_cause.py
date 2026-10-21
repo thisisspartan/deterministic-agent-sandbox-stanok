@@ -39,7 +39,7 @@ import argparse
 import json
 import subprocess
 
-from launcher import k8s, kube, preflight
+from launcher import k8s, kube, lifecycle, preflight
 from launcher.config import Config
 
 CLEAN_WORKER = {"label": "lbl", "ticket": "t.md", "rc": 0, "verifier": "PASS",
@@ -89,36 +89,36 @@ def _stub_pod(monkeypatch, pod_json, rc=0):
 
 def test_oomkilled_reason_is_classified(monkeypatch):
     _stub_pod(monkeypatch, OOM_POD)
-    assert k8s._pod_infra_cause("pod-x", "default") == "OOMKilled"
+    assert lifecycle._pod_infra_cause("pod-x", "default") == "OOMKilled"
 
 
 def test_evicted_status_reason_is_classified(monkeypatch):
     _stub_pod(monkeypatch, EVICTED_POD)
-    assert k8s._pod_infra_cause("pod-x", "default") == "Evicted"
+    assert lifecycle._pod_infra_cause("pod-x", "default") == "Evicted"
 
 
 def test_bare_exit_137_is_not_oom(monkeypatch):
     # the Job's activeDeadlineSeconds kill is also a SIGKILL — without a
     # reason it must NOT be classified as OOM (it stays 'missing'/FRESH path).
     _stub_pod(monkeypatch, DEADLINE_POD)
-    assert k8s._pod_infra_cause("pod-x", "default") is None
+    assert lifecycle._pod_infra_cause("pod-x", "default") is None
 
 
 def test_plain_test_failure_is_not_infra(monkeypatch):
     _stub_pod(monkeypatch, TESTFAIL_POD)
-    assert k8s._pod_infra_cause("pod-x", "default") is None
+    assert lifecycle._pod_infra_cause("pod-x", "default") is None
 
 
 def test_fail_soft_is_none(monkeypatch):
-    assert k8s._pod_infra_cause(None, "default") is None  # no pod
+    assert lifecycle._pod_infra_cause(None, "default") is None  # no pod
     _stub_pod(monkeypatch, OOM_POD, rc=1)
-    assert k8s._pod_infra_cause("pod-x", "default") is None  # kubectl error
+    assert lifecycle._pod_infra_cause("pod-x", "default") is None  # kubectl error
     monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, "not json"))
-    assert k8s._pod_infra_cause("pod-x", "default") is None  # unparseable
+    assert lifecycle._pod_infra_cause("pod-x", "default") is None  # unparseable
     monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, "{}"))
-    assert k8s._pod_infra_cause("pod-x", "default") is None  # no status
+    assert lifecycle._pod_infra_cause("pod-x", "default") is None  # no status
 
 
 # --- 1b: _job_infra_cause — the Job-level deadline signal ------------------------
@@ -133,27 +133,27 @@ def _stub_job(monkeypatch, job_json, rc=0):
 
 def test_job_deadline_exceeded_condition_is_classified(monkeypatch):
     _stub_job(monkeypatch, DEADLINE_JOB)
-    assert k8s._job_infra_cause("stanok-job-lbl", "default") == "DeadlineExceeded"
+    assert lifecycle._job_infra_cause("stanok-job-lbl", "default") == "DeadlineExceeded"
 
 
 def test_other_failed_reason_is_not_deadline(monkeypatch):
     # BackoffLimitExceeded etc. stay the 'missing'/ticket path — only the
     # deadline reason is the Job-level infrastructure signal.
     _stub_job(monkeypatch, OTHER_FAILED_JOB)
-    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
+    assert lifecycle._job_infra_cause("stanok-job-lbl", "default") is None
     _stub_job(monkeypatch, {"status": {"conditions": [
         {"type": "Complete", "status": "True"}]}})
-    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
+    assert lifecycle._job_infra_cause("stanok-job-lbl", "default") is None
 
 
 def test_job_infra_cause_fail_soft_is_none(monkeypatch):
     _stub_job(monkeypatch, DEADLINE_JOB, rc=1)
-    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
+    assert lifecycle._job_infra_cause("stanok-job-lbl", "default") is None
     monkeypatch.setattr(kube, "_kubectl",
                         lambda *a, **k: _FakeCompleted(0, "not json"))
-    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
+    assert lifecycle._job_infra_cause("stanok-job-lbl", "default") is None
     monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(0, "{}"))
-    assert k8s._job_infra_cause("stanok-job-lbl", "default") is None
+    assert lifecycle._job_infra_cause("stanok-job-lbl", "default") is None
 
 
 # --- 2: _fresh_job — infra cause -> EXEC_ERROR; normal failure unchanged ---------
@@ -167,8 +167,8 @@ def _fresh_env(tmp_path, monkeypatch, pod_json, job_rc_tail=None, job_json=None)
                         lambda *a, **k: calls.append(a) or _FakeCompleted(0))
     monkeypatch.setattr(kube, "_create_manifest",
                         lambda text: calls.append(("manifest",)))
-    monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "failed")
-    monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
+    monkeypatch.setattr(lifecycle, "_wait_job_terminal", lambda *a, **k: "failed")
+    monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: "pod-x")
 
     def fake_kubectl(*a, **k):
         if a[:2] == ("get", "job") and job_json is not None:
@@ -176,7 +176,7 @@ def _fresh_env(tmp_path, monkeypatch, pod_json, job_rc_tail=None, job_json=None)
         return _FakeCompleted(0, json.dumps(pod_json))
     monkeypatch.setattr(kube, "_kubectl", fake_kubectl)
     if job_rc_tail is not None:
-        monkeypatch.setattr(k8s, "_job_rc_and_tail", lambda *a, **k: job_rc_tail)
+        monkeypatch.setattr(lifecycle, "_job_rc_and_tail", lambda *a, **k: job_rc_tail)
     return cfg, patch_file, calls
 
 
@@ -323,7 +323,7 @@ def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
             return _FakeCompleted(0, json.dumps(job_json))
         return _FakeCompleted(0)
     monkeypatch.setattr(kube, "_kubectl", fake_kubectl)
-    monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
+    monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: "pod-x")
 
     def fake_stream(pod, ns, path, deadline):
         if not payload:
@@ -336,18 +336,18 @@ def _scenario(tmp_path, monkeypatch, *, payload=True, pod_json=None,
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         return True  # A2: the new contract — a successful stream reports True
-    monkeypatch.setattr(k8s, "_stream_pod_logs", fake_stream)
+    monkeypatch.setattr(lifecycle, "_stream_pod_logs", fake_stream)
 
     if real_fresh:
         monkeypatch.setattr(
-            k8s, "_wait_job_terminal",
+            lifecycle, "_wait_job_terminal",
             lambda name, *a, **k: ("failed" if name.startswith("stanok-fresh")
                                    else "complete"))
     else:
-        monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: "complete")
+        monkeypatch.setattr(lifecycle, "_wait_job_terminal", lambda *a, **k: "complete")
         monkeypatch.setattr(k8s, "_fresh_job",
                             lambda *a, **k: calls.append("fresh") or (0, ""))
-    monkeypatch.setattr(k8s, "_pod_image_id", lambda pod, ns: FAKE_IMAGE)
+    monkeypatch.setattr(lifecycle, "_pod_image_id", lambda pod, ns: FAKE_IMAGE)
     return repo, cfg, args, calls
 
 

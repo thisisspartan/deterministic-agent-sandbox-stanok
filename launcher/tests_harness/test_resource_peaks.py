@@ -35,7 +35,7 @@ import time
 
 import pytest
 
-from launcher import k8s, kube, peaks
+from launcher import k8s, kube, lifecycle, peaks
 from launcher.config import Config
 
 FAKE_IMAGE = "192.168.122.156:5000/stanok-machine@sha256:fake"
@@ -222,7 +222,7 @@ def _fresh_env(tmp_path, monkeypatch, *, wait_result, pod_json):
     patch_file.write_text("diff --git a/src/x.py b/src/x.py\n", encoding="utf-8")
     monkeypatch.setattr(kube, "_kubectl_checked", lambda *a, **k: _FakeCompleted(0))
     monkeypatch.setattr(kube, "_create_manifest", lambda text: None)
-    monkeypatch.setattr(k8s, "_wait_job_terminal", lambda *a, **k: wait_result)
+    monkeypatch.setattr(lifecycle, "_wait_job_terminal", lambda *a, **k: wait_result)
     monkeypatch.setattr(kube, "_kubectl", lambda *a, **k: _FakeCompleted(
         0, json.dumps(pod_json)))
     return cfg, patch_file
@@ -236,7 +236,7 @@ OOM_POD = {"status": {"phase": "Failed", "containerStatuses": [
 def test_fresh_job_fills_holder_on_success(tmp_path, monkeypatch):
     cfg, patch_file = _fresh_env(tmp_path, monkeypatch, wait_result="complete",
                                  pod_json={})
-    monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
+    monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: "pod-x")
     made = []
     monkeypatch.setattr(peaks, "_ResourceSampler",
                         lambda *a, **k: made.append(1) or _FakeSampler(*a, **k))
@@ -254,7 +254,7 @@ def test_fresh_job_fills_holder_on_failure_path(tmp_path, monkeypatch):
     # hits the limit is exactly the one whose numbers matter.
     cfg, patch_file = _fresh_env(tmp_path, monkeypatch, wait_result="failed",
                                  pod_json=OOM_POD)
-    monkeypatch.setattr(k8s, "_pod_of_job", lambda *a, **k: "pod-x")
+    monkeypatch.setattr(lifecycle, "_pod_of_job", lambda *a, **k: "pod-x")
     monkeypatch.setattr(peaks, "_ResourceSampler", _FakeSampler)
     holder = {}
     rc, tail = k8s._fresh_job(cfg, NS, "stanok-fresh-lbl", "cm-tree",
@@ -270,7 +270,7 @@ def test_fresh_job_without_holder_is_unchanged(tmp_path, monkeypatch):
     cfg, patch_file = _fresh_env(tmp_path, monkeypatch, wait_result="complete",
                                  pod_json={})
     calls = []
-    monkeypatch.setattr(k8s, "_pod_of_job",
+    monkeypatch.setattr(lifecycle, "_pod_of_job",
                         lambda *a, **k: calls.append("pod") or "pod-x")
     monkeypatch.setattr(peaks, "_ResourceSampler",
                         lambda *a, **k: calls.append("sampler") or _FakeSampler(*a, **k))

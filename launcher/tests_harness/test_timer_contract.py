@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from launcher import cli, k8s
+from launcher import cli, k8s, lifecycle
 from launcher.config import Config
 
 # from_env() replicates the former hub env logic (STANOK_REPO included), so
@@ -88,7 +88,7 @@ def test_observation_chain_stays_under_the_cap(monkeypatch):
     #
     # This sum is the genuine worst case for the worker chain only
     # because both windows share ONE absolute end point anchored at Job
-    # creation (k8s._observation_
+    # creation (lifecycle._observation_
     # timeout): each call gets only the time remaining to that point, so
     # the sequential chain cannot exceed deadline + stream + terminal.
     # The original defect (external review 2026-10-17, finding 1) was
@@ -96,8 +96,8 @@ def test_observation_chain_stays_under_the_cap(monkeypatch):
     # test_observation_windows_are_remaining_time... below pins that the
     # code actually implements the shared-end model this sum assumes.
     monkeypatch.delenv("STANOK_K8S_JOB_DEADLINE_S", raising=False)
-    chain = (k8s.job_deadline(CFG) + k8s._STREAM_GRACE_S
-             + k8s._TERMINAL_GRACE_S)
+    chain = (k8s.job_deadline(CFG) + lifecycle._STREAM_GRACE_S
+             + lifecycle._TERMINAL_GRACE_S)
     assert chain == 2340  # 2100 + 180 + 60 (turn-timeout default already
                           # pinned by the 5400 worst-case test above)
     assert chain < cli.WAIT_TIMEOUT_S
@@ -113,10 +113,13 @@ def test_observation_windows_are_remaining_time_to_one_absolute_end(monkeypatch)
     # window (grace 240) has exactly 60 s left. max(0, ...) floor: a
     # call never receives a negative timeout.
     obs_start = 1000.0
-    monkeypatch.setattr(k8s.time, "monotonic", lambda: obs_start + 2280)
-    stream_t = k8s._observation_timeout(obs_start, 2100, k8s._STREAM_GRACE_S)
-    terminal_t = k8s._observation_timeout(
-        obs_start, 2100, k8s._STREAM_GRACE_S + k8s._TERMINAL_GRACE_S)
+    # lifecycle._observation_timeout reads time.monotonic off lifecycle's own
+    # import; `lifecycle.time` and `k8s.time` are the SAME shared module
+    # object (portion-2 precedent) — patching either affects every importer.
+    monkeypatch.setattr(lifecycle.time, "monotonic", lambda: obs_start + 2280)
+    stream_t = lifecycle._observation_timeout(obs_start, 2100, lifecycle._STREAM_GRACE_S)
+    terminal_t = lifecycle._observation_timeout(
+        obs_start, 2100, lifecycle._STREAM_GRACE_S + lifecycle._TERMINAL_GRACE_S)
     assert stream_t == 0
     assert terminal_t == 60
 
