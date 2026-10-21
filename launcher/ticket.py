@@ -28,7 +28,14 @@ class TicketConfig(Protocol):
     mypy-strict migration). Config satisfies this structurally; so does the
     deliberate SimpleNamespace(repo_root=...) at ticketcheck's CLI entry."""
 
-    repo_root: str
+    # Read-only accessor form: a bare `repo_root: str` member in a Protocol
+    # requires a SETTABLE attribute, which frozen Config does not provide —
+    # the contradiction only shows once a typed call site (session.py, k8s.py)
+    # passes Config. Reading the repo root is all this protocol needs; the
+    # property form accepts both readable attributes (Config, SimpleNamespace)
+    # and settable ones, which is what the docstring above always claimed.
+    @property
+    def repo_root(self) -> str: ...
 
 # The ONE kind list for a ticket header (CC-132). `scripts` is a ZONE, not a
 # kind: a path under scripts/ is declared with impl:/test:/docs:/edit: like

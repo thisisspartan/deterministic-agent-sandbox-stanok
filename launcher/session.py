@@ -18,7 +18,7 @@ import signal
 import subprocess
 import time
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TextIO
 
 from launcher.exitcodes import ExitCode
 from launcher.logs import log
@@ -27,10 +27,15 @@ from launcher.verify import _check_contract_lock, _contract_lock_forced_fail, _f
 from launcher.verdicts import Verdict
 
 if TYPE_CHECKING:
+    from types import FrameType  # annotation-only use
+    from typing import NoReturn  # annotation-only use
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient  # annotation-only use
+    from claude_agent_sdk.types import HookContext, SyncHookJSONOutput  # annotation-only use
+    from launcher.config import Config, RunState  # annotation-only use
     from launcher.plan import SessionPlan  # annotation-only use (T1/F821 fix)
 
 
-def _safe_json_default(obj):
+def _safe_json_default(obj: Any) -> Any:
     if dataclasses.is_dataclass(obj):
         return {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)}
     if hasattr(obj, "__dict__"):
@@ -38,7 +43,7 @@ def _safe_json_default(obj):
     return str(obj)
 
 
-def _write_stream_msg(file_obj, turn: int, msg) -> None:
+def _write_stream_msg(file_obj: TextIO, turn: int, msg: Any) -> None:
     try:
         raw = json.dumps(
             {"turn": turn, "type": type(msg).__name__, "data": msg},
@@ -62,7 +67,7 @@ def _write_stream_msg(file_obj, turn: int, msg) -> None:
 # ==================================================================================
 # Loop-trap circuit breaker (CC-207)
 # ==================================================================================
-def _loop_trap_path(run_state) -> str:
+def _loop_trap_path(run_state: "RunState") -> str:
     """CC-207: single source of the marker path. The hook writes it (via the
     STANOK_LOOP_TRAP_FILE env handed to the machine process), the launcher
     reads it. live_dir (LOG_DIR/<label>) is the rw log dir in the container
@@ -70,7 +75,7 @@ def _loop_trap_path(run_state) -> str:
     return os.path.join(run_state.live_dir, "loop-trap.json")
 
 
-def _read_loop_trap(marker_path: str) -> dict | None:
+def _read_loop_trap(marker_path: str) -> dict[str, Any] | None:
     """Best-effort read of the loop-guard termination marker: missing /
     unreadable / non-JSON / directory -> None. A broken marker must never
     kill the turn — the hook's fail-open invariant, mirrored on the reader."""
@@ -82,7 +87,7 @@ def _read_loop_trap(marker_path: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _loop_trap_verdict(job: dict, loop_trap: dict) -> int:
+def _loop_trap_verdict(job: dict[str, Any], loop_trap: dict[str, Any]) -> int:
     """CC-207: the circuit-breaker verdict on a job dict (the
     _contract_lock_forced_fail pattern). No fix prompt, no local retries: a
     retry re-enters the same loop — the marker is cumulative for the
@@ -101,7 +106,7 @@ def _loop_trap_verdict(job: dict, loop_trap: dict) -> int:
 # ==================================================================================
 # Inference environment (Prefix Invariance)
 # ==================================================================================
-def build_agent_env(cfg, run_state) -> dict[str, str]:
+def build_agent_env(cfg: "Config", run_state: "RunState") -> dict[str, str]:
     """Runtime-only env for the machine process.
 
     Static machine config lives in `.claude/settings.stanok.json` -> `env`, which
@@ -151,7 +156,7 @@ def build_agent_env(cfg, run_state) -> dict[str, str]:
 # ==================================================================================
 # Continuous ClaudeSDKClient session + Shielded Watchdog
 # ==================================================================================
-def _extract_usage(msg) -> dict:
+def _extract_usage(msg: Any) -> dict[str, Any]:
     usage = getattr(msg, "usage", None)
     if not usage and hasattr(msg, "data") and isinstance(msg.data, dict):
         usage = msg.data.get("usage")
@@ -193,7 +198,7 @@ def _shell_last_segment(command: str) -> str:
     return segments[-1].strip() if segments else ""
 
 
-def _bash_test_green(command, is_error: bool, result_text: str) -> bool:
+def _bash_test_green(command: Any, is_error: bool, result_text: str) -> bool:
     """CC-247 anchor: did this Bash call run `run.sh test` GREEN?
 
     1. the command must invoke `run.sh test`;
@@ -210,7 +215,7 @@ def _bash_test_green(command, is_error: bool, result_text: str) -> bool:
     return False
 
 
-def _test_write_kind(cfg, tool_name: str, tool_input) -> "str | None":
+def _test_write_kind(cfg: "Config", tool_name: str, tool_input: Any) -> "str | None":
     """Classify a Write/Edit tool_use against the tests/ tree:
     "edit" — the target file EXISTS (editing an already-green test: the
     test-fitting signal; a Write over an existing file is an edit too);
@@ -235,7 +240,7 @@ def _test_write_kind(cfg, tool_name: str, tool_input) -> "str | None":
     return None
 
 
-def _tool_result_text(block) -> str:
+def _tool_result_text(block: Any) -> str:
     """The text of a ToolResultBlock: str content, or a list of
     str / {"type":"text","text":...} / TextBlock items."""
     content = getattr(block, "content", None)
@@ -285,19 +290,19 @@ class TurnResult:
                   (see _compaction_entry); [{"trigger": str, "pre_tokens": int}].
     """
 
-    usage: dict
-    live_window: dict
+    usage: dict[str, Any]
+    live_window: dict[str, Any]
     writes: int
     error: str
-    loop_trap: dict | None
+    loop_trap: dict[str, Any] | None
     bash_total: int = 0
     bash_ok: int = 0
     test_edits_after_green: int = 0
     test_new_tests_after_green: int = 0
-    compactions: list = dataclasses.field(default_factory=list)
+    compactions: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
 
-def _compaction_entry(msg) -> dict | None:
+def _compaction_entry(msg: Any) -> dict[str, Any] | None:
     """P1 telemetry (Opik analysis CC-302/CC-304, 2026-10-20): the pinned CLI
     (cli.js 2.1.88) emits a native stream event on every autocompact —
     {"type":"system","subtype":"compact_boundary","compact_metadata":
@@ -326,27 +331,32 @@ def _compaction_entry(msg) -> dict | None:
     return {"trigger": trigger, "pre_tokens": pre_tokens}
 
 
-async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
-                       run_state, cfg) -> TurnResult:
+async def _execute_turn(client: "ClaudeSDKClient", prompt: str, turn: int,
+                       stream_f: TextIO, job: dict[str, Any],
+                       run_state: "RunState", cfg: "Config") -> TurnResult:
     """Run one turn on the live client; return its TurnResult."""
     from claude_agent_sdk import ResultMessage
 
     await client.query(prompt)
-    live_window = {}
-    turn_total = {}
+    live_window: dict[str, Any] = {}
+    turn_total: dict[str, Any] = {}
     writes = 0
     turn_error = ""
-    loop_trap = None
+    loop_trap: "dict[str, Any] | None" = None
     bash_total = 0
     bash_ok = 0
-    bash_ids = set()
-    compactions = []
+    bash_ids: set[str] = set()
+    compactions: list[dict[str, Any]] = []
     # CC-247: run.sh-test Bash calls awaiting their tool_result (id -> command)
-    test_bash_cmds = {}
+    test_bash_cmds: dict[str, str] = {}
     test_edits_after_green = 0
     test_new_tests_after_green = 0
     marker_path = _loop_trap_path(run_state)
-    async for msg in client.receive_response():
+    # msg stays Any on purpose: the turn loop duck-types across the SDK
+    # message subtypes (defensive getattr pattern — the SDK passes unknown
+    # system subtypes through as generic payloads, see _compaction_entry).
+    messages: Any = client.receive_response()
+    async for msg in messages:
         sid = getattr(msg, "session_id", None)
         if not sid and hasattr(msg, "data") and isinstance(msg.data, dict):
             sid = msg.data.get("session_id")
@@ -486,16 +496,16 @@ async def _execute_turn(client, prompt: str, turn: int, stream_f, job: dict,
 _HOOK_TEST_TIMEOUT_S = 75  # mirrors the old `timeout 75` in verifier.sh
 
 
-def _resolve_hook_target(cfg, hook_input: dict) -> "str | None":
+def _resolve_hook_target(cfg: "Config", hook_input: Any) -> "str | None":
     """Resolve a PostToolUse hook_input to a repo-relative tests/ test path,
     or None when this tool call is not a test-file write we must verify.
 
     Filters (each was an early `return {}` in the original hook): no
     file_path; path outside tests/; not an existing file; no scripts/run.sh
     to run the test with."""
-    tool_input = hook_input.get("tool_input") or {}
+    tool_input: dict[str, Any] = hook_input.get("tool_input") or {}
     fp = tool_input.get("file_path")
-    if not fp:
+    if not fp or not isinstance(fp, str):
         return None
     if not fp.startswith("/"):
         fp = os.path.join(cfg.repo_root, fp)
@@ -510,7 +520,7 @@ def _resolve_hook_target(cfg, hook_input: dict) -> "str | None":
     return os.path.relpath(abs_path, cfg.repo_root)
 
 
-async def _run_hook_test(cfg, rel: str) -> tuple[int, bytes]:
+async def _run_hook_test(cfg: "Config", rel: str) -> tuple[int, bytes]:
     """Run `scripts/run.sh test <rel>` under the hook backstop timeout.
 
     Returns (rc, output). rc=124 on timeout (the hook's own backstop).
@@ -549,7 +559,7 @@ async def _run_hook_test(cfg, rel: str) -> tuple[int, bytes]:
     return rc, b"".join(chunks)
 
 
-def _hook_verdict(rel: str, rc: int, out: bytes) -> dict:
+def _hook_verdict(rel: str, rc: int, out: bytes) -> "SyncHookJSONOutput":
     """Map a hook-test result to the hook output ({} = stay silent).
 
     rc=0: GREEN (implementation exists) — stay silent.
@@ -594,7 +604,8 @@ def _hook_verdict(rel: str, rc: int, out: bytes) -> dict:
     }
 
 
-async def _verifier_hook(cfg, hook_input: dict, tool_use_id: "str | None", context) -> dict:
+async def _verifier_hook(cfg: "Config", hook_input: Any, tool_use_id: str | None,
+                         context: "HookContext") -> "SyncHookJSONOutput":
     # W8 double-hook diagnosis: log EVERY invocation with its tool_use_id.
     # After a run: grep 'HOOK-CALL' <launcher log> | awk id | sort | uniq -d —
     # duplicate ids = double registration/call; unique ids = the second
@@ -612,7 +623,7 @@ async def _verifier_hook(cfg, hook_input: dict, tool_use_id: "str | None", conte
         return {}
 
 
-def _observability_warnings(job: dict, turn: int, inp: int, live_context: int) -> None:
+def _observability_warnings(job: dict[str, Any], turn: int, inp: int, live_context: int) -> None:
     """PREFIX-BREAK + CONTEXT-ROT warnings (diagnostics only — never a verdict).
 
     PREFIX-BREAK: a KV-prefix break shows up exactly as a spike in the turn's
@@ -634,7 +645,7 @@ def _observability_warnings(job: dict, turn: int, inp: int, live_context: int) -
             f"exceeded the threshold {rot_threshold}. Model attention may degrade.")
 
 
-def _fix_prompt(failures, turn: int) -> str:
+def _fix_prompt(failures: list[tuple[str, str]], turn: int) -> str:
     """The FAIL fix prompt: <verification_result> XML with the failure blocks
     and the <contract_lock> rules the machine must respect while fixing."""
     rules = _fix_prompt_rules(failures)
@@ -654,8 +665,9 @@ def _fix_prompt(failures, turn: int) -> str:
     )
 
 
-def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "SessionPlan",
-                       result: TurnResult, tests_manifest_before: dict,
+def _post_turn_decision(cfg: "Config", job: dict[str, Any], turn: int, max_turns: int,
+                       plan: "SessionPlan", result: TurnResult,
+                       tests_manifest_before: dict[str, str],
                        inp: int, live_context: int) -> tuple[int | None, str]:
     """Decide what happens after a completed turn (the verdict pipeline).
 
@@ -746,7 +758,7 @@ def _post_turn_decision(cfg, job: dict, turn: int, max_turns: int, plan: "Sessio
     return None, ""
 
 
-def _agent_options(cfg, run_state):
+def _agent_options(cfg: "Config", run_state: "RunState") -> "ClaudeAgentOptions":
     """The ClaudeAgentOptions for one machine session (R3/R1: tool surface,
     in-process verifier hook, static machine settings)."""
     from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
@@ -760,8 +772,11 @@ def _agent_options(cfg, run_state):
         # R3: `tools` -> `--tools` restricts the session's tool surface to
         # exactly cfg.curated_tools (the CLI's default set is NOT added on top);
         # allowed_tools is kept as the permission-allow side of the same set.
-        tools=cfg.curated_tools,
-        allowed_tools=cfg.curated_tools,
+        # The SDK fields are list[str]; Config holds the curated set as a
+        # frozen tuple (static config cannot be mutated mid-run) — the
+        # conversion happens here, at the boundary, not in Config.
+        tools=list(cfg.curated_tools),
+        allowed_tools=list(cfg.curated_tools),
         hooks={
             # R1: in-process PostToolUse verifier (replaces hooks/verifier.sh).
             # timeout > _HOOK_TEST_TIMEOUT_S so the hook's own 75 s test timeout
@@ -777,7 +792,7 @@ def _agent_options(cfg, run_state):
     )
 
 
-async def _interrupt_client(client) -> None:
+async def _interrupt_client(client: "ClaudeSDKClient") -> None:
     """Best-effort interrupt of the live SDK client; an interrupt error is a
     WARN, never a new failure (the run is already being failed closed)."""
     try:
@@ -786,7 +801,7 @@ async def _interrupt_client(client) -> None:
         log(f"WARN: client.interrupt() finished with an error: {e}")
 
 
-async def _drain_turn_task(turn_task) -> None:
+async def _drain_turn_task(turn_task: "asyncio.Task[TurnResult]") -> None:
     """Post-timeout cleanup of the shielded turn task: give it 5 s to finish
     on its own (the interrupt may end it), then cancel and collect."""
     try:
@@ -798,8 +813,10 @@ async def _drain_turn_task(turn_task) -> None:
     await asyncio.gather(turn_task, return_exceptions=True)
 
 
-async def _turn_timeout_verdict(client, turn_task, job: dict, turn: int,
-                               cfg) -> int:
+async def _turn_timeout_verdict(client: "ClaudeSDKClient",
+                               turn_task: "asyncio.Task[TurnResult]",
+                               job: dict[str, Any], turn: int,
+                               cfg: "Config") -> int:
     """Silent-stall timeout: interrupt, drain the shielded task, fail closed
     with the TURN-TIMEOUT code."""
     log(f"TIMEOUT: turn {turn} exceeded {cfg.turn_timeout_s:.0f}s (silent stall) -> interrupt")
@@ -811,8 +828,9 @@ async def _turn_timeout_verdict(client, turn_task, job: dict, turn: int,
     return 1
 
 
-def _record_turn_telemetry(job: dict, total_tokens: dict, result: TurnResult,
-                          turn: int, elapsed_turn: float) -> tuple[int, int]:
+def _record_turn_telemetry(job: dict[str, Any], total_tokens: dict[str, int],
+                          result: TurnResult, turn: int,
+                          elapsed_turn: float) -> tuple[int, int]:
     """Cumulative token & cache telemetry for one finished turn (guarantee 4).
 
     Updates total_tokens in place, recomputes job["tokens"]/job["cache_hit_rate"],
@@ -893,7 +911,7 @@ def _record_turn_telemetry(job: dict, total_tokens: dict, result: TurnResult,
     return inp, live_context
 
 
-def _bash_selfcheck(job: dict) -> int | None:
+def _bash_selfcheck(job: dict[str, Any]) -> int | None:
     """CC-234 startup self-check (operator condition 2026-10-11): reproduce the
     CLI Bash tool's tmp root — CLAUDE_CODE_TMPDIR || /tmp, then
     "claude-<uid>" (cli.js 2.1.88) — BEFORE the model starts: mkdir + a probe
@@ -924,7 +942,7 @@ def _bash_selfcheck(job: dict) -> int | None:
     return None
 
 
-def _hook_selfcheck(cfg, job: dict) -> int | None:
+def _hook_selfcheck(cfg: "Config", job: dict[str, Any]) -> int | None:
     """CC-236 startup self-check (operator condition 2026-10-11): every
     command hook registered in the project settings (.claude/settings.json)
     must resolve to a real executable file. Incident cc235 (operator trace
@@ -993,7 +1011,8 @@ def _hook_selfcheck(cfg, job: dict) -> int | None:
     return None
 
 
-async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
+async def run_continuous_session(cfg: "Config", run_state: "RunState",
+                                job: dict[str, Any], ticket_prompt: str,
                                 max_retries: int, plan: "SessionPlan") -> int:
     from claude_agent_sdk import ClaudeSDKClient
 
@@ -1092,8 +1111,8 @@ async def run_continuous_session(cfg, run_state, job: dict, ticket_prompt: str,
 # ==================================================================================
 # Processes, signals, and artifacts
 # ==================================================================================
-def _install_signal_handlers(run_state) -> None:
-    def handler(signum, _frame):
+def _install_signal_handlers(run_state: "RunState") -> None:
+    def handler(signum: int, _frame: "FrameType | None") -> "NoReturn":
         run_state.interrupted_rc = 128 + signum
         log(f"\nSIGNAL {signum}: Run interrupted. Stopping child processes...")
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
