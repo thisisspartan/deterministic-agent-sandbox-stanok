@@ -5,7 +5,14 @@
 target-version = "py311" # the Pod image / CI runtime floor (image-requirements.lock)
 
 [lint]
-# Default rule selection (E4, E7, E9, F): correctness only, no style wave.
+# Rule selection PINS the former default set (E4, E7, E9, F): correctness
+# only, no style wave. It is now declared explicitly: ruff's DEFAULT set
+# follows the tool version, so an unpinned config drifts with a tool bump —
+# the 2026-10-21 measurement report verified 278 findings on ruff 0.17.1
+# against this tree under the implicit defaults (the pinned 0.15.20 was
+# clean), and the same drift is a known failure class (Netbox #21497).
+# The explicit set makes the gate's behaviour version-independent.
+select = ["E4", "E7", "E9", "F"]
 
 [lint.per-file-ignores]
 # tests_harness carries three documented classes, all test-local:
