@@ -247,6 +247,43 @@ def test_docker_image_digest_matches():
         "image preflight failed: digest mismatch or runner unavailable"
 
 
+@_NO_DOCKER
+def test_image_cli_version_matches_packaged_version():
+    # SPEC-DOCTOR-CLI-VERSION-2026-10-22 (R4 intent closed, operator order
+    # 2026-10-22): the binary reachable as `claude` in the built image must
+    # RUN (I1) and name the version declared by the package.json next to
+    # that same binary (I2). The package.json path is resolved INSIDE the
+    # image from the claude executable itself (readlink) — no version
+    # literal and no /opt path here (canonical source: the packaged
+    # manifest, operator decision 2026-10-22). Scope, stated openly: this
+    # gates image-internal consistency and a runnable claude binary; the
+    # absolute version pin stays enforced by the setup.sh/Dockerfile SHA
+    # gates and the stanok.digest label (test_docker_image_digest_matches).
+    import re
+    image = os.environ.get("STANOK_DOCKER_IMAGE", "stanok-machine:latest")
+
+    def _probe(*argv):
+        # No ENTRYPOINT/CMD in the image (Dockerfile: deliberate) — the
+        # full command is passed, same pattern as gates.preflight_image.
+        p = subprocess.run(["docker", "run", "--rm", image, *argv],
+                           capture_output=True, text=True, timeout=60)
+        assert p.returncode == 0, (
+            f"docker run --rm {image} {argv[0]}... rc={p.returncode}: "
+            f"{(p.stdout + p.stderr)[-400:]}")
+        return p.stdout
+
+    reported = re.search(r"\d+\.\d+\.\d+", _probe("claude", "--version"))
+    assert reported, "claude --version printed no version token (I1)"
+    packaged = _probe("/bin/sh", "-c",
+                      'bin=$(readlink -f "$(command -v claude)"); '
+                      'node -e "console.log(require(process.argv[1]).version)" '
+                      '"$(dirname "$bin")/package.json"').strip()
+    assert packaged == reported.group(), (
+        f"image-internal version mismatch (I2): claude reports "
+        f"{reported.group()!r} but its packaged package.json declares "
+        f"{packaged!r}")
+
+
 # --- CC-231 (production cutover): k8s is the DEFAULT runtime ---------------
 # The worker/fresh template securityContext validation is NOT duplicated
 # here — it is pinned in test_k8s_manifests.py (primitive-first: one home

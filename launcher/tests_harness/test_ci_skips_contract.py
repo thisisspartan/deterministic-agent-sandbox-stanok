@@ -117,9 +117,10 @@ def _parent_repo_state():
 
 
 def test_published_skip_list_is_nodeid_contract():
-    # The published contract file must be exactly 10 entries in nodeid form
-    # (the count stays the secondary check per SPEC-CI-MINIMAL). Guarded in
-    # the published-parent layout only — outside it, skip, never vacuous.
+    # The published contract file must be exactly 11 entries in nodeid form
+    # (the count stays the secondary check per SPEC-CI-MINIMAL; 10 -> 11 on
+    # 2026-10-22 per SPEC-DOCTOR-CLI-VERSION-2026-10-22). Guarded in the
+    # published-parent layout only — outside it, skip, never vacuous.
     state = _parent_repo_state()
     if state != "present":
         pytest.skip(f"parent layout state {state!r} — the contract file lives "
@@ -129,8 +130,8 @@ def test_published_skip_list_is_nodeid_contract():
         pytest.fail("published parent has no .github/ci-expected-skips.txt")
     lines = [ln for ln in f.read_text(encoding="utf-8").splitlines()
              if ln.strip() and not ln.lstrip().startswith("#")]
-    assert len(lines) == 10, f"expected exactly 10 contract entries, got {len(lines)}"
-    assert len(set(lines)) == 10, "contract entries must be unique"
+    assert len(lines) == 11, f"expected exactly 11 contract entries, got {len(lines)}"
+    assert len(set(lines)) == 11, "contract entries must be unique"
     for ln in lines:
         path, _, name = ln.partition("::")
         assert path.endswith(".py") and name, \
